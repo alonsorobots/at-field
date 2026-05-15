@@ -56,6 +56,12 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.10",
 ]
+# Installed only on the release runner; pulls in a pile of build-time machinery
+# that we don't want forced on every contributor's `pip install -e .[dev]`.
+build = [
+    "pyinstaller>=6.10",
+    "pillow>=10.0",  # for scripts/gen_icons.py
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/atfield"]
