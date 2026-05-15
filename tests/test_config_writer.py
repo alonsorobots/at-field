@@ -16,6 +16,7 @@ from atfield.config import load_config
 from atfield.config_writer import (
     ConfigWriteError,
     materialize_default_config,
+    update_rule_field,
     update_rule_threshold,
     verify_roundtrip,
 )
@@ -194,3 +195,102 @@ class TestUpdateRuleThreshold:
         update_rule_threshold(config, "ram-pressure", 70.0)
         text = _read(config)
         assert text.index("threshold = 70.0") < text.index("threshold = 99.0")
+
+
+class TestUpdateRuleField:
+    """The generalized writer used by Settings sliders for window_s,
+    cooldown_s, action, and min_fraction_over. Each test starts from a
+    real on-disk config so we exercise the actual injection / replace
+    paths rather than relying on string fixtures.
+    """
+
+    def test_replaces_existing_window_seconds(self, tmp_path):
+        config = tmp_path / "config.toml"
+        materialize_default_config(config)
+        update_rule_field(config, "ram-pressure", "window_s", 45)
+        cfg = verify_roundtrip(config)
+        ram = next(r for r in cfg.rules if r.name == "ram-pressure")
+        assert ram.window_s == 45
+
+    def test_replaces_action(self, tmp_path):
+        config = tmp_path / "config.toml"
+        materialize_default_config(config)
+        update_rule_field(config, "ram-pressure", "action", "log")
+        cfg = verify_roundtrip(config)
+        ram = next(r for r in cfg.rules if r.name == "ram-pressure")
+        # `action` is loaded as a plain string at the rule level (the
+        # actuator constructs the ActionSpec). The on-disk text is the
+        # canonical assertion either way.
+        assert ram.action == "log"
+
+    def test_injects_cooldown_when_missing(self, tmp_path):
+        # User config doesn't include cooldown_s; writer should inject it
+        # into the block (defaults usually omit cooldown for the kill action).
+        config = tmp_path / "config.toml"
+        config.write_text(
+            "[[rules]]\n"
+            'name = "ram-pressure"\n'
+            'signal = "system.ram_used_percent"\n'
+            "threshold = 85.0\n"
+            "window_s = 60\n"
+            "min_fraction_over = 0.75\n"
+            'action = "kill"\n',
+            encoding="utf-8",
+        )
+        update_rule_field(config, "ram-pressure", "cooldown_s", 90)
+        text = _read(config)
+        assert "cooldown_s = 90" in text
+        cfg = verify_roundtrip(config)
+        ram = next(r for r in cfg.rules if r.name == "ram-pressure")
+        assert ram.cooldown_s == 90
+
+    def test_rejects_unknown_field(self, tmp_path):
+        config = tmp_path / "config.toml"
+        materialize_default_config(config)
+        with pytest.raises(ConfigWriteError) as exc:
+            update_rule_field(config, "ram-pressure", "name", "renamed")
+        assert "name" in str(exc.value)
+
+    def test_rejects_invalid_action(self, tmp_path):
+        config = tmp_path / "config.toml"
+        materialize_default_config(config)
+        with pytest.raises(ConfigWriteError) as exc:
+            update_rule_field(config, "ram-pressure", "action", "boom")
+        assert "kill" in str(exc.value)
+
+    def test_rejects_unknown_rule(self, tmp_path):
+        config = tmp_path / "config.toml"
+        materialize_default_config(config)
+        with pytest.raises(ConfigWriteError) as exc:
+            update_rule_field(config, "no-such-rule", "window_s", 30)
+        assert "no-such-rule" in str(exc.value)
+
+    def test_min_fraction_over_round_trips(self, tmp_path):
+        config = tmp_path / "config.toml"
+        materialize_default_config(config)
+        update_rule_field(config, "ram-pressure", "min_fraction_over", 0.5)
+        cfg = verify_roundtrip(config)
+        ram = next(r for r in cfg.rules if r.name == "ram-pressure")
+        assert ram.min_fraction_over == 0.5
+
+    def test_preserves_comments_during_field_update(self, tmp_path):
+        # Comments should survive a field update just like they do for
+        # threshold updates.
+        config = tmp_path / "config.toml"
+        config.write_text(
+            "# top of file\n"
+            "[[rules]]\n"
+            "# notes for ram-pressure\n"
+            'name = "ram-pressure"\n'
+            'signal = "system.ram_used_percent"\n'
+            "threshold = 85.0\n"
+            "window_s = 60   # tuned manually\n"
+            "min_fraction_over = 0.75\n"
+            'action = "kill"\n',
+            encoding="utf-8",
+        )
+        update_rule_field(config, "ram-pressure", "window_s", 90)
+        text = _read(config)
+        assert "# top of file" in text
+        assert "# notes for ram-pressure" in text
+        assert "window_s = 90   # tuned manually" in text

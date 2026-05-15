@@ -220,6 +220,50 @@ input[type="range"].atfield-range:focus::-webkit-slider-thumb {
 }
 .preset-pill:disabled { opacity: 0.5; cursor: wait; }
 
+/* Compact text-style inputs for the Advanced rule editors (window/cooldown/action).
+   Built on top of the brand surface palette so they sit naturally inside the
+   frosted rule cards without competing visually with the threshold slider. */
+.atfield-input {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 6px;
+  color: var(--color-text-primary);
+  font-size: 12px;
+  padding: 4px 8px;
+  line-height: 1.2;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.atfield-input:hover {
+  border-color: var(--color-accent);
+}
+.atfield-input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 22%, transparent);
+}
+.atfield-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* Strip the spinner buttons on number inputs -- in this UI they're always
+   misaligned with the right-aligned tabular-nums value. */
+.atfield-input[type="number"]::-webkit-inner-spin-button,
+.atfield-input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.atfield-input[type="number"] { -moz-appearance: textfield; }
+/* Selects pick up the same look but need a dropdown caret since we removed
+   the native one's default styling. */
+select.atfield-input {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%239ca3af' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  padding-right: 24px;
+}
+
 /* Tab nav (left rail). */
 .tab-rail-button {
   display: flex;

@@ -1,7 +1,9 @@
+import { useState } from "react";
 import type { EffectiveRuleView, RulesSnapshot } from "../lib/api";
 import { humanizeRule, humanizeRuleStatus, signalDisplayName } from "../lib/format";
 import RuleThresholdSlider from "../components/RuleThresholdSlider";
 import ProfilePresetRow from "../components/ProfilePresetRow";
+import AdvancedRuleControls from "../components/AdvancedRuleControls";
 
 interface Props {
   rules: RulesSnapshot | null;
@@ -102,6 +104,10 @@ function RuleCard({ r, onMutated }: { r: EffectiveRuleView; onMutated?: () => vo
   const title = RULE_TITLE[r.base_rule] ?? r.name;
   const desc = RULE_DESCRIPTION[r.base_rule];
   const triggering = r.verdict === "TRIGGER";
+  // Advanced controls are collapsed by default; the threshold slider IS
+  // the primary UI. Power users click to reveal window/cooldown/action
+  // editors. Per-card local state keeps each card's expansion independent.
+  const [showAdvanced, setShowAdvanced] = useState(false);
   return (
     <div
       className="frosted rounded-lg px-4 py-3 border"
@@ -148,17 +154,34 @@ function RuleCard({ r, onMutated }: { r: EffectiveRuleView; onMutated?: () => vo
 
       <div className="mt-1.5 flex items-center justify-between text-[11px]">
         <span className="text-[var(--color-text-tertiary)]">{humanizeRuleStatus(r)}</span>
-        {r.cooldown_remaining_s > 0.5 && (
-          <span className="text-[var(--color-warning)]">
-            cooldown {r.cooldown_remaining_s.toFixed(0)}s
-          </span>
-        )}
-        {r.triggers > 0 && r.cooldown_remaining_s <= 0.5 && (
-          <span className="text-[var(--color-text-tertiary)]">
-            {r.triggers} trigger{r.triggers === 1 ? "" : "s"} so far
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          {r.cooldown_remaining_s > 0.5 && (
+            <span className="text-[var(--color-warning)]">
+              cooldown {r.cooldown_remaining_s.toFixed(0)}s
+            </span>
+          )}
+          {r.triggers > 0 && r.cooldown_remaining_s <= 0.5 && (
+            <span className="text-[var(--color-text-tertiary)]">
+              {r.triggers} trigger{r.triggers === 1 ? "" : "s"} so far
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => setShowAdvanced((v) => !v)}
+            className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+            aria-expanded={showAdvanced}
+            aria-controls={`advanced-${r.name}`}
+          >
+            {showAdvanced ? "Hide advanced" : "Advanced…"}
+          </button>
+        </div>
       </div>
+
+      {showAdvanced && (
+        <div id={`advanced-${r.name}`}>
+          <AdvancedRuleControls rule={r} onPersisted={onMutated} />
+        </div>
+      )}
     </div>
   );
 }
