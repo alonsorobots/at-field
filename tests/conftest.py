@@ -20,7 +20,7 @@ _NS_PER_S = 1_000_000_000
 
 
 @pytest.fixture
-def make_sample() -> Callable[..., "Sample"]:
+def make_sample() -> Callable[..., Sample]:
     """Factory for :class:`atfield.signals.Sample` with sane defaults."""
     from atfield.signals import Sample
 

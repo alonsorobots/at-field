@@ -195,7 +195,7 @@ class LhmCollector:
         def walk(node: dict[str, Any], path_text: list[str], indices: list[int]) -> None:
             nonlocal gpu_idx, cpu_idx
             text = node.get("Text", "")
-            new_path = path_text + [text]
+            new_path = [*path_text, text]
             full_text = " / ".join(new_path)
 
             # Is this leaf a temperature sensor with a numeric value?
@@ -236,7 +236,7 @@ class LhmCollector:
                                 break
 
             for i, child in enumerate(node.get("Children", []) or []):
-                walk(child, new_path, indices + [i])
+                walk(child, new_path, [*indices, i])
 
         walk(root, [], [])
         return results

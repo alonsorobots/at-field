@@ -42,19 +42,20 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import dataclass, field
-from typing import Any, Iterable, Protocol
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from atfield.config import AtFieldConfig
 from atfield.policy import Action
 
 __all__ = [
+    "Actuator",
+    "KillReport",
+    "KilledProcess",
     "ProcInfo",
     "ProcessProvider",
     "PsutilProvider",
-    "KilledProcess",
-    "KillReport",
-    "Actuator",
     "find_kill_root",
 ]
 
@@ -395,10 +396,7 @@ class Actuator:
     def _is_killable(self, info: ProcInfo) -> bool:
         if info.pid == self._own_pid:
             return False
-        nm = info.name.lower()
-        if nm in self._never:
-            return False
-        return True
+        return info.name.lower() not in self._never
 
     def _pick_offender(self, candidate_pids: Iterable[int] | None) -> int | None:
         """Pick the PID we treat as the trigger.

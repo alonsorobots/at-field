@@ -46,11 +46,11 @@ from atfield.policy import PolicyEngine
 from atfield.signals import Sample
 
 __all__ = [
-    "run_service",
-    "main",
-    "PAUSE_SENTINEL_FILENAME",
-    "HEARTBEAT_FILENAME",
     "DEFAULT_CONFIG_PATH",
+    "HEARTBEAT_FILENAME",
+    "PAUSE_SENTINEL_FILENAME",
+    "main",
+    "run_service",
 ]
 
 

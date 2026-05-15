@@ -49,10 +49,10 @@ from typing import Protocol, runtime_checkable
 from atfield.signals import Sample
 
 __all__ = [
+    "Collector",
+    "CollectorError",
     "HealthState",
     "ProbeResult",
-    "CollectorError",
-    "Collector",
 ]
 
 

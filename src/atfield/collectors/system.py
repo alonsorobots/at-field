@@ -122,7 +122,7 @@ class SystemCollector:
                 signals=_SIGNALS,
                 metadata=meta,
             )
-        except Exception as exc:  # noqa: BLE001 -- probe must not raise
+        except Exception as exc:
             self._health = HealthState.FAILED
             return ProbeResult(
                 available=False,
