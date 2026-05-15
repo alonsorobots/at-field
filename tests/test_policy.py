@@ -19,6 +19,7 @@ import math
 import pytest
 
 from atfield.config import (
+    ApiConfig,
     AtFieldConfig,
     GeneralConfig,
     KillConfig,
@@ -46,6 +47,7 @@ def _cfg_with_rule(**rule_overrides) -> AtFieldConfig:
         general=GeneralConfig(),
         targeting=TargetingConfig(),
         kill=KillConfig(),
+        api=ApiConfig(),
         rules=(RuleConfig(**base),),
     )
 
