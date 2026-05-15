@@ -1,11 +1,4 @@
-import { useState } from "react";
-
 import type { HealthSnapshot } from "../lib/api";
-import {
-  POLL_INTERVAL_DEFAULT_MS,
-  getPollIntervalMs,
-  setPollIntervalMs,
-} from "../lib/preferences";
 
 interface Props {
   health: HealthSnapshot | null;
@@ -40,8 +33,6 @@ export default function StatusScreen({ health, reachable }: Props) {
           }
         />
       </section>
-
-      <PreferencesSection />
 
       {/* Collectors */}
       <section>
@@ -79,94 +70,6 @@ export default function StatusScreen({ health, reachable }: Props) {
         </div>
       </section>
     </div>
-  );
-}
-
-/**
- * Lets the user pick how often the dashboard polls the watchdog API.
- *
- * The watchdog itself ticks at 1 Hz; polling faster than that just
- * returns the same sample twice with extra CPU on both sides. We default
- * to 1 s and offer a 250 ms / 500 ms / 1 s / 2 s / 5 s / 10 s ladder so
- * users can choose between snappier sparklines and lower battery drain.
- *
- * Changes apply on the next dashboard reopen (we don't tear down the
- * polling hooks mid-flight). The "applies on next open" hint is a small
- * cost in exchange for keeping the polling logic dead simple.
- */
-function PreferencesSection() {
-  const [intervalMs, setIntervalMs] = useState<number>(getPollIntervalMs());
-  const [savedAt, setSavedAt] = useState<number | null>(null);
-
-  const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const next = setPollIntervalMs(Number.parseInt(e.target.value, 10));
-    setIntervalMs(next);
-    setSavedAt(Date.now());
-  };
-
-  const choices: Array<{ ms: number; label: string }> = [
-    { ms: 250, label: "0.25 s — snappy (more CPU)" },
-    { ms: 500, label: "0.5 s" },
-    { ms: 1000, label: "1 s — recommended (default)" },
-    { ms: 2000, label: "2 s" },
-    { ms: 5000, label: "5 s" },
-    { ms: 10000, label: "10 s — battery saver" },
-  ];
-
-  return (
-    <section>
-      <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
-        Preferences
-      </h2>
-      <div className="frosted rounded-lg border border-[var(--color-border)] p-4 flex items-start gap-3">
-        <div className="flex-1">
-          <label
-            htmlFor="poll-interval"
-            className="text-sm font-medium block"
-          >
-            Refresh rate
-          </label>
-          <p className="text-xs text-[var(--color-text-secondary)] mt-1 leading-relaxed">
-            How often the dashboard re-queries the watchdog. Faster updates
-            make sparklines feel snappier; slower updates use less power.
-            The watchdog itself runs at 1 Hz, so going below 1 s mostly
-            just polls the same sample twice.
-            {intervalMs !== POLL_INTERVAL_DEFAULT_MS && (
-              <>
-                {" "}<button
-                  type="button"
-                  className="underline text-[var(--color-accent)]"
-                  onClick={() => {
-                    setPollIntervalMs(POLL_INTERVAL_DEFAULT_MS);
-                    setIntervalMs(POLL_INTERVAL_DEFAULT_MS);
-                    setSavedAt(Date.now());
-                  }}
-                >
-                  Reset to default
-                </button>
-              </>
-            )}
-          </p>
-        </div>
-        <div className="flex flex-col items-end gap-1">
-          <select
-            id="poll-interval"
-            value={intervalMs}
-            onChange={handleChange}
-            className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded px-2 py-1 text-sm text-[var(--color-text-primary)]"
-          >
-            {choices.map((c) => (
-              <option key={c.ms} value={c.ms}>{c.label}</option>
-            ))}
-          </select>
-          {savedAt && (
-            <span className="text-[10px] text-[var(--color-text-tertiary)]">
-              Applies next time you open the dashboard
-            </span>
-          )}
-        </div>
-      </div>
-    </section>
   );
 }
 
