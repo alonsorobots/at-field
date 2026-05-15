@@ -8,6 +8,7 @@ import SignalDetailScreen from "./screens/SignalDetailScreen";
 import RulesScreen from "./screens/RulesScreen";
 import EventsScreen from "./screens/EventsScreen";
 import SetupScreen from "./screens/SetupScreen";
+import PrefsScreen from "./screens/PrefsScreen";
 import { api, deriveTrayStatus } from "./lib/api";
 import { usePolling } from "./lib/hooks";
 import { getPollIntervalMs } from "./lib/preferences";
@@ -17,6 +18,7 @@ const TABS = [
   { id: "rules", label: "Rules" },
   { id: "events", label: "Events" },
   { id: "status", label: "Status" },
+  { id: "prefs", label: "Prefs" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
 
@@ -137,6 +139,7 @@ export default function App() {
               {!showSetup && tab === "status" && (
                 <StatusScreen health={healthQ.data} reachable={healthQ.reachable} />
               )}
+              {!showSetup && tab === "prefs" && <PrefsScreen />}
             </motion.div>
           </AnimatePresence>
         </main>

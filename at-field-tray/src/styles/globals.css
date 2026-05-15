@@ -10,7 +10,11 @@
 @import "tailwindcss";
 
 @theme {
-  /* ── VideoBricks palette ──────────────────────────────────────────── */
+  /* ── Default palette = "Nerv" theme (lifted from VideoBricks) ──────
+     These values feed Tailwind's utility generator AND the runtime CSS
+     vars. Each Eva theme below overrides the same variables at
+     :root[data-theme="..."], which lets us swap palettes without
+     re-rendering the React tree. */
   --color-accent: #a78bfa;          /* lavender — live values, focus, links */
   --color-accent-hover: #8b5cf6;
   --color-accent-light: #271e36;
@@ -29,6 +33,156 @@
   --color-bg-secondary: #16101a;
   --color-bg-neutral: #1a1a1d;
   --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * EVA color schemes -- selectable via Prefs tab.
+ *
+ * Each block overrides every theme-relevant CSS variable so that surfaces,
+ * accents, sparklines, status dots, and chart strokes all shift together.
+ * Hex codes for EVA-01 are derived from official series materials
+ * (#765899 / #41bb42 / #e8790c, see brand/README.md sources); the rest
+ * are tuned from common reference imagery to read well on a dark UI
+ * while staying recognizable.
+ *
+ * Why CSS-only (no per-theme JS): the React tree never has to know which
+ * theme is active. Set data-theme on <html> and every descendant repaints
+ * with the new variable values on the next style flush.
+ * ───────────────────────────────────────────────────────────────────── */
+
+/* "Nerv" -- the default. Explicit selector kept so the picker can
+   highlight it as the active choice without fighting the @theme block. */
+:root[data-theme="nerv"] {
+  --color-accent: #a78bfa;
+  --color-accent-hover: #8b5cf6;
+  --color-accent-light: #271e36;
+  --color-surface: #1f1c24;
+  --color-surface-hover: #272530;
+  --color-surface-raised: #292431;
+  --color-border: #292431;
+  --color-border-strong: #47434f;
+  --color-text-primary: #f0eff2;
+  --color-text-secondary: #a5a2ad;
+  --color-text-tertiary: #6b6775;
+  --color-danger: #f87171;
+  --color-success: #4ade80;
+  --color-warning: #fbbf24;
+  --color-bg: #1b141f;
+  --color-bg-secondary: #16101a;
+  --color-bg-neutral: #1a1a1d;
+}
+
+/* EVA-01 (Test Type, Shinji) -- the iconic purple/green/orange combo.
+   Accent is the green (Eva-01's chest plate / face); warning rides the
+   shoulder orange. */
+:root[data-theme="eva-01"] {
+  --color-accent: #41bb42;
+  --color-accent-hover: #57d058;
+  --color-accent-light: rgba(65, 187, 66, 0.18);
+  --color-surface: #221330;
+  --color-surface-hover: #2c1840;
+  --color-surface-raised: #2f1944;
+  --color-border: #2c1840;
+  --color-border-strong: #553584;
+  --color-text-primary: #f0eff2;
+  --color-text-secondary: #c5b6dc;
+  --color-text-tertiary: #8a7ba0;
+  --color-danger: #f87171;
+  --color-success: #41bb42;
+  --color-warning: #e8790c;
+  --color-bg: #1a0f24;
+  --color-bg-secondary: #150a1f;
+  --color-bg-neutral: #1d1228;
+}
+
+/* EVA-00 (Prototype, Rei -- yellow incarnation). Accent is the
+   prototype yellow #f6e201 (also the official series brand yellow).
+   Danger leans into the EVA-00 reddish-orange. */
+:root[data-theme="eva-00"] {
+  --color-accent: #f6e201;
+  --color-accent-hover: #ffea33;
+  --color-accent-light: rgba(246, 226, 1, 0.16);
+  --color-surface: #2a2300;
+  --color-surface-hover: #332b00;
+  --color-surface-raised: #3d3300;
+  --color-border: #2c2400;
+  --color-border-strong: #6e5e00;
+  --color-text-primary: #fff8c8;
+  --color-text-secondary: #d4c97a;
+  --color-text-tertiary: #8a8253;
+  --color-danger: #f66e25;
+  --color-success: #41bb42;
+  --color-warning: #ffaa00;
+  --color-bg: #1a1500;
+  --color-bg-secondary: #120f00;
+  --color-bg-neutral: #1d1800;
+}
+
+/* EVA-02 (Production Model, Asuka -- bright red). Accent is the
+   Eva-02 red. Warning rides Asuka's yellow visor. */
+:root[data-theme="eva-02"] {
+  --color-accent: #d93b48;
+  --color-accent-hover: #ed4f5c;
+  --color-accent-light: rgba(217, 59, 72, 0.18);
+  --color-surface: #2a0c0e;
+  --color-surface-hover: #350f12;
+  --color-surface-raised: #3d1115;
+  --color-border: #2e1012;
+  --color-border-strong: #6e2228;
+  --color-text-primary: #f5e9eb;
+  --color-text-secondary: #d4a5aa;
+  --color-text-tertiary: #8a6b6e;
+  --color-danger: #ff3b3b;
+  --color-success: #41bb42;
+  --color-warning: #f6e201;
+  --color-bg: #1f0708;
+  --color-bg-secondary: #150405;
+  --color-bg-neutral: #210a0b;
+}
+
+/* EVA-03 (Production, Toji -- Bardiel-possessed dark gray). Accent is
+   the Bardiel cyan. Surfaces stay extremely cool/neutral. */
+:root[data-theme="eva-03"] {
+  --color-accent: #4da8da;
+  --color-accent-hover: #6cbae8;
+  --color-accent-light: rgba(77, 168, 218, 0.16);
+  --color-surface: #1e1f24;
+  --color-surface-hover: #25262d;
+  --color-surface-raised: #2a2c33;
+  --color-border: #25262d;
+  --color-border-strong: #44464f;
+  --color-text-primary: #f0eff2;
+  --color-text-secondary: #aaaab2;
+  --color-text-tertiary: #6e6e78;
+  --color-danger: #f87171;
+  --color-success: #4ade80;
+  --color-warning: #fbbf24;
+  --color-bg: #15161a;
+  --color-bg-secondary: #101115;
+  --color-bg-neutral: #18191e;
+}
+
+/* EVA-04 (lost, never recovered). Tan/olive desert palette --
+   reference imagery is sparse so this leans on the few extant
+   sketches/figures. Reads as a warm, faded biological color. */
+:root[data-theme="eva-04"] {
+  --color-accent: #c9b27a;
+  --color-accent-hover: #d8c08b;
+  --color-accent-light: rgba(201, 178, 122, 0.18);
+  --color-surface: #2c2519;
+  --color-surface-hover: #342c1f;
+  --color-surface-raised: #3a3023;
+  --color-border: #2a2317;
+  --color-border-strong: #5a4a30;
+  --color-text-primary: #f5ecd9;
+  --color-text-secondary: #c2b690;
+  --color-text-tertiary: #8a7e60;
+  --color-danger: #d96c4a;
+  --color-success: #80c060;
+  --color-warning: #d4a44b;
+  --color-bg: #1f1a10;
+  --color-bg-secondary: #17130a;
+  --color-bg-neutral: #221c12;
 }
 
 /* ── Base ─────────────────────────────────────────────────────────── */
@@ -219,6 +373,30 @@ input[type="range"].atfield-range:focus::-webkit-slider-thumb {
   border-color: var(--color-accent);
 }
 .preset-pill:disabled { opacity: 0.5; cursor: wait; }
+
+/* Theme picker tile (Prefs tab). One per Eva color scheme. The active
+   tile gets a stronger border + accent glow so the choice reads at a
+   glance. Hover bumps the border without committing. */
+.theme-tile {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.theme-tile:hover {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-hover);
+}
+.theme-tile[data-active="true"] {
+  border-color: var(--color-accent);
+  background: var(--color-surface-hover);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
 
 /* Compact text-style inputs for the Advanced rule editors (window/cooldown/action).
    Built on top of the brand surface palette so they sit naturally inside the
