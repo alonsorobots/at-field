@@ -737,7 +737,13 @@ def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
 
         def _send_cors_headers(self) -> None:
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            # PATCH is required for the slider/advanced-controls edits;
+            # browsers send an OPTIONS preflight for it and refuse to
+            # follow through if PATCH isn't in this allow list.
+            self.send_header(
+                "Access-Control-Allow-Methods",
+                "GET, POST, PATCH, OPTIONS",
+            )
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.send_header("Access-Control-Max-Age", "86400")
 
