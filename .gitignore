@@ -41,8 +41,10 @@ events.jsonl
 nssm.exe
 resources/LibreHardwareMonitor/
 
-# PyInstaller
-*.spec
+# PyInstaller -- generated specs only. Keep our authored spec under packaging/.
+/*.spec
+/build/
+/dist/
 
 # Planning / handoff docs — kept local, not in git history
 /PLANNING.md
