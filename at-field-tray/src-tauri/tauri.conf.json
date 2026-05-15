@@ -40,6 +40,24 @@
       "icons/128x128.png",
       "icons/icon.ico"
     ],
+    "resources": {
+      "../../dist/atfield/atf.exe": "atfield/atf.exe",
+      "../../dist/atfield/atfield-service.exe": "atfield/atfield-service.exe",
+      "../../dist/atfield/_internal": "atfield/_internal",
+      "../../dist/atfield/_internal/scripts": "atfield/scripts",
+      "../../dist/atfield/LibreHardwareMonitor.exe": "atfield/LibreHardwareMonitor.exe",
+      "../../dist/atfield/LibreHardwareMonitor.exe.config": "atfield/LibreHardwareMonitor.exe.config",
+      "../../dist/atfield/LibreHardwareMonitor.config": "atfield/LibreHardwareMonitor.config",
+      "../../dist/atfield/LibreHardwareMonitorLib.dll": "atfield/LibreHardwareMonitorLib.dll",
+      "../../dist/atfield/LibreHardwareMonitorLib.xml": "atfield/LibreHardwareMonitorLib.xml",
+      "../../dist/atfield/Aga.Controls.dll": "atfield/Aga.Controls.dll",
+      "../../dist/atfield/HidSharp.dll": "atfield/HidSharp.dll",
+      "../../dist/atfield/Microsoft.Win32.TaskScheduler.dll": "atfield/Microsoft.Win32.TaskScheduler.dll",
+      "../../dist/atfield/Newtonsoft.Json.dll": "atfield/Newtonsoft.Json.dll",
+      "../../dist/atfield/OxyPlot.dll": "atfield/OxyPlot.dll",
+      "../../dist/atfield/OxyPlot.WindowsForms.dll": "atfield/OxyPlot.WindowsForms.dll",
+      "../../dist/atfield/System.CodeDom.dll": "atfield/System.CodeDom.dll"
+    },
     "windows": {
       "nsis": {
         "installMode": "currentUser"
