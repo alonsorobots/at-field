@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod autostart;
+#[cfg(windows)]
+mod service_installer;
 
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -245,9 +247,21 @@ fn ureq_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Option<T> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_notification::init());
+
+    // Service-installer commands are only useful on Windows; the rest of
+    // the tray builds (and runs in dev mode) on Linux/macOS for editor
+    // ergonomics. On non-Windows we simply don't expose the commands.
+    #[cfg(windows)]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        service_installer::service_status,
+        service_installer::install_service,
+        service_installer::uninstall_service,
+    ]);
+
+    builder
         .setup(|app| {
             // Build the tray menu.
             let show_item = MenuItem::with_id(app, "show", "Show Dashboard", true, None::<&str>)?;
