@@ -1,0 +1,5 @@
+# Vendor LHM binaries are fetched at build time, not committed.
+# scripts/fetch_lhm.ps1 populates the parent directory.
+*
+!.gitignore
+!README.md

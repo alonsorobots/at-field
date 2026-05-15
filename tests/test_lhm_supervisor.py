@@ -124,7 +124,12 @@ def _wait_until(predicate, timeout: float = 2.0, interval: float = 0.02) -> bool
 
 
 class TestSpawnedArgs:
-    def test_spawn_uses_configured_executable_and_port(self, tmp_path):
+    def test_spawn_uses_configured_executable(self, tmp_path):
+        """LHM 0.9.x doesn't accept CLI flags for the web server -- it
+        reads them from LibreHardwareMonitor.config in its own dir.
+        The supervisor therefore spawns LHM with no extra arguments by
+        default; the bundled config file is what makes the web server
+        come up on the port AT-Field expects."""
         spawner = _ScriptedSpawner()
         spawner.script.append(_FakeProc(exit_code=None, linger_until_terminated=True))
         cfg = _config(tmp_path)
@@ -132,10 +137,11 @@ class TestSpawnedArgs:
         sup.start()
         try:
             assert spawner.wait_for_spawn(2.0)
-            assert spawner.spawn_calls[0][0] == str(cfg.executable)
-            assert "--server" in spawner.spawn_calls[0]
-            assert "--port" in spawner.spawn_calls[0]
-            assert "8085" in spawner.spawn_calls[0]
+            args = spawner.spawn_calls[0]
+            assert args[0] == str(cfg.executable)
+            # Without extra_args, no other CLI flags are passed -- the
+            # config file owns everything.
+            assert len(args) == 1
         finally:
             sup.stop()
 
@@ -153,8 +159,10 @@ class TestSpawnedArgs:
         try:
             assert spawner.wait_for_spawn(2.0)
             args = spawner.spawn_calls[0]
+            # extra_args is appended verbatim; supervisor doesn't pass
+            # the configured port as a CLI flag (LHM 0.9.x reads it from
+            # LibreHardwareMonitor.config instead).
             assert args[-2:] == ["--config", "custom.xml"]
-            assert "9090" in args
         finally:
             sup.stop()
 
