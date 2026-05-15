@@ -150,6 +150,12 @@ class KillConfig:
     mode: Literal["graceful", "aggressive"] = "graceful"
     grace_seconds: int = 5
     post_kill_cooldown_seconds: int = 60
+    # Default duration (seconds) for the ``throttle`` action: the
+    # actuator suspends the offending process tree for this long, then
+    # resumes it. Long enough that a thermal spike has time to dissipate
+    # (~15-30s), short enough that the workload doesn't notice it as
+    # anything but a brief stall. Per-rule overrides can be added later.
+    throttle_duration_seconds: int = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,7 +422,7 @@ def _parse_kill(raw: Any, base: KillConfig, source: str) -> KillConfig:
     table = _require_table(raw, "kill", source)
     _check_unknown_keys(
         table,
-        {"mode", "grace_seconds", "post_kill_cooldown_seconds"},
+        {"mode", "grace_seconds", "post_kill_cooldown_seconds", "throttle_duration_seconds"},
         "kill",
         source,
     )
@@ -439,6 +445,16 @@ def _parse_kill(raw: Any, base: KillConfig, source: str) -> KillConfig:
                 "kill.post_kill_cooldown_seconds",
                 source,
                 minimum=0,
+            ),
+        )
+    if "throttle_duration_seconds" in table:
+        out = replace(
+            out,
+            throttle_duration_seconds=_as_int(
+                table["throttle_duration_seconds"],
+                "kill.throttle_duration_seconds",
+                source,
+                minimum=1,
             ),
         )
     return out
