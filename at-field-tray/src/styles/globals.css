@@ -1,0 +1,163 @@
+/*
+ * AT-Field tray styling.
+ *
+ * Palette + base styles lifted from VideoBricks
+ * (../../VideoBricks/src/styles/globals.css). The dark-purple theme is a
+ * good fit for a calm, attentive watchdog UI; small AT-Field-specific
+ * additions live below the lifted block.
+ */
+
+@import "tailwindcss";
+
+@theme {
+  /* ── VideoBricks palette ──────────────────────────────────────────── */
+  --color-accent: #a78bfa;          /* lavender — live values, focus, links */
+  --color-accent-hover: #8b5cf6;
+  --color-accent-light: #271e36;
+  --color-surface: #1f1c24;         /* card backgrounds */
+  --color-surface-hover: #272530;
+  --color-surface-raised: #292431;  /* elevated controls */
+  --color-border: #292431;
+  --color-border-strong: #47434f;
+  --color-text-primary: #f0eff2;
+  --color-text-secondary: #a5a2ad;
+  --color-text-tertiary: #6b6775;
+  --color-danger: #f87171;          /* kill action red */
+  --color-success: #4ade80;         /* HEALTHY / green dot */
+  --color-warning: #fbbf24;         /* DEGRADED / paused yellow */
+  --color-bg: #1b141f;              /* page background, near-black */
+  --color-bg-secondary: #16101a;
+  --color-bg-neutral: #1a1a1d;
+  --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+/* ── Base ─────────────────────────────────────────────────────────── */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+  overflow: hidden;
+  background-color: var(--color-bg);
+  color: var(--color-text-primary);
+}
+
+button:focus { outline: none; }
+input[type="text"], input[type="number"] { user-select: text; }
+
+/* ── Scrollbar ────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #47434f; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #5a5664; }
+
+/* ── Slider ───────────────────────────────────────────────────────── */
+input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  height: 4px; background: #35313e; border-radius: 2px; outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--color-accent); cursor: pointer;
+  border: 2px solid var(--color-surface);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  transition: transform 0.1s;
+}
+input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.15); background: #c4b5fd; }
+input[type="range"]::-webkit-slider-thumb:active { transform: scale(1.05); }
+
+/* ── Checkbox ─────────────────────────────────────────────────────── */
+input[type="checkbox"] {
+  -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px;
+  border: 1.5px solid var(--color-border-strong);
+  border-radius: 3px; background-color: transparent;
+  cursor: pointer; position: relative; transition: all 0.15s ease;
+}
+input[type="checkbox"]:checked {
+  background-color: rgb(68, 56, 98);
+  border-color: rgb(68, 56, 98);
+}
+input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute; left: 4px; top: 1px; width: 4px; height: 8px;
+  border: solid rgb(154, 133, 203); border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+input[type="checkbox"]:hover { border-color: var(--color-accent); }
+input[type="checkbox"]:focus { outline: none; box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.3); }
+
+/* ── Frosted panel surface ────────────────────────────────────────── */
+.frosted { background-color: var(--color-surface); }
+
+/* ─────────────────────────────────────────────────────────────────── */
+/* AT-Field-specific additions                                          */
+/* ─────────────────────────────────────────────────────────────────── */
+
+/* Status dot used in tray menu, status bar, collector cards. Color
+   driven by the `data-status` attribute so a single CSS rule covers all
+   four states the tray icon can be in. */
+.dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 8px;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.25) inset;
+}
+.dot[data-status="healthy"]  { background: var(--color-success); }
+.dot[data-status="degraded"] { background: var(--color-warning); }
+.dot[data-status="alerting"] { background: var(--color-danger); }
+.dot[data-status="down"]     { background: var(--color-text-tertiary); }
+
+/* Verdict pill for rule cards. */
+.verdict-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.verdict-pill[data-verdict="TRIGGER"]      { background: rgba(248, 113, 113, 0.18); color: var(--color-danger); }
+.verdict-pill[data-verdict="BELOW"]        { background: rgba(74, 222, 128, 0.14);  color: var(--color-success); }
+.verdict-pill[data-verdict="INSUFFICIENT"] { background: rgba(165, 162, 173, 0.14); color: var(--color-text-secondary); }
+
+/* Sparkline canvas wrapper -- 80x24 by default, can override per use. */
+.sparkline {
+  display: block;
+  width: 100%;
+  height: 32px;
+}
+
+/* Tab nav (left rail). */
+.tab-rail-button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border: none;
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.tab-rail-button:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+.tab-rail-button[data-active="true"] {
+  background: var(--color-accent-light);
+  color: var(--color-text-primary);
+}
