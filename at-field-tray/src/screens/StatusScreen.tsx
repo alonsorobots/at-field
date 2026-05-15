@@ -7,16 +7,7 @@ interface Props {
 
 export default function StatusScreen({ health, reachable }: Props) {
   if (!reachable || !health) {
-    return (
-      <div className="p-6">
-        <div className="text-base font-semibold mb-2">Service unreachable</div>
-        <div className="text-sm text-[var(--color-text-secondary)] leading-relaxed">
-          The AT-Field watchdog isn't responding on http://127.0.0.1:8765/.
-          Check that the Windows service <code className="font-mono">atfield-watchdog</code> is
-          running, or run <code className="font-mono">atf run</code> in a terminal for foreground mode.
-        </div>
-      </div>
-    );
+    return <ServiceUnreachable />;
   }
 
   const upHours = (health.uptime_s / 3600).toFixed(1);
@@ -91,6 +82,85 @@ function Stat({ label, value, muted }: { label: string; value: string; muted?: b
       <div className={`text-lg font-semibold mt-0.5 ${muted ? "text-[var(--color-text-secondary)]" : ""}`}>
         {value}
       </div>
+    </div>
+  );
+}
+
+function ServiceUnreachable() {
+  return (
+    <div className="p-6 space-y-5 overflow-y-auto h-full">
+      <div>
+        <div className="flex items-center gap-2.5 mb-2">
+          <span className="dot" data-status="down" />
+          <div className="text-base font-semibold">AT-Field service is unreachable</div>
+        </div>
+        <div className="text-sm text-[var(--color-text-secondary)] leading-relaxed">
+          The dashboard is running, but it can't reach the watchdog at{" "}
+          <code className="font-mono text-[var(--color-text-primary)]">http://127.0.0.1:8765/</code>.
+          That usually means the service isn't installed yet, or it's stopped.
+        </div>
+      </div>
+
+      <section>
+        <div className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+          Option 1 — install as a Windows service (recommended)
+        </div>
+        <div className="frosted rounded-lg border border-[var(--color-border)] p-4 space-y-2">
+          <div className="text-sm text-[var(--color-text-secondary)] leading-relaxed">
+            Runs in the background, starts at boot, watches even when no user is logged in. Requires admin once.
+          </div>
+          <CopyBlock>{"pip install atfield\natf install"}</CopyBlock>
+          <div className="text-[11px] text-[var(--color-text-tertiary)]">
+            Run from an <span className="text-[var(--color-text-secondary)]">elevated PowerShell</span>.
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+          Option 2 — try it in a terminal first
+        </div>
+        <div className="frosted rounded-lg border border-[var(--color-border)] p-4 space-y-2">
+          <div className="text-sm text-[var(--color-text-secondary)] leading-relaxed">
+            Foreground mode. Same engine, no service install. Quit with Ctrl-C.
+          </div>
+          <CopyBlock>{"atf run"}</CopyBlock>
+        </div>
+      </section>
+
+      <section>
+        <div className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+          Already installed?
+        </div>
+        <div className="text-sm text-[var(--color-text-secondary)] leading-relaxed">
+          Check the service status with <code className="font-mono text-[var(--color-text-primary)]">atf status</code>,
+          or restart it from <code className="font-mono text-[var(--color-text-primary)]">services.msc</code>{" "}
+          (look for <span className="text-[var(--color-text-primary)]">AT-Field Watchdog</span>). The dashboard
+          reconnects automatically once the service comes back up.
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function CopyBlock({ children }: { children: string }) {
+  const handleCopy = () => {
+    navigator.clipboard.writeText(children).catch(() => {});
+  };
+  return (
+    <div className="relative">
+      <pre className="bg-[var(--color-bg-secondary)] rounded-md px-3 py-2 text-xs font-mono text-[var(--color-text-primary)] overflow-x-auto">
+        {children}
+      </pre>
+      <button
+        onClick={handleCopy}
+        className="absolute top-1.5 right-1.5 px-2 py-0.5 text-[10px] rounded
+                   bg-[var(--color-surface-raised)] text-[var(--color-text-secondary)]
+                   hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] transition"
+        title="Copy to clipboard"
+      >
+        Copy
+      </button>
     </div>
   );
 }

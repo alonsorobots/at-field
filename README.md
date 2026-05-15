@@ -2,9 +2,30 @@
 
 > Always-on Windows hardware watchdog for AI workloads. Monitors NVIDIA GPU and VRAM temperatures, GPU memory usage, system RAM, pagefile, and CPU package temperature — and kills runaway Python / PyTorch processes **before** they damage your hardware. Runs as a Windows Service. Tolerates load-time spikes via sustained-window thresholds.
 
-> **Status:** pre-release, implementation in progress on `main`.
+> **Status:** v0.1 (CLI + service) is implementation-complete on `main`; v0.2 adds a Tauri tray app + dashboard ([at-field-tray/](at-field-tray/)) and a single-installer `.exe`.
 
 In *Neon Genesis Evangelion*, an **AT Field** is an absolute defensive barrier that prevents catastrophic damage to a high-power system. Here it's recontextualized as a backronym — **A**bsolute **T**hermal-and-memory **Field** — a Python-aware Windows service that intercepts the AI jobs trying to melt your rig.
+
+## Two pieces, one tool
+
+```
+┌────────────────────────────────┐          ┌─────────────────────────────────┐
+│  AT-Field Watchdog Service     │          │  AT-Field Tray + Dashboard      │
+│  Python, NSSM, LocalSystem     │ ◄──HTTP──│  Tauri (Rust + React),          │
+│  Always-on, no UI              │  loopback │  user-mode, optional            │
+│  src/atfield/                  │   :8765   │  at-field-tray/                 │
+└────────────────────────────────┘          └─────────────────────────────────┘
+```
+
+The **service** (this repo, `src/atfield/`) is the engine — it does all the
+sensing, deciding, and killing. It runs as a Windows Service so it stays alive
+without a logged-in user.
+
+The **tray app** ([at-field-tray/](at-field-tray/)) is a thin lens over the
+service. It puts a status dot in your system tray (green / yellow / red /
+gray), pops open a dashboard with live signal sparklines and recent events,
+and gives you a one-click pause toggle. It's optional — the service works
+fine headless.
 
 ## Project goals
 
