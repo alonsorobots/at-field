@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import type { AuditEvent } from "../lib/api";
 import { extractScriptName } from "../lib/format";
 import { usePolling } from "../lib/hooks";
+import { getPollIntervalMs } from "../lib/preferences";
 
 interface Props {
   /** Bumped by the global refresh button so the screen re-fetches. */
@@ -25,7 +26,13 @@ const EVENT_COLORS: Record<string, string> = {
  * here without grep-ing events.jsonl by hand".
  */
 export default function EventsScreen({ refreshGen }: Props) {
-  const { data, reachable, refresh } = usePolling(() => api.events({ limit: 200 }), 2000);
+  // Events refresh at half the dashboard's general poll rate (audit lines
+  // append on the order of seconds, not milliseconds, so polling them as
+  // fast as live signals is wasteful). Floor at 1 s so users who picked
+  // 250 ms for sparkline freshness don't hammer this endpoint too hard.
+  const baseMs = getPollIntervalMs();
+  const eventsPollMs = Math.max(1000, baseMs * 2);
+  const { data, reachable, refresh } = usePolling(() => api.events({ limit: 200 }), eventsPollMs);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
 
   useEffect(() => {
