@@ -239,67 +239,36 @@ export function formatTimeOfDay(unixSeconds: number): string {
 //   * Brand color recognition matters: if the line turns orange, the user
 //     should immediately associate "AT-Field is paying attention here".
 //
-// To swap palette, change ACTIVE_RAMP below. The two alternatives
-// preserve the same shape (cool → brand → danger) so callers don't care.
+// The ramp itself is theme-owned -- defined per Eva color scheme in
+// lib/theme.ts. getActiveRamp() looks up the active scheme's ramp by
+// reading data-theme on <html>, which setTheme() stamps. This commit
+// replaced the previous module-level RAMP_BRAND constant; the Nerv
+// theme's ramp is byte-identical to RAMP_BRAND, so existing renders
+// don't visually change unless the user picks a different theme.
 
-const RAMP_BRAND: [number, number, number][] = [
-  [58, 50, 64],     // 0.000  warm slate (matches bg tint)
-  [76, 64, 76],     // 0.143  dim mauve-gray
-  [102, 76, 76],    // 0.286  dim brown-gray
-  [138, 88, 64],    // 0.429  dim warm taupe
-  [184, 100, 48],   // 0.571  faded amber
-  [222, 116, 38],   // 0.714  warm orange
-  [255, 106, 19],   // 0.857  BRAND ORANGE (anchored at threshold)
-  [225, 32, 56],    // 1.000  deep red (over)
-];
-
-// Single-hue alt: pure brand-orange ramp, dim → bright → red. Cleanest
-// minimalist option; some find it harder to read at a glance because
-// neighboring t values look very similar at low brightness.
-const RAMP_MONO_ORANGE: [number, number, number][] = [
-  [50, 38, 30],
-  [80, 52, 32],
-  [120, 64, 28],
-  [170, 80, 24],
-  [220, 95, 20],
-  [255, 106, 19],   // brand
-  [255, 60, 38],
-  [200, 18, 38],
-];
-
-// Cool-to-hot alt: cyan complement → orange → red. Good contrast at
-// extremes; introduces a competing accent (cyan) that may distract.
-const RAMP_CYAN_ORANGE: [number, number, number][] = [
-  [50, 90, 110],
-  [70, 116, 130],
-  [110, 130, 130],
-  [160, 130, 110],
-  [210, 130, 80],
-  [255, 130, 40],
-  [255, 106, 19],   // brand
-  [225, 32, 56],
-];
-
-void RAMP_MONO_ORANGE;
-void RAMP_CYAN_ORANGE;
-const ACTIVE_RAMP = RAMP_BRAND;
+import { getActiveRamp } from "./theme";
 
 /**
- * Sample the active brand ramp at t ∈ [0, 1] and return a CSS rgb() color.
+ * Sample the active theme's ramp at t ∈ [0, 1] and return a CSS rgb() color.
  *
- * Anchor points (assuming ACTIVE_RAMP=RAMP_BRAND):
- *   t=0.00  → cool/recedes
- *   t=0.85  → brand orange (== threshold)
- *   t=1.00  → deep red (== significantly over)
+ * Anchor points (consistent across all themes by construction):
+ *   t=0.00  → cool/recedes (theme's bg-adjacent tint)
+ *   t=0.85  → "warning" anchor (theme's threshold-marker hue)
+ *   t=1.00  → "danger" anchor (theme's over-threshold hue)
+ *
+ * The math here doesn't care which theme is active; it just walks the
+ * 8-stop array. Switching themes via setTheme() makes every subsequent
+ * call to rampColor() pick up the new ramp on the next React render.
  */
 export function rampColor(t: number): string {
+  const ramp = getActiveRamp();
   const clamped = Math.min(1, Math.max(0, t));
-  const scaled = clamped * (ACTIVE_RAMP.length - 1);
+  const scaled = clamped * (ramp.length - 1);
   const lo = Math.floor(scaled);
-  const hi = Math.min(ACTIVE_RAMP.length - 1, lo + 1);
+  const hi = Math.min(ramp.length - 1, lo + 1);
   const frac = scaled - lo;
-  const a = ACTIVE_RAMP[lo];
-  const b = ACTIVE_RAMP[hi];
+  const a = ramp[lo];
+  const b = ramp[hi];
   const r = Math.round(a[0] + (b[0] - a[0]) * frac);
   const g = Math.round(a[1] + (b[1] - a[1]) * frac);
   const blue = Math.round(a[2] + (b[2] - a[2]) * frac);
