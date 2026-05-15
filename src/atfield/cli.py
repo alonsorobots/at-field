@@ -856,6 +856,162 @@ def setup(
 
 
 # ---------------------------------------------------------------------------
+# install-lhm -- self-service LHM install for dev/manual installs
+# ---------------------------------------------------------------------------
+
+
+# Pinned LHM release. Bumping this is a deliberate choice: every version
+# change has a small chance of breaking the .config XML schema we ship.
+_LHM_VERSION = "v0.9.4"
+_LHM_ZIP_URL = (
+    f"https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/"
+    f"download/{_LHM_VERSION}/LibreHardwareMonitor-net472.zip"
+)
+
+
+@app.command(name="install-lhm")
+def install_lhm(
+    install_dir: Path = typer.Option(
+        Path.home() / ".atfield" / "lhm",
+        "--dir", "-d",
+        help=(
+            "Where to drop the LHM binaries. Defaults to ~/.atfield/lhm/. "
+            "The supervisor's ATFIELD_LHM_EXE env var should point at "
+            "<install-dir>/LibreHardwareMonitor.exe (or pass --no-env-hint "
+            "to skip that suggestion)."
+        ),
+    ),
+    force: bool = typer.Option(
+        False, "--force", "-f",
+        help="Reinstall even if LibreHardwareMonitor.exe is already present.",
+    ),
+    env_hint: bool = typer.Option(
+        True, "--env-hint/--no-env-hint",
+        help="Print the ATFIELD_LHM_EXE export hint after install.",
+    ),
+) -> None:
+    """Download LibreHardwareMonitor for the current AT-Field install.
+
+    The bundled NSIS installer ships LHM out of the box, but pip-installed
+    or git-cloned dev installs need a manual fetch -- without LHM the
+    watchdog can't read VRAM-junction temp on consumer GPUs and CPU package
+    temp on Intel/AMD desktops, and the dashboard says "Degraded".
+
+    This command:
+
+      1. Downloads ``LHM ${_LHM_VERSION}`` from the official GitHub release.
+      2. Extracts it into ``<install-dir>``.
+      3. Drops a pre-baked ``LibreHardwareMonitor.config`` that turns on the
+         web server on port 8085 (LHM 0.9.x has no CLI flag for that).
+      4. Prints the env-var hint so the supervisor finds the binary on next
+         service restart.
+    """
+    import shutil
+    import tempfile
+    import urllib.request
+    import zipfile
+    from importlib import resources as _res
+
+    install_dir = install_dir.expanduser()
+    binary = install_dir / "LibreHardwareMonitor.exe"
+
+    if binary.is_file() and not force:
+        console.print(f"[green]+[/] LHM already present at [cyan]{binary}[/]")
+        console.print("[dim]Pass --force to reinstall.[/]")
+        if env_hint:
+            _print_lhm_env_hint(binary)
+        return
+
+    install_dir.mkdir(parents=True, exist_ok=True)
+
+    console.print(f"Downloading LHM {_LHM_VERSION} from GitHub…")
+    with tempfile.NamedTemporaryFile(
+        suffix=".zip", delete=False, dir=str(install_dir),
+    ) as tmpfile:
+        try:
+            with urllib.request.urlopen(_LHM_ZIP_URL, timeout=60) as resp:
+                shutil.copyfileobj(resp, tmpfile)
+            tmpfile.close()
+            console.print("Extracting…")
+            with zipfile.ZipFile(tmpfile.name) as z:
+                z.extractall(install_dir)
+        finally:
+            try:
+                Path(tmpfile.name).unlink()
+            except OSError:
+                pass
+
+    if not binary.is_file():
+        # Some LHM zips wrap their files in a "LibreHardwareMonitor/"
+        # subdirectory; flatten if needed.
+        nested = install_dir / "LibreHardwareMonitor" / "LibreHardwareMonitor.exe"
+        if nested.is_file():
+            for child in nested.parent.iterdir():
+                target = install_dir / child.name
+                if target.exists():
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
+                shutil.move(str(child), str(target))
+            try:
+                nested.parent.rmdir()
+            except OSError:
+                pass
+
+    if not binary.is_file():
+        console.print(f"[red]error[/] LHM zip extracted but {binary.name} missing")
+        raise typer.Exit(code=2)
+
+    # Drop our pre-baked config (web server on, minimize to tray, no auto-update)
+    # so LHM starts up the way the supervisor expects without a UI tour.
+    config_target = install_dir / "LibreHardwareMonitor.config"
+    try:
+        from atfield import _vendored_lhm_config  # type: ignore[attr-defined]
+
+        config_target.write_text(_vendored_lhm_config.read_text())
+    except (ImportError, AttributeError):
+        # Vendored config wasn't packaged (e.g. editable install). Try to
+        # find it in the repo checkout.
+        for candidate in (
+            Path(__file__).parents[2] / "vendor" / "lhm" / "LibreHardwareMonitor.config",
+            Path.cwd() / "vendor" / "lhm" / "LibreHardwareMonitor.config",
+        ):
+            if candidate.is_file():
+                shutil.copy2(candidate, config_target)
+                break
+        else:
+            try:
+                # Try as an installed package resource, if pyproject was set
+                # up to ship it (forward-compat).
+                with _res.as_file(_res.files("atfield") / "data" / "LibreHardwareMonitor.config") as p:
+                    shutil.copy2(p, config_target)
+            except (FileNotFoundError, ModuleNotFoundError):
+                console.print(
+                    "[yellow]warning[/] couldn't find pre-baked "
+                    "LibreHardwareMonitor.config; LHM web server may not "
+                    "be enabled. Open LHM once and tick "
+                    "Options -> Remote Web Server -> Run."
+                )
+
+    console.print(f"[green]+[/] LHM installed at [cyan]{binary}[/]")
+    if env_hint:
+        _print_lhm_env_hint(binary)
+
+
+def _print_lhm_env_hint(binary: Path) -> None:
+    """Print the platform-appropriate env-var export so the supervisor
+    finds the just-installed LHM binary."""
+    console.print()
+    console.print("[bold]Tell the watchdog where to find it:[/]")
+    if sys.platform == "win32":
+        console.print(f'  [cyan]setx ATFIELD_LHM_EXE "{binary}"[/]')
+        console.print("  [dim](then restart the AT-Field service)[/]")
+    else:
+        console.print(f'  [cyan]export ATFIELD_LHM_EXE="{binary}"[/]')
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
