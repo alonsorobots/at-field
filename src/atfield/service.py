@@ -36,12 +36,18 @@ from pathlib import Path
 
 from atfield import __version__
 from atfield.actuator import Actuator
-from atfield.audit import AuditWriter, configure_service_logging
+from atfield.audit import (
+    EVENTS_FILENAME,
+    WATCHDOG_LOG_FILENAME,
+    AuditWriter,
+    configure_service_logging,
+)
 from atfield.collectors import HealthState, ProbeResult
 from atfield.collectors.lhm import LhmCollector
 from atfield.collectors.nvml import PER_PROCESS_VRAM_KEY, NvmlCollector
 from atfield.collectors.system import SystemCollector
 from atfield.config import AtFieldConfig, ConfigError, default_config, load_config
+from atfield.http_api import ApiServer, ServiceState, collector_view_from_probe
 from atfield.policy import PolicyEngine
 from atfield.signals import Sample
 
@@ -114,6 +120,29 @@ def _read_pause_sentinel(state_dir: Path) -> int | None:
     except Exception:
         # Corrupt sentinel: pause forever (until removed). Better safe.
         return time.monotonic_ns() + (10**18)
+
+
+def _pause_until_unix(state_dir: Path) -> float | None:
+    """Return wall-clock unix timestamp the pause expires, or None.
+
+    Used to populate the API state mirror (which the tray reads). The
+    monotonic version above is what the engine actually gates on; this
+    is the human-readable cousin.
+    """
+    p = state_dir / PAUSE_SENTINEL_FILENAME
+    if not p.exists():
+        return None
+    try:
+        text = p.read_text(encoding="utf-8").strip().splitlines()[0]
+        until = datetime.fromisoformat(text)
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        unix_ts = until.timestamp()
+        if unix_ts <= time.time():
+            return None
+        return unix_ts
+    except Exception:
+        return time.time() + (365 * 24 * 3600)  # corrupt -> match _read
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +281,27 @@ def run_service(
         },
     )
 
+    # Build the API state mirror. The HTTP server reads from this; the tick
+    # loop below writes to it. Started after engine exists so /rules works
+    # immediately on first request.
+    api_state = ServiceState(
+        version=__version__,
+        observe_only=observe_only,
+        events_path=sd / EVENTS_FILENAME,
+        watchdog_log_path=sd / WATCHDOG_LOG_FILENAME,
+        state_dir=sd,
+    )
+    api_state.attach_engine(engine)
+    api_state.set_collectors([
+        collector_view_from_probe(name, result, "HEALTHY" if result.available else "FAILED")
+        for name, result in probe_results.items()
+    ])
+
+    api_server: ApiServer | None = None
+    if cfg.api.enabled:
+        api_server = ApiServer(api_state, host=cfg.api.bind, port=cfg.api.port)
+        api_server.start()
+
     # Stop signaling
     stop = stop_flag or _StopFlag()
     if stop_flag is None:
@@ -276,11 +326,30 @@ def run_service(
         while not stop:
             tick_started_at = time.monotonic()
 
+            # Handle reload requests from the HTTP API before doing anything
+            # else this tick: rebuild engine + actuator from a fresh config.
+            if api_state.consume_reload_request():
+                try:
+                    new_cfg, new_observe_only = _load_config_safe(config_path)
+                    engine = PolicyEngine(new_cfg, available_signals=policy_signals)
+                    actuator = Actuator(new_cfg)
+                    cfg = new_cfg
+                    observe_only = new_observe_only
+                    api_state._observe_only = observe_only
+                    api_state.attach_engine(engine)
+                    _log.info("config reloaded; engine rebuilt (rules=%d disabled=%d)",
+                              len(engine.effective_rules), len(engine.disabled_rules))
+                except Exception:
+                    _log.exception("config reload failed; keeping previous engine")
+
             # Honor pause sentinel (re-checked every 5 s, not every tick).
             now_ns = time.monotonic_ns()
             if now_ns - last_pause_check_ns >= pause_check_interval_ns:
                 pause_until = _read_pause_sentinel(sd)
                 engine.set_paused(pause_until or 0)
+                # Also reflect into API state so /health reports paused even
+                # when the change came from the CLI/sentinel route.
+                api_state.set_paused_until(_pause_until_unix(sd) or 0.0)
                 last_pause_check_ns = now_ns
 
             # Sample every healthy collector
@@ -292,7 +361,13 @@ def run_service(
                     samples.update(c.sample())  # type: ignore[attr-defined]
                 except Exception:
                     _log.exception("collector %s.sample() raised; treating tick as no-op for it", getattr(c, "name", "?"))
+                # Reflect health state changes into the API mirror.
+                api_state.update_collector_health(c.name, c.health().name)  # type: ignore[attr-defined]
             samples.pop(PER_PROCESS_VRAM_KEY, None)
+
+            # Push samples into the API state mirror BEFORE evaluation so the
+            # tray dashboard can show "current value" even if the rule abstained.
+            api_state.record_tick(now_unix=time.time(), samples=samples)
 
             # Evaluate
             try:
@@ -320,6 +395,7 @@ def run_service(
                     )
 
                 audit.write_action(effective)
+                api_state.record_action(effective)
 
                 # Pick candidate PIDs for GPU rules from the NVML proc map.
                 candidate_pids = None
@@ -363,6 +439,11 @@ def run_service(
         _log.exception("service main loop crashed")
         exit_code = 1
     finally:
+        if api_server is not None:
+            try:
+                api_server.stop()
+            except Exception:
+                _log.debug("api_server.stop() raised", exc_info=True)
         for c in collectors:
             try:
                 c.shutdown()  # type: ignore[attr-defined]

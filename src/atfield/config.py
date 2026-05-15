@@ -38,6 +38,7 @@ else:  # pragma: no cover - exercised on 3.10 only
 
 __all__ = [
     "DEFAULT_CONFIG_FILENAME",
+    "ApiConfig",
     "AtFieldConfig",
     "ConfigError",
     "GeneralConfig",
@@ -152,6 +153,20 @@ class KillConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ApiConfig:
+    """Localhost HTTP API the tray app reads.
+
+    Defaults bind to ``127.0.0.1`` only; remote access requires explicit
+    operator opt-in. Flipping ``enabled = false`` disables the listener
+    entirely (CLI-only deployments).
+    """
+
+    enabled: bool = True
+    bind: str = "127.0.0.1"
+    port: int = 8765
+
+
+@dataclass(frozen=True, slots=True)
 class RuleConfig:
     name: str
     signal: str
@@ -169,6 +184,7 @@ class AtFieldConfig:
     general: GeneralConfig
     targeting: TargetingConfig
     kill: KillConfig
+    api: ApiConfig
     rules: tuple[RuleConfig, ...]
 
     def cooldown_for(self, rule: RuleConfig) -> int:
@@ -232,6 +248,7 @@ def default_config() -> AtFieldConfig:
         general=GeneralConfig(),
         targeting=TargetingConfig(),
         kill=KillConfig(),
+        api=ApiConfig(),
         rules=_default_rules(),
     )
 
@@ -280,7 +297,7 @@ def load_config_from_dict(data: dict[str, Any], *, source: str = "<dict>") -> At
     if not isinstance(data, dict):
         raise ConfigError(f"{source}: expected a TOML table at the root")
 
-    allowed_top = {"general", "targeting", "kill", "rules"}
+    allowed_top = {"general", "targeting", "kill", "api", "rules"}
     unknown = set(data.keys()) - allowed_top
     if unknown:
         raise ConfigError(
@@ -292,9 +309,10 @@ def load_config_from_dict(data: dict[str, Any], *, source: str = "<dict>") -> At
     general = _parse_general(data.get("general"), base.general, source)
     targeting = _parse_targeting(data.get("targeting"), base.targeting, source)
     kill = _parse_kill(data.get("kill"), base.kill, source)
+    api = _parse_api(data.get("api"), base.api, source)
     rules = _parse_rules(data.get("rules"), base.rules, source)
 
-    cfg = AtFieldConfig(general=general, targeting=targeting, kill=kill, rules=rules)
+    cfg = AtFieldConfig(general=general, targeting=targeting, kill=kill, api=api, rules=rules)
     _cross_validate(cfg, source)
     return cfg
 
@@ -423,6 +441,27 @@ def _parse_kill(raw: Any, base: KillConfig, source: str) -> KillConfig:
                 minimum=0,
             ),
         )
+    return out
+
+
+def _parse_api(raw: Any, base: ApiConfig, source: str) -> ApiConfig:
+    if raw is None:
+        return base
+    table = _require_table(raw, "api", source)
+    _check_unknown_keys(table, {"enabled", "bind", "port"}, "api", source)
+
+    out = base
+    if "enabled" in table:
+        if not isinstance(table["enabled"], bool):
+            raise ConfigError(f"{source}: api.enabled must be a boolean")
+        out = replace(out, enabled=table["enabled"])
+    if "bind" in table:
+        out = replace(out, bind=_as_str(table["bind"], "api.bind", source))
+    if "port" in table:
+        port = _as_int(table["port"], "api.port", source, minimum=1)
+        if port > 65535:
+            raise ConfigError(f"{source}: api.port must be 1..65535, got {port}")
+        out = replace(out, port=port)
     return out
 
 

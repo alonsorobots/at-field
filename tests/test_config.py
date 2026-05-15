@@ -289,3 +289,48 @@ class TestFrozenInvariants:
     def test_dataclass_types_exist(self):
         # surface-area smoke test
         assert GeneralConfig and TargetingConfig and KillConfig and RuleConfig
+
+
+# ---------------------------------------------------------------------------
+# [api] section (added in v0.2 for the tray app)
+# ---------------------------------------------------------------------------
+
+
+class TestApiValidation:
+    def test_api_defaults_safe(self):
+        cfg = default_config()
+        assert cfg.api.enabled is True
+        assert cfg.api.bind == "127.0.0.1"
+        assert cfg.api.port == 8765
+
+    def test_api_disabled_via_config(self):
+        cfg = load_config_from_dict({"api": {"enabled": False}})
+        assert cfg.api.enabled is False
+
+    def test_api_custom_port_accepted(self):
+        cfg = load_config_from_dict({"api": {"port": 19999}})
+        assert cfg.api.port == 19999
+
+    def test_api_custom_bind_accepted(self):
+        cfg = load_config_from_dict({"api": {"bind": "0.0.0.0"}})
+        assert cfg.api.bind == "0.0.0.0"
+
+    def test_api_port_out_of_range_rejected(self):
+        with pytest.raises(ConfigError, match="api.port must be 1..65535"):
+            load_config_from_dict({"api": {"port": 70000}})
+
+    def test_api_port_zero_rejected(self):
+        with pytest.raises(ConfigError, match="api.port must be >= 1"):
+            load_config_from_dict({"api": {"port": 0}})
+
+    def test_api_unknown_key_rejected(self):
+        with pytest.raises(ConfigError, match="unknown key"):
+            load_config_from_dict({"api": {"hostname": "x"}})
+
+    def test_api_enabled_must_be_bool(self):
+        with pytest.raises(ConfigError, match="api.enabled must be a boolean"):
+            load_config_from_dict({"api": {"enabled": "yes"}})
+
+    def test_api_frozen(self):
+        with pytest.raises(Exception):
+            default_config().api.port = 9999  # type: ignore[misc]
