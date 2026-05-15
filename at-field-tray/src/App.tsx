@@ -7,8 +7,10 @@ import SignalsScreen from "./screens/SignalsScreen";
 import SignalDetailScreen from "./screens/SignalDetailScreen";
 import RulesScreen from "./screens/RulesScreen";
 import EventsScreen from "./screens/EventsScreen";
+import SetupScreen from "./screens/SetupScreen";
 import { api, deriveTrayStatus } from "./lib/api";
 import { usePolling } from "./lib/hooks";
+import { getPollIntervalMs } from "./lib/preferences";
 
 const TABS = [
   { id: "signals", label: "Signals" },
@@ -41,10 +43,21 @@ export default function App() {
   const [refreshGen, setRefreshGen] = useState(0);
   const triggerRefresh = () => setRefreshGen((g) => g + 1);
 
-  const healthQ = usePolling(api.health, 1000);
-  const rulesQ = usePolling(api.rules, 1000);
+  // Poll cadence is user-tweakable in the Status screen; we read it
+  // once on mount. Changing it requires reopening the dashboard, which
+  // is fine for a setting that's tuned approximately once and then
+  // forgotten.
+  const [pollIntervalMs] = useState<number>(() => getPollIntervalMs());
+  const healthQ = usePolling(api.health, pollIntervalMs);
+  const rulesQ = usePolling(api.rules, pollIntervalMs);
 
   const trayStatus = deriveTrayStatus(healthQ.data, healthQ.reachable, healthQ.hasAttempted);
+
+  // Show the first-run setup screen ONLY after we've made at least one
+  // attempt and confirmed the service is unreachable. Without the
+  // hasAttempted gate we'd flash the SetupScreen for ~1s on every cold
+  // boot, which is jarring when the service is just starting up.
+  const showSetup = healthQ.hasAttempted && !healthQ.reachable;
 
   return (
     <div className="flex flex-col h-screen w-screen bg-[var(--color-bg)] text-[var(--color-text-primary)] relative">
@@ -93,14 +106,23 @@ export default function App() {
               exit="exit"
               transition={pageTransition}
             >
-              {tab === "signals" && selectedSignal == null && (
+              {showSetup && (
+                <SetupScreen
+                  onInstalled={() => {
+                    healthQ.refresh();
+                    rulesQ.refresh();
+                    triggerRefresh();
+                  }}
+                />
+              )}
+              {!showSetup && tab === "signals" && selectedSignal == null && (
                 <SignalsScreen
                   rules={rulesQ.data}
                   refreshGen={refreshGen}
                   onSelectSignal={setSelectedSignal}
                 />
               )}
-              {tab === "signals" && selectedSignal != null && (
+              {!showSetup && tab === "signals" && selectedSignal != null && (
                 <SignalDetailScreen
                   signal={selectedSignal}
                   rules={rulesQ.data}
@@ -108,11 +130,11 @@ export default function App() {
                   refreshGen={refreshGen}
                 />
               )}
-              {tab === "rules" && (
+              {!showSetup && tab === "rules" && (
                 <RulesScreen rules={rulesQ.data} onMutated={rulesQ.refresh} />
               )}
-              {tab === "events" && <EventsScreen refreshGen={refreshGen} />}
-              {tab === "status" && (
+              {!showSetup && tab === "events" && <EventsScreen refreshGen={refreshGen} />}
+              {!showSetup && tab === "status" && (
                 <StatusScreen health={healthQ.data} reachable={healthQ.reachable} />
               )}
             </motion.div>

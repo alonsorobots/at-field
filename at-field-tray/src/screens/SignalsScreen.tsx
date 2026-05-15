@@ -21,6 +21,7 @@ import { api } from "../lib/api";
 import type { RulesSnapshot, SignalLatest, SignalsSnapshot } from "../lib/api";
 import { usePolling } from "../lib/hooks";
 import { formatValue as fmtUnit, isDefaultDisplaySignal, signalDisplayName } from "../lib/format";
+import { getPollIntervalMs } from "../lib/preferences";
 import { resolveOrder, saveSignalOrder } from "../lib/signal-order";
 
 interface Props {
@@ -43,7 +44,10 @@ interface Props {
  * handles this automatically once we register the KeyboardSensor.
  */
 export default function SignalsScreen({ rules, refreshGen, onSelectSignal }: Props) {
-  const { data, reachable, refresh } = usePolling<SignalsSnapshot>(() => api.signals(), 1000);
+  const { data, reachable, refresh } = usePolling<SignalsSnapshot>(
+    () => api.signals(),
+    getPollIntervalMs(),
+  );
   useReactiveRefresh(refreshGen, refresh);
 
   const thresholdsBySignal = useMemo(() => {
