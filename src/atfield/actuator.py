@@ -1,0 +1,460 @@
+"""AT-Field actuator: process-tree-aware kill with launcher walk-up.
+
+This is the half of the watchdog that does damage-prevention work, so the
+behavior is defined precisely and exercised by tests against a fake
+process tree (see ``tests/test_actuator.py``). The real psutil calls live
+behind a thin :class:`ProcessProvider` indirection so production uses live
+processes and tests use a deterministic mock.
+
+Algorithm (matches PLANNING.md §5.3)
+------------------------------------
+1. Identify candidate offender PIDs. For GPU rules, use the per-GPU
+   process map captured by :mod:`atfield.collectors.nvml`. For RAM/commit
+   rules, scan all running processes whose name is in
+   ``targeting.killable_names`` and pick the largest by RSS.
+2. For each offender PID, walk up the parent chain: while the parent's
+   name is in ``killable_names | launcher_names``, climb. Stop at the
+   highest python-or-launcher whose parent is *not* itself one. That PID
+   is the kill root.
+3. Enumerate the kill root and all its descendants. Filter out anything
+   in ``never_kill_names`` (and the watchdog's own PID).
+4. Mode ``graceful``: send SIGTERM-equivalent (``terminate()`` on Windows
+   becomes ``TerminateProcess`` -> immediate, but with a brief drain
+   window). Wait ``grace_seconds`` for the tree to exit. Anything still
+   alive: ``kill()`` (force).
+5. Mode ``aggressive``: skip the grace window and ``kill()`` immediately.
+6. Return a :class:`KillReport` describing what was found, what was sent,
+   and what (if anything) survived. The audit log writes one record per
+   report regardless of outcome.
+
+Self-protection rules:
+* The service's own PID is filtered out unconditionally.
+* ``never_kill_names`` is filtered out (defaults include ``explorer.exe``,
+  ``services.exe``, ``code.exe``, the watchdog itself, etc).
+* If the kill-root walk produces no killable PIDs after filtering, the
+  actuator returns a report with ``skipped_reason`` populated rather than
+  performing a destructive action -- the caller (audit log) records the
+  miss for operator visibility.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+from dataclasses import dataclass, field
+from typing import Any, Iterable, Protocol
+
+from atfield.config import AtFieldConfig
+from atfield.policy import Action
+
+__all__ = [
+    "ProcInfo",
+    "ProcessProvider",
+    "PsutilProvider",
+    "KilledProcess",
+    "KillReport",
+    "Actuator",
+    "find_kill_root",
+]
+
+
+_log = logging.getLogger("atfield.actuator")
+
+
+# ---------------------------------------------------------------------------
+# Process abstraction (so tests don't have to spawn real processes)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ProcInfo:
+    """Snapshot of a process for audit logging.
+
+    A frozen dataclass rather than a live psutil.Process so we can capture
+    name/cmdline before sending the terminate signal -- once a process is
+    gone, psutil can no longer query it.
+    """
+
+    pid: int
+    ppid: int
+    name: str
+    cmdline: tuple[str, ...]
+    rss_bytes: int = 0
+
+
+class ProcessProvider(Protocol):
+    """Indirection over psutil so the actuator is testable with a mock tree."""
+
+    def own_pid(self) -> int: ...
+
+    def list_all(self) -> list[ProcInfo]:
+        """Return a snapshot of every process visible to the service."""
+        ...
+
+    def get(self, pid: int) -> ProcInfo | None:
+        """Return ProcInfo for ``pid``, or None if it no longer exists."""
+        ...
+
+    def parent(self, pid: int) -> ProcInfo | None:
+        """Return ProcInfo of pid's parent, or None if absent / orphan."""
+        ...
+
+    def descendants(self, pid: int) -> list[ProcInfo]:
+        """Return ProcInfo for every transitive descendant of ``pid``."""
+        ...
+
+    def terminate(self, pid: int) -> None:
+        """Best-effort polite termination (SIGTERM-equivalent)."""
+        ...
+
+    def kill(self, pid: int) -> None:
+        """Force-kill (SIGKILL-equivalent)."""
+        ...
+
+    def is_alive(self, pid: int) -> bool: ...
+
+
+# ---------------------------------------------------------------------------
+# Real psutil-backed provider (used in production)
+# ---------------------------------------------------------------------------
+
+
+class PsutilProvider:
+    """ProcessProvider implementation backed by ``psutil``."""
+
+    def __init__(self) -> None:
+        import psutil
+        self._psutil = psutil
+
+    def own_pid(self) -> int:
+        return os.getpid()
+
+    def _to_info(self, p: Any) -> ProcInfo | None:
+        try:
+            with p.oneshot():
+                name = p.name()
+                ppid = p.ppid()
+                try:
+                    cmdline = tuple(p.cmdline() or ())
+                except Exception:
+                    cmdline = ()
+                try:
+                    rss = int(p.memory_info().rss)
+                except Exception:
+                    rss = 0
+            return ProcInfo(pid=p.pid, ppid=ppid, name=name, cmdline=cmdline, rss_bytes=rss)
+        except Exception:
+            return None
+
+    def list_all(self) -> list[ProcInfo]:
+        out: list[ProcInfo] = []
+        for p in self._psutil.process_iter(attrs=None):
+            info = self._to_info(p)
+            if info is not None:
+                out.append(info)
+        return out
+
+    def get(self, pid: int) -> ProcInfo | None:
+        try:
+            return self._to_info(self._psutil.Process(pid))
+        except Exception:
+            return None
+
+    def parent(self, pid: int) -> ProcInfo | None:
+        try:
+            p = self._psutil.Process(pid).parent()
+            if p is None:
+                return None
+            return self._to_info(p)
+        except Exception:
+            return None
+
+    def descendants(self, pid: int) -> list[ProcInfo]:
+        try:
+            children = self._psutil.Process(pid).children(recursive=True)
+        except Exception:
+            return []
+        out: list[ProcInfo] = []
+        for c in children:
+            info = self._to_info(c)
+            if info is not None:
+                out.append(info)
+        return out
+
+    def terminate(self, pid: int) -> None:
+        try:
+            self._psutil.Process(pid).terminate()
+        except Exception:
+            pass
+
+    def kill(self, pid: int) -> None:
+        try:
+            self._psutil.Process(pid).kill()
+        except Exception:
+            pass
+
+    def is_alive(self, pid: int) -> bool:
+        try:
+            return self._psutil.Process(pid).is_running()
+        except Exception:
+            return False
+
+
+# ---------------------------------------------------------------------------
+# Kill targeting
+# ---------------------------------------------------------------------------
+
+
+def find_kill_root(
+    pid: int,
+    *,
+    provider: ProcessProvider,
+    killable_names: frozenset[str],
+    launcher_names: frozenset[str],
+) -> ProcInfo | None:
+    """Walk up the parent chain to the highest python-or-launcher ancestor.
+
+    Stops at the topmost process whose name is in
+    ``killable_names | launcher_names`` *and* whose parent is not. This is
+    the dispatcher: terminating its tree takes self-healing workers down
+    with it (the "many jobs have coordinators with self-healing workers"
+    case from the bootstrap chat).
+
+    Returns ``None`` if ``pid`` doesn't exist anymore or never matched
+    a killable/launcher name in the first place.
+    """
+    keepers = killable_names | launcher_names
+    seen: set[int] = set()
+    cursor = provider.get(pid)
+    if cursor is None:
+        return None
+
+    # If the offender itself is not a python/launcher, we have no killable
+    # candidate. Refuse to walk up arbitrary processes (e.g. don't climb
+    # into svchost.exe just because a python child of it spiked GPU temp).
+    if cursor.name.lower() not in {n.lower() for n in keepers}:
+        return None
+
+    while True:
+        if cursor.pid in seen:
+            return cursor  # cycle guard (shouldn't happen, but defense in depth)
+        seen.add(cursor.pid)
+        parent = provider.parent(cursor.pid)
+        if parent is None:
+            return cursor
+        if parent.name.lower() not in {n.lower() for n in keepers}:
+            return cursor
+        cursor = parent
+
+
+# ---------------------------------------------------------------------------
+# Kill report
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class KilledProcess:
+    info: ProcInfo
+    method: str       # "terminate" | "kill" | "skipped"
+    survived: bool
+
+
+@dataclass(frozen=True, slots=True)
+class KillReport:
+    """Outcome of one actuator invocation, written to events.jsonl."""
+
+    action: Action
+    offender_pid: int | None
+    kill_root: ProcInfo | None
+    killed: tuple[KilledProcess, ...] = ()
+    skipped_reason: str | None = None
+    finished_at_ns: int = 0
+
+    @property
+    def succeeded(self) -> bool:
+        return (
+            self.kill_root is not None
+            and not any(k.survived for k in self.killed)
+        )
+
+
+# ---------------------------------------------------------------------------
+# Actuator
+# ---------------------------------------------------------------------------
+
+
+class Actuator:
+    """Executes :class:`Action` objects produced by :class:`atfield.policy.PolicyEngine`."""
+
+    def __init__(
+        self,
+        cfg: AtFieldConfig,
+        *,
+        provider: ProcessProvider | None = None,
+        sleep: Any = time.sleep,
+    ) -> None:
+        self._cfg = cfg
+        self._provider = provider or PsutilProvider()
+        self._sleep = sleep
+
+        self._killable = frozenset(n.lower() for n in cfg.targeting.killable_names)
+        self._launchers = frozenset(n.lower() for n in cfg.targeting.launcher_names)
+        self._never = frozenset(n.lower() for n in cfg.targeting.never_kill_names)
+        self._own_pid = self._provider.own_pid()
+
+    # -- Public entry point ------------------------------------------------
+
+    def execute(
+        self,
+        action: Action,
+        *,
+        candidate_pids: Iterable[int] | None = None,
+    ) -> KillReport:
+        """Execute one policy action.
+
+        ``log`` and ``throttle`` actions don't kill anything -- they just
+        produce a report with no killed processes (the audit layer still
+        writes the record). ``kill`` does the full walk-up + tree-kill.
+
+        ``candidate_pids`` is the set of PIDs the caller (service) believes
+        are candidates -- typically the per-GPU process map for GPU rules,
+        or top-RSS python procs for RAM rules. If ``None``, the actuator
+        scans all processes.
+        """
+        if action.kind != "kill":
+            _log.info(
+                "action %s for rule=%s signal=%s value=%g (no kill performed)",
+                action.kind, action.rule_name, action.signal, action.latest_value,
+            )
+            return KillReport(
+                action=action,
+                offender_pid=None,
+                kill_root=None,
+                skipped_reason=f"action.kind == {action.kind!r}",
+                finished_at_ns=int(time.monotonic_ns()),
+            )
+
+        offender_pid = self._pick_offender(candidate_pids)
+        if offender_pid is None:
+            _log.warning(
+                "kill-action for rule=%s but no eligible offender PID found",
+                action.rule_name,
+            )
+            return KillReport(
+                action=action,
+                offender_pid=None,
+                kill_root=None,
+                skipped_reason="no eligible offender PID matched killable_names",
+                finished_at_ns=int(time.monotonic_ns()),
+            )
+
+        root = find_kill_root(
+            offender_pid,
+            provider=self._provider,
+            killable_names=frozenset(self._cfg.targeting.killable_names),
+            launcher_names=frozenset(self._cfg.targeting.launcher_names),
+        )
+        if root is None:
+            return KillReport(
+                action=action,
+                offender_pid=offender_pid,
+                kill_root=None,
+                skipped_reason=f"PID {offender_pid} no longer exists or did not match keepers",
+                finished_at_ns=int(time.monotonic_ns()),
+            )
+
+        # Build the full target set: root + descendants, minus protected.
+        targets: list[ProcInfo] = [root, *self._provider.descendants(root.pid)]
+        targets = [t for t in targets if self._is_killable(t)]
+
+        if not targets:
+            return KillReport(
+                action=action,
+                offender_pid=offender_pid,
+                kill_root=root,
+                skipped_reason="all candidates filtered by never_kill_names / self-protection",
+                finished_at_ns=int(time.monotonic_ns()),
+            )
+
+        if self._cfg.kill.mode == "aggressive":
+            results = self._kill_immediate(targets)
+        else:
+            results = self._terminate_then_kill(targets)
+
+        return KillReport(
+            action=action,
+            offender_pid=offender_pid,
+            kill_root=root,
+            killed=tuple(results),
+            finished_at_ns=int(time.monotonic_ns()),
+        )
+
+    # -- Helpers -----------------------------------------------------------
+
+    def _is_killable(self, info: ProcInfo) -> bool:
+        if info.pid == self._own_pid:
+            return False
+        nm = info.name.lower()
+        if nm in self._never:
+            return False
+        return True
+
+    def _pick_offender(self, candidate_pids: Iterable[int] | None) -> int | None:
+        """Pick the PID we treat as the trigger.
+
+        Strategy:
+        * If ``candidate_pids`` is given (e.g. the per-GPU process map for a
+          GPU rule), pick the highest-RSS one whose name is in
+          ``killable_names``.
+        * Else (RAM/commit rule), scan all processes and pick the highest-RSS
+          one in ``killable_names``.
+        * If nothing matches, return None and let ``execute()`` log a miss.
+        """
+        if candidate_pids is not None:
+            best: ProcInfo | None = None
+            for pid in candidate_pids:
+                info = self._provider.get(pid)
+                if info is None:
+                    continue
+                if info.name.lower() not in self._killable:
+                    continue
+                if info.pid == self._own_pid:
+                    continue
+                if best is None or info.rss_bytes > best.rss_bytes:
+                    best = info
+            return best.pid if best else None
+
+        best = None
+        for info in self._provider.list_all():
+            if info.name.lower() not in self._killable:
+                continue
+            if info.pid == self._own_pid:
+                continue
+            if best is None or info.rss_bytes > best.rss_bytes:
+                best = info
+        return best.pid if best else None
+
+    def _terminate_then_kill(self, targets: list[ProcInfo]) -> list[KilledProcess]:
+        for t in targets:
+            self._provider.terminate(t.pid)
+        self._sleep(self._cfg.kill.grace_seconds)
+        results: list[KilledProcess] = []
+        for t in targets:
+            if self._provider.is_alive(t.pid):
+                self._provider.kill(t.pid)
+                # Brief drain after force-kill to update is_alive.
+                self._sleep(0.05)
+                results.append(KilledProcess(info=t, method="kill", survived=self._provider.is_alive(t.pid)))
+            else:
+                results.append(KilledProcess(info=t, method="terminate", survived=False))
+        return results
+
+    def _kill_immediate(self, targets: list[ProcInfo]) -> list[KilledProcess]:
+        for t in targets:
+            self._provider.kill(t.pid)
+        self._sleep(0.05)
+        return [
+            KilledProcess(info=t, method="kill", survived=self._provider.is_alive(t.pid))
+            for t in targets
+        ]

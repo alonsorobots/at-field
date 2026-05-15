@@ -267,6 +267,7 @@ def evaluate_window(
     min_fraction_over: float,
     now_ns: int,
     max_sample_age_s: float,
+    min_samples: int = MIN_SAMPLES_FOR_DECISION,
     comparator: Callable[[float, float], bool] = lambda v, t: v > t,
 ) -> EvalResult:
     """Evaluate a sliding window against a rule's threshold + fraction.
@@ -284,45 +285,71 @@ def evaluate_window(
         Current monotonic time. Injected (rather than read here) so policy
         ticks are deterministic and unit-testable.
     max_sample_age_s :
-        How old a sample can be and still count as "fresh". Typically
-        ``2 / tick_hz`` — a sample older than two ticks means the collector
-        is silent, and counting stale data toward "below threshold" would
-        let the rule fail open.
+        Liveness threshold for the *latest* sample in the window. If the
+        most-recent sample is older than this, the collector is considered
+        silent and the verdict is INSUFFICIENT regardless of how many old
+        samples remain in the window — a frozen collector must never let
+        a rule fall through to BELOW (which would fail open). Typically
+        ``2 / tick_hz``.
+    min_samples :
+        Minimum number of samples required in the (already time-bounded)
+        window to render a verdict. Below this we report INSUFFICIENT.
+        Defaults to :data:`MIN_SAMPLES_FOR_DECISION` (the absolute floor);
+        the policy engine raises this to
+        ``ceil(window_s * tick_hz * min_fraction_over)`` so that "67% of
+        the last 30s" actually requires ~20s of data before it can fire
+        (matching the PLANNING.md §5.2 spec "triggers within ~15s").
 
     Returns
     -------
     EvalResult
-        ``verdict == INSUFFICIENT`` if fewer than :data:`MIN_SAMPLES_FOR_DECISION`
-        fresh samples are present. Callers should treat INSUFFICIENT as
-        "abstain, do not act" — the collector layer is responsible for
-        surfacing why data is missing (via :class:`atfield.collectors.HealthState`).
+        ``verdict == INSUFFICIENT`` when the collector appears silent
+        (latest sample too old) OR fewer than ``min_samples`` samples are
+        present. Callers must treat INSUFFICIENT as "abstain, do not act"
+        — the collector layer is responsible for surfacing *why* data is
+        missing (via :class:`atfield.collectors.HealthState`).
     """
     if not 0.0 < min_fraction_over <= 1.0:
         raise ValueError(f"min_fraction_over must be in (0, 1], got {min_fraction_over}")
     if max_sample_age_s <= 0:
         raise ValueError(f"max_sample_age_s must be positive, got {max_sample_age_s}")
+    if min_samples < 1:
+        raise ValueError(f"min_samples must be >= 1, got {min_samples}")
+
+    effective_min = max(MIN_SAMPLES_FOR_DECISION, min_samples)
 
     window.evict_older_than(now_ns=now_ns)
+    samples = window.samples()
+    latest = window.latest()
+    latest_value = latest.value if latest is not None else None
+
+    # Liveness: if the most-recent sample is too old, the collector has gone
+    # quiet -- abstain, don't fall through to BELOW (which would fail open).
     max_age_ns = int(max_sample_age_s * _NS_PER_S)
-    fresh = tuple(s for s in window.samples() if not s.is_stale(now_ns=now_ns, max_age_ns=max_age_ns))
-
-    latest = fresh[-1].value if fresh else (window.latest().value if window.latest() else None)
-
-    if len(fresh) < MIN_SAMPLES_FOR_DECISION:
+    if latest is None or latest.is_stale(now_ns=now_ns, max_age_ns=max_age_ns):
         return EvalResult(
             verdict=Verdict.INSUFFICIENT,
             fraction_over=0.0,
-            samples_considered=len(fresh),
-            samples_required=MIN_SAMPLES_FOR_DECISION,
-            latest_value=latest,
+            samples_considered=len(samples),
+            samples_required=effective_min,
+            latest_value=latest_value,
         )
 
-    frac = fraction_over_threshold(fresh, threshold, comparator=comparator)
+    if len(samples) < effective_min:
+        return EvalResult(
+            verdict=Verdict.INSUFFICIENT,
+            fraction_over=0.0,
+            samples_considered=len(samples),
+            samples_required=effective_min,
+            latest_value=latest_value,
+        )
+
+    frac = fraction_over_threshold(samples, threshold, comparator=comparator)
     verdict = Verdict.TRIGGER if frac >= min_fraction_over else Verdict.BELOW
     return EvalResult(
         verdict=verdict,
         fraction_over=frac,
-        samples_considered=len(fresh),
-        samples_required=MIN_SAMPLES_FOR_DECISION,
-        latest_value=latest,
+        samples_considered=len(samples),
+        samples_required=effective_min,
+        latest_value=latest_value,
     )
