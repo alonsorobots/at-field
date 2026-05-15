@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
+import { type ThemeId, getTheme, subscribeTheme } from "./theme";
+
 /**
  * Poll an async function on an interval and expose its latest value.
  *
@@ -63,4 +65,16 @@ export function usePolling<T>(
   }, [intervalMs]);
 
   return { data, reachable, error, hasAttempted, refresh: tick };
+}
+
+/** Returns the active theme id and re-renders the calling component
+ *  whenever it changes. Use in screens that render sparklines or other
+ *  JS-computed colors that won't re-render on a CSS variable flip alone.
+ *
+ *  Components that ONLY use CSS variables (`var(--color-accent)` etc.)
+ *  don't need this -- the browser repaints them automatically. */
+export function useTheme(): ThemeId {
+  const [theme, setLocal] = useState<ThemeId>(() => getTheme());
+  useEffect(() => subscribeTheme(setLocal), []);
+  return theme;
 }

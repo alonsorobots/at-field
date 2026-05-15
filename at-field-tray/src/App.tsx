@@ -10,7 +10,7 @@ import EventsScreen from "./screens/EventsScreen";
 import SetupScreen from "./screens/SetupScreen";
 import PrefsScreen from "./screens/PrefsScreen";
 import { api, deriveTrayStatus } from "./lib/api";
-import { usePolling } from "./lib/hooks";
+import { usePolling, useTheme } from "./lib/hooks";
 import { getPollIntervalMs } from "./lib/preferences";
 
 const TABS = [
@@ -52,6 +52,11 @@ export default function App() {
   const [pollIntervalMs] = useState<number>(() => getPollIntervalMs());
   const healthQ = usePolling(api.health, pollIntervalMs);
   const rulesQ = usePolling(api.rules, pollIntervalMs);
+
+  // Subscribe at the App root so a theme switch from PrefsScreen
+  // re-renders the whole tree (including sparklines, whose stroke
+  // colors come from the JS ramp lookup, not CSS variables).
+  useTheme();
 
   const trayStatus = deriveTrayStatus(healthQ.data, healthQ.reachable, healthQ.hasAttempted);
 
