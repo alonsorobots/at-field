@@ -7,6 +7,26 @@ If your question isn't here, please [open an issue](https://github.com/alonsorob
 or peek at `events.jsonl` (canonical record of every signal sample,
 rule verdict, and action AT-Field took).
 
+## Can I scrape AT-Field with Prometheus?
+
+Yes. The watchdog service exposes a Prometheus exposition-format
+endpoint at `http://127.0.0.1:8765/metrics`. Drop this into your
+`prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: atfield
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['127.0.0.1:8765']
+```
+
+You'll get gauges per signal (`atfield_signal{signal=...,unit=...,source=...}`),
+per-rule `fraction_over`/`threshold`, a counter for total TRIGGER
+verdicts, plus service-level uptime and pause state. The endpoint is
+plain text and binds 127.0.0.1 only -- if you want a remote Grafana to
+scrape it, front it with a reverse proxy.
+
 ---
 
 ## "Why was my training job killed?"
