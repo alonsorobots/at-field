@@ -43,3 +43,8 @@ resources/LibreHardwareMonitor/
 
 # PyInstaller
 *.spec
+
+# Planning / handoff docs — kept local, not in git history
+/PLANNING.md
+/docs/chat-history.md
+/docs/planning/
