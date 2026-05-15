@@ -554,10 +554,14 @@ class TestPatchRule:
         assert "out of range" in data["error"]
 
     def test_missing_threshold_returns_400(self, server):
+        # PATCH with empty body is rejected; the server now accepts any of
+        # {threshold, window_s, cooldown_s, action, min_fraction_over} so
+        # the error message reads 'non-empty JSON object' rather than
+        # mentioning threshold specifically.
         _, host, port = server
         status, data = _patch(host, port, "/rules/ram-pressure", {})
         assert status == 400
-        assert "threshold" in data["error"]
+        assert "non-empty" in data["error"].lower()
 
     def test_non_numeric_threshold_returns_400(self, server):
         _, host, port = server
@@ -572,6 +576,84 @@ class TestPatchRule:
         # rule name' error out of the way of legitimate 4xx noise.
         status, _data = _patch(host, port, "/rules", {"threshold": 50.0})
         assert status == 404
+
+    # ------------------------------------------------------------------
+    # Multi-field PATCH (window_s / cooldown_s / action)
+    # ------------------------------------------------------------------
+
+    def test_patch_window_seconds(self, tmp_path, server):
+        state, host, port = server
+        state.set_config_path(tmp_path / "config.toml")
+        status, data = _patch(host, port, "/rules/ram-pressure",
+                              {"window_s": 45})
+        assert status == 200, data
+        assert data["accepted"] == {"window_s": 45}
+        assert data["reload_queued"] is True
+        # Confirm the on-disk config was actually rewritten.
+        text = (tmp_path / "config.toml").read_text(encoding="utf-8")
+        assert "window_s = 45" in text
+
+    def test_patch_cooldown_seconds(self, tmp_path, server):
+        state, host, port = server
+        state.set_config_path(tmp_path / "config.toml")
+        status, data = _patch(host, port, "/rules/ram-pressure",
+                              {"cooldown_s": 120})
+        assert status == 200, data
+        assert data["accepted"] == {"cooldown_s": 120}
+        text = (tmp_path / "config.toml").read_text(encoding="utf-8")
+        assert "cooldown_s = 120" in text
+
+    def test_patch_action(self, tmp_path, server):
+        state, host, port = server
+        state.set_config_path(tmp_path / "config.toml")
+        status, data = _patch(host, port, "/rules/ram-pressure",
+                              {"action": "log"})
+        assert status == 200, data
+        assert data["accepted"] == {"action": "log"}
+        text = (tmp_path / "config.toml").read_text(encoding="utf-8")
+        assert 'action = "log"' in text
+
+    def test_patch_invalid_action_rejected(self, server):
+        _, host, port = server
+        status, data = _patch(host, port, "/rules/ram-pressure",
+                              {"action": "explode"})
+        assert status == 400
+        assert "kill" in data["error"]
+
+    def test_patch_combined_threshold_window_cooldown(self, tmp_path, server):
+        # All three fields in a single PATCH (the slider + window/cooldown
+        # editors fire one combined request when the user hits 'apply').
+        state, host, port = server
+        state.set_config_path(tmp_path / "config.toml")
+        status, data = _patch(host, port, "/rules/ram-pressure", {
+            "threshold": 88.0,
+            "window_s": 30,
+            "cooldown_s": 90,
+        })
+        assert status == 200, data
+        assert data["accepted"]["threshold"] == 88.0
+        assert data["accepted"]["window_s"] == 30
+        assert data["accepted"]["cooldown_s"] == 90
+        # Threshold-tier classification is still echoed (UI optimism).
+        assert "tier" in data
+        text = (tmp_path / "config.toml").read_text(encoding="utf-8")
+        assert "threshold = 88.0" in text
+        assert "window_s = 30" in text
+        assert "cooldown_s = 90" in text
+
+    def test_patch_unknown_field_rejected(self, server):
+        _, host, port = server
+        status, data = _patch(host, port, "/rules/ram-pressure",
+                              {"hovercraft": True})
+        assert status == 400
+        assert "hovercraft" in data["error"]
+
+    def test_patch_window_out_of_range(self, server):
+        _, host, port = server
+        status, data = _patch(host, port, "/rules/ram-pressure",
+                              {"window_s": 9000})
+        assert status == 400
+        assert "1..600" in data["error"]
 
 
 class TestApplyProfilePreset:

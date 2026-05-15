@@ -149,6 +149,9 @@ export interface EffectiveRuleView {
   window_s: number;
   min_fraction_over: number;
   action: "log" | "throttle" | "kill";
+  /** Per-rule cooldown override (seconds). null means inherit from
+      kill.post_kill_cooldown_seconds. The Settings sliders edit this. */
+  cooldown_s: number | null;
   min_samples: number;
   verdict: RuleVerdict;
   fraction_over: number;
@@ -158,6 +161,16 @@ export interface EffectiveRuleView {
   /** Slider metadata. Null for user-defined rules without canonical
       tier definitions (those just don't get a slider in the UI). */
   tuning: RuleTuning | null;
+}
+
+/** Subset of EffectiveRule fields the dashboard is allowed to PATCH.
+    Mirrors the server's MUTABLE_RULE_FIELDS whitelist. */
+export interface RuleFieldUpdate {
+  threshold?: number;
+  window_s?: number;
+  cooldown_s?: number;
+  min_fraction_over?: number;
+  action?: "log" | "throttle" | "kill";
 }
 
 export interface DisabledRuleView {
@@ -210,10 +223,23 @@ export const api = {
   unpause: () => jpost<{ paused: boolean; cleared: boolean }>("/unpause"),
   reload: () => jpost<{ reload_queued: boolean }>("/reload"),
   patchRule: (baseRuleName: string, threshold: number) =>
-    jpatch<{ rule: string; threshold: number; tier: RuleTier; reload_queued: boolean }>(
-      `/rules/${encodeURIComponent(baseRuleName)}`,
-      { threshold },
-    ),
+    jpatch<{
+      rule: string;
+      accepted: Record<string, number | string>;
+      threshold?: number;
+      tier?: RuleTier;
+      reload_queued: boolean;
+    }>(`/rules/${encodeURIComponent(baseRuleName)}`, { threshold }),
+  /** Multi-field PATCH used by the Settings tab (window_s, cooldown_s,
+      action). Threshold-only callers can keep using `patchRule`. */
+  patchRuleFields: (baseRuleName: string, updates: RuleFieldUpdate) =>
+    jpatch<{
+      rule: string;
+      accepted: Record<string, number | string>;
+      threshold?: number;
+      tier?: RuleTier;
+      reload_queued: boolean;
+    }>(`/rules/${encodeURIComponent(baseRuleName)}`, updates),
   applyProfile: (profile: "aggressive" | "normal" | "relaxed") =>
     jpost<{ profile: string; applied: Record<string, number>; reload_queued: boolean }>(
       "/profile",

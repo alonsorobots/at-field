@@ -37,10 +37,26 @@ from atfield.config import (
 )
 
 __all__ = [
+    "MUTABLE_RULE_FIELDS",
     "ConfigWriteError",
     "materialize_default_config",
+    "update_rule_field",
     "update_rule_threshold",
 ]
+
+# Whitelist of rule fields the dashboard is allowed to mutate. Each maps to
+# (a Python type for validation, a render function that produces the TOML
+# literal). The API layer cross-checks PATCH payloads against this map so
+# we don't accidentally let the UI rewrite something that requires a
+# service restart (e.g. the `name` field).
+MUTABLE_RULE_FIELDS: dict[str, type] = {
+    "threshold": float,
+    "window_s": int,
+    "cooldown_s": int,
+    "action": str,
+    "min_fraction_over": float,
+}
+
 
 
 class ConfigWriteError(RuntimeError):
@@ -66,18 +82,49 @@ def update_rule_threshold(
 ) -> None:
     """Atomically set ``rule_name``'s threshold to ``new_threshold``.
 
+    Thin wrapper over :func:`update_rule_field` kept for back-compat with
+    the dashboard's PHASE 1 patch endpoint and external callers (e.g.
+    tests). Equivalent to ``update_rule_field(path, name, "threshold", v)``.
+    """
+    update_rule_field(config_path, rule_name, "threshold", new_threshold)
+
+
+def update_rule_field(
+    config_path: Path,
+    rule_name: str,
+    field: str,
+    new_value: object,
+) -> None:
+    """Atomically set ``rule_name``'s ``field`` to ``new_value``.
+
     Workflow:
 
-    1. If ``config_path`` doesn't exist, materialize a default config first
+    1. Reject any field not in :data:`MUTABLE_RULE_FIELDS`.
+    2. If ``config_path`` doesn't exist, materialize a default config first
        so the user gets a hand-editable file they can keep tweaking.
-    2. Locate the ``[[rules]]`` block whose ``name = "<rule_name>"`` matches.
-    3. Replace the first ``threshold = X`` line within that block.
-    4. Write to a tempfile in the same directory + atomic rename
-       (``os.replace`` is atomic on Windows for same-volume targets).
+    3. Locate the ``[[rules]]`` block whose ``name = "<rule_name>"`` matches.
+    4. Replace the first ``<field> = X`` line within that block. If the
+       line doesn't exist (e.g. ``cooldown_s`` is omitted from the
+       starter config when None), inject one immediately after the rule's
+       ``action = "..."`` line so the file stays well-formed.
+    5. Write atomically.
 
-    Raises ``ConfigWriteError`` if the rule isn't found, the threshold
-    line is missing, or the file can't be written.
+    Raises ``ConfigWriteError`` on validation, lookup, or I/O failures.
     """
+    if field not in MUTABLE_RULE_FIELDS:
+        raise ConfigWriteError(
+            f"field {field!r} is not in the set of dashboard-tunable rule "
+            f"fields ({sorted(MUTABLE_RULE_FIELDS)})"
+        )
+    expected_type = MUTABLE_RULE_FIELDS[field]
+    if not isinstance(new_value, expected_type) and not (
+        expected_type is float and isinstance(new_value, int)
+    ):
+        raise ConfigWriteError(
+            f"value for {field!r} must be {expected_type.__name__}, "
+            f"got {type(new_value).__name__}"
+        )
+
     config_path = Path(config_path)
     if not config_path.exists():
         materialize_default_config(config_path)
@@ -87,11 +134,11 @@ def update_rule_threshold(
     except OSError as exc:
         raise ConfigWriteError(f"cannot read {config_path}: {exc}") from exc
 
-    new_text = _replace_rule_threshold(text, rule_name, new_threshold)
+    rendered = _render_field_value(field, new_value)
+    new_text = _replace_or_inject_rule_field(text, rule_name, field, rendered)
     if new_text is None:
         raise ConfigWriteError(
-            f"rule {rule_name!r} not found in {config_path} "
-            f"(or its [[rules]] block has no `threshold = ...` line)"
+            f"rule {rule_name!r} not found in {config_path}"
         )
 
     _atomic_write(config_path, new_text)
@@ -116,28 +163,47 @@ def materialize_default_config(config_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _replace_rule_threshold(text: str, rule_name: str, new_threshold: float) -> str | None:
-    """Return ``text`` with the matching rule's threshold updated, or None
-    if the target rule + its threshold line couldn't be located."""
+def _replace_or_inject_rule_field(
+    text: str,
+    rule_name: str,
+    field: str,
+    rendered_value: str,
+) -> str | None:
+    """Return ``text`` with the matching rule's ``field`` set to
+    ``rendered_value`` (already a TOML literal). Returns None if the rule
+    block can't be found.
+
+    If the rule block contains a matching ``field = ...`` line, we
+    rewrite it in place (preserving any trailing comment + newline style).
+    If the line doesn't exist (common for optional fields like
+    ``cooldown_s`` that the default renderer omits when None), we inject
+    a new line at the end of the rule block.
+    """
     lines = text.splitlines(keepends=True)
     out: list[str] = []
     in_rule_block = False
     in_target = False
-    found_threshold = False
-    pending_block_start = -1  # so we can scan backwards for `name` if it
-                              # comes AFTER `threshold` (rare but legal)
+    found_field = False
+    target_block_end_idx = -1  # index in `out` of last appended line of the
+                               # target block, for end-of-block injection.
+
+    field_line_re = re.compile(
+        rf"^(?P<prefix>\s*{re.escape(field)}\s*=\s*)"
+        rf"(?P<value>(?:'[^']*'|\"[^\"]*\"|-?\d+(?:\.\d+)?|true|false))"
+        rf"(?P<trailing>.*?)$"
+    )
 
     for line in lines:
         stripped = line.strip()
 
-        # New `[[rules]]` header -- close any prior block and start fresh.
         if stripped.startswith("[[rules]]"):
+            # Closing the previous target block: if we never saw the field
+            # line, we'll need to inject. We do that AFTER walking the
+            # whole text so we don't disturb iteration here.
             in_rule_block = True
             in_target = False
-            pending_block_start = len(out)
             out.append(line)
             continue
-        # Any other section header closes the current `[[rules]]` block.
         if stripped.startswith("[") and not stripped.startswith("[["):
             in_rule_block = False
             in_target = False
@@ -149,31 +215,67 @@ def _replace_rule_threshold(text: str, rule_name: str, new_threshold: float) -> 
             if m_name and m_name.group("name") == rule_name:
                 in_target = True
                 out.append(line)
+                target_block_end_idx = len(out) - 1
                 continue
-            if in_target and not found_threshold:
-                m_th = _THRESHOLD_LINE.match(line)
-                if m_th:
-                    rendered = _render_float(new_threshold)
-                    rebuilt = (
-                        f"{m_th.group('prefix')}{rendered}{m_th.group('trailing')}"
-                    )
-                    # Preserve trailing newline if the original had one.
-                    if line.endswith("\r\n"):
-                        rebuilt += "\r\n"
-                    elif line.endswith("\n"):
-                        rebuilt += "\n"
-                    out.append(rebuilt)
-                    found_threshold = True
-                    continue
+            if in_target:
+                # Track the last non-blank line of the target block so we
+                # know where to inject if needed.
+                if stripped:
+                    target_block_end_idx = len(out)
+                if not found_field:
+                    m_field = field_line_re.match(line)
+                    if m_field:
+                        rebuilt = (
+                            f"{m_field.group('prefix')}{rendered_value}"
+                            f"{m_field.group('trailing')}"
+                        )
+                        if line.endswith("\r\n"):
+                            rebuilt += "\r\n"
+                        elif line.endswith("\n"):
+                            rebuilt += "\n"
+                        out.append(rebuilt)
+                        found_field = True
+                        target_block_end_idx = len(out) - 1
+                        continue
 
         out.append(line)
 
-    if not found_threshold:
-        # Couldn't find the rule (or the rule had no threshold line we
-        # could match). Caller turns this into a 4xx.
-        return None
-    _ = pending_block_start  # silence linter; reserved for future name-after-threshold
+    if target_block_end_idx == -1:
+        return None  # rule wasn't found
+
+    if not found_field:
+        # Inject a new field line right after the last non-blank line of
+        # the target block. We choose the existing line ending convention
+        # so we don't mix CRLF and LF.
+        anchor = out[target_block_end_idx]
+        eol = "\r\n" if anchor.endswith("\r\n") else "\n"
+        injected = f"{field} = {rendered_value}{eol}"
+        out.insert(target_block_end_idx + 1, injected)
+
     return "".join(out)
+
+
+def _render_field_value(field: str, value: object) -> str:
+    """Render ``value`` in the TOML literal form appropriate for ``field``.
+
+    Strings are quoted; floats keep at least one decimal; ints stay int.
+    Action gets a tighter validation: only the actuator-supported kinds
+    survive (kill / throttle / log).
+    """
+    if field in ("threshold", "min_fraction_over"):
+        return _render_float(float(value))  # type: ignore[arg-type]
+    if field in ("window_s", "cooldown_s"):
+        return str(int(value))  # type: ignore[arg-type]
+    if field == "action":
+        if not isinstance(value, str):
+            raise ConfigWriteError("action must be a string")
+        kind = value.strip()
+        if kind not in {"kill", "throttle", "log"}:
+            raise ConfigWriteError(
+                f"action must be one of kill / throttle / log, got {kind!r}"
+            )
+        return f'"{kind}"'
+    raise ConfigWriteError(f"unrenderable field {field!r}")
 
 
 def _render_float(v: float) -> str:

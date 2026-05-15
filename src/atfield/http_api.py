@@ -45,10 +45,16 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from atfield.config_writer import (
+    MUTABLE_RULE_FIELDS,
     ConfigWriteError,
+    update_rule_field,
     update_rule_threshold,
 )
 from atfield.policy import Action, EffectiveRule, PolicyEngine
+from atfield.prometheus_exporter import (
+    PROMETHEUS_CONTENT_TYPE,
+    render_metrics,
+)
 from atfield.rule_profiles import (
     PROFILE_PRESETS,
     RULE_PROFILES,
@@ -495,6 +501,67 @@ class ServiceState:
         update_rule_threshold(self.config_path(), base_rule_name, new_threshold)
         self._request_reload()
 
+    def patch_rule_fields(
+        self,
+        base_rule_name: str,
+        updates: dict[str, object],
+    ) -> dict[str, object]:
+        """Apply a multi-field PATCH to a rule. Each field in ``updates`` is
+        validated against :data:`MUTABLE_RULE_FIELDS` and bounds-checked
+        where applicable. Threshold goes through the existing tier-aware
+        ``patch_rule_threshold`` so its slider validation stays consistent.
+        Returns the dict of accepted updates so the API can echo them.
+        """
+        if not isinstance(updates, dict) or not updates:
+            raise ValueError("PATCH body must be a non-empty JSON object")
+        unknown = set(updates) - set(MUTABLE_RULE_FIELDS)
+        if unknown:
+            raise ValueError(
+                f"unknown field(s) {sorted(unknown)}; "
+                f"allowed: {sorted(MUTABLE_RULE_FIELDS)}"
+            )
+
+        accepted: dict[str, object] = {}
+        for field, value in updates.items():
+            if field == "threshold":
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    raise ValueError("'threshold' must be a number")
+                self.patch_rule_threshold(base_rule_name, float(value))
+                accepted[field] = float(value)
+                continue
+            if field == "window_s":
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise ValueError("'window_s' must be an integer (seconds)")
+                if not (1 <= value <= 600):
+                    raise ValueError(f"window_s must be 1..600, got {value}")
+                update_rule_field(self.config_path(), base_rule_name, field, value)
+                accepted[field] = value
+            elif field == "cooldown_s":
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise ValueError("'cooldown_s' must be an integer (seconds)")
+                if not (0 <= value <= 24 * 3600):
+                    raise ValueError(f"cooldown_s must be 0..86400, got {value}")
+                update_rule_field(self.config_path(), base_rule_name, field, value)
+                accepted[field] = value
+            elif field == "min_fraction_over":
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    raise ValueError("'min_fraction_over' must be a number")
+                f = float(value)
+                if not (0.0 <= f <= 1.0):
+                    raise ValueError(f"min_fraction_over must be 0..1, got {f}")
+                update_rule_field(self.config_path(), base_rule_name, field, f)
+                accepted[field] = f
+            elif field == "action":
+                if value not in {"kill", "throttle", "log"}:
+                    raise ValueError(f"action must be kill / throttle / log, got {value!r}")
+                update_rule_field(self.config_path(), base_rule_name, field, value)
+                accepted[field] = value
+        # Threshold-only path already requested a reload; otherwise we
+        # need one here. Simpler to just request unconditionally -- the
+        # service collapses repeated requests at the next tick.
+        self._request_reload()
+        return accepted
+
     def apply_profile_preset(self, profile_name: str) -> dict[str, float]:
         """Apply an Aggressive/Normal/Relaxed preset to every known rule.
 
@@ -549,6 +616,9 @@ def _serialize_rule(rule: EffectiveRule, stats: dict[str, Any], now_ns: int) -> 
         "window_s": rule.base_rule.window_s,
         "min_fraction_over": rule.base_rule.min_fraction_over,
         "action": rule.base_rule.action,
+        # Per-rule override (None means inherit from kill.post_kill_cooldown_seconds).
+        # Surfaced so the Settings sliders can show what the user actually wrote.
+        "cooldown_s": rule.base_rule.cooldown_s,
         "min_samples": rule.min_samples,
         "verdict": stats.get("last_verdict", "INSUFFICIENT"),
         "fraction_over": stats.get("last_fraction", 0.0),
@@ -685,38 +755,46 @@ def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
                 parsed = urlsplit(self.path)
                 path = parsed.path.rstrip("/") or "/"
                 body = self._read_json_body()
-                # PATCH /rules/<base_rule_name>  body: {"threshold": <number>}
+                # PATCH /rules/<base_rule_name>
+                # Body may include any of {threshold, window_s, cooldown_s,
+                # action, min_fraction_over}. Each field is independently
+                # validated and persisted; partial-success isn't supported
+                # (any failure aborts before later fields are touched).
                 if path.startswith("/rules/"):
                     rule_name = path[len("/rules/"):]
                     if not rule_name or "/" in rule_name:
                         self._send_error(HTTPStatus.BAD_REQUEST, "missing rule name")
                         return
-                    if not isinstance(body, dict) or "threshold" not in body:
-                        self._send_error(HTTPStatus.BAD_REQUEST,
-                                         "body must be an object with 'threshold'")
-                        return
-                    raw_threshold = body["threshold"]
-                    if not isinstance(raw_threshold, (int, float)) or isinstance(raw_threshold, bool):
-                        self._send_error(HTTPStatus.BAD_REQUEST, "'threshold' must be a number")
+                    if not isinstance(body, dict) or not body:
+                        self._send_error(
+                            HTTPStatus.BAD_REQUEST,
+                            "body must be a non-empty JSON object",
+                        )
                         return
                     try:
-                        state.patch_rule_threshold(rule_name, float(raw_threshold))
+                        accepted = state.patch_rule_fields(rule_name, body)
                     except ValueError as exc:
-                        # ValueError covers both unknown rule and out-of-range
-                        # threshold; the error message is human-readable.
                         self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
                         return
                     except ConfigWriteError as exc:
                         _log.error("config write failed: %s", exc)
-                        self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR,
-                                         f"config write failed: {exc}")
+                        self._send_error(
+                            HTTPStatus.INTERNAL_SERVER_ERROR,
+                            f"config write failed: {exc}",
+                        )
                         return
-                    self._send_json({
+                    payload: dict[str, Any] = {
                         "rule": rule_name,
-                        "threshold": float(raw_threshold),
-                        "tier": classify(rule_name, float(raw_threshold)),
+                        "accepted": accepted,
                         "reload_queued": True,
-                    })
+                    }
+                    # Echo the slider's tier classification when threshold
+                    # was part of the patch -- preserves the v0.1 contract
+                    # the dashboard depends on for optimistic UI updates.
+                    if "threshold" in accepted and isinstance(accepted["threshold"], (int, float)):
+                        payload["threshold"] = float(accepted["threshold"])
+                        payload["tier"] = classify(rule_name, float(accepted["threshold"]))
+                    self._send_json(payload)
                 else:
                     self._send_error(HTTPStatus.NOT_FOUND, f"unknown endpoint {path}")
             except Exception:
@@ -754,6 +832,15 @@ def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
                     limit = max(1, min(_EVENTS_MAX_LIMIT, limit))
                     events = _tail_events(state.events_path(), since=since, limit=limit)
                     self._send_json({"events": events, "count": len(events)})
+                elif path == "/metrics":
+                    # Prometheus text-exposition. Build all three snapshots
+                    # under the state lock and hand them to the renderer.
+                    body = render_metrics(
+                        health=state.snapshot_health(),
+                        signals=state.snapshot_signals(since=None),
+                        rules=state.snapshot_rules(),
+                    )
+                    self._send_text(body, content_type=PROMETHEUS_CONTENT_TYPE)
                 else:
                     self._send_error(HTTPStatus.NOT_FOUND, f"unknown endpoint {path}")
             except Exception:
@@ -832,6 +919,26 @@ def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
             data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self._send_cors_headers()
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _send_text(
+            self,
+            data: bytes,
+            *,
+            content_type: str,
+            status: int = 200,
+        ) -> None:
+            """Send a pre-encoded body with a caller-chosen Content-Type.
+
+            Used by /metrics (Prometheus text exposition) where we need
+            text/plain instead of application/json.
+            """
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self._send_cors_headers()
