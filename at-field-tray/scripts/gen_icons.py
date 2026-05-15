@@ -10,9 +10,11 @@ Source-of-truth artwork lives in ``brand/``. Two tiers:
     every shipped Windows app does this.
 
   AUTO-RESAMPLED (fallback)
-    brand/logo2.png  -- thick three-hex master (1024×1024). Used at any
-                        size where no hand-painted version exists. Trim
-                        → Lanczos resize → alpha-binarize.
+    brand/logo_1024_thick.png  -- thick three-hex master (1024×1024).
+                        Used at any size where no hand-painted version
+                        exists. Trim → Lanczos resize → alpha-binarize.
+                        (Falls back to brand/logo_1024.png if the thick
+                        variant isn't on disk -- both are accepted.)
 
 Outputs (in ``at-field-tray/src-tauri/icons/``):
 
@@ -39,8 +41,33 @@ from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 BRAND = REPO_ROOT / "brand"
-THICK_MASTER = BRAND / "logo2.png"
 OUT_DIR = REPO_ROOT / "at-field-tray" / "src-tauri" / "icons"
+
+
+def _resolve_thick_master() -> Path:
+    """Find the auto-fallback master regardless of which name the artist used.
+
+    The brand directory has gone through a couple of renames -- ``logo.png``
+    became ``logo2.png`` became ``logo_1024.png`` / ``logo_1024_thick.png``.
+    Rather than break every time the artist tweaks a filename, we accept
+    the canonical names in priority order and use whichever exists.
+    """
+    candidates = [
+        BRAND / "logo_1024_thick.png",
+        BRAND / "logo_1024.png",
+        BRAND / "logo2.png",
+        BRAND / "logo.png",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+    raise FileNotFoundError(
+        f"no auto-fallback master in {BRAND}; expected one of "
+        + ", ".join(c.name for c in candidates)
+    )
+
+
+THICK_MASTER = _resolve_thick_master()
 
 _HAND_PATTERN = re.compile(r"^logo_(\d+)\.png$", re.IGNORECASE)
 
@@ -135,7 +162,7 @@ def _render_at(
     """Render the icon at ``size`` px. Returns (image, source-tag)."""
     if size in hand:
         return _load(hand[size]), f"HAND ({hand[size].name})"
-    return _render_auto(auto_master, size), "auto (logo2)"
+    return _render_auto(auto_master, size), f"auto ({THICK_MASTER.name})"
 
 
 def main() -> None:
@@ -147,7 +174,7 @@ def main() -> None:
         sizes_str = ", ".join(f"{s}px" for s in sorted(hand))
         print(f"hand-painted icons found: {sizes_str}")
     else:
-        print("no hand-painted icons found; everything resampled from logo2.png")
+        print(f"no hand-painted icons found; everything resampled from {THICK_MASTER.name}")
     print()
 
     work = {
@@ -166,7 +193,7 @@ def main() -> None:
     # cards, About dialog). Always use the full-detail thick master at
     # native 1024 -- no resize, no binarize.
     auto_master.save(OUT_DIR / "icon.png", "PNG")
-    print(f"  wrote icon.png (1024x1024) [logo2 verbatim]")
+    print(f"  wrote icon.png (1024x1024) [{THICK_MASTER.name} verbatim]")
 
     # Multi-resolution .ico for Windows. Per-size we pick the hand-painted
     # version if available, otherwise auto-resample from logo2. Includes
