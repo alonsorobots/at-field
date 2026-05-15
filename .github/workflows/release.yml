@@ -81,6 +81,14 @@ jobs:
       - name: Build standalone bundle
         run: pyinstaller --noconfirm --clean packaging/pyinstaller/atfield.spec
 
+      # Vendor LHM into the bundle so the watchdog ships VRAM-junction
+      # and CPU-package temp support out of the box. fetch_lhm.ps1 drops
+      # LibreHardwareMonitor.exe + its DLLs into dist/atfield/ where
+      # find_lhm_executable() looks first (next to atfield-service.exe).
+      - name: Vendor LibreHardwareMonitor
+        shell: pwsh
+        run: pwsh scripts/fetch_lhm.ps1
+
       - name: Smoke-test bundled binaries
         # Make sure the frozen exes at least respond to --help before we
         # ship them. Catches missing hidden imports / data files.
@@ -105,10 +113,15 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────
   # 3. Tauri tray app installer (Windows NSIS).
+  #
+  # Depends on `standalone` so we can stage dist/atfield/ -- the Tauri
+  # config references it as bundle.resources, producing a single
+  # installer that ships BOTH the tray app AND the watchdog binaries.
   # ─────────────────────────────────────────────────────────────────
   tray-installer:
     name: Tauri tray installer
     runs-on: windows-latest
+    needs: standalone
     steps:
       - uses: actions/checkout@v4
 
@@ -125,6 +138,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "at-field-tray/src-tauri -> target"
+
+      # Re-stage the standalone bundle artifact at dist/atfield/ so
+      # bundle.resources in tauri.conf.json resolves correctly.
+      - name: Download standalone bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: standalone-bundle
+          path: standalone-zip
+
+      - name: Stage standalone at dist/atfield/
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem standalone-zip -Filter atfield-*-windows-x64.zip |
+                 Select-Object -First 1
+          if (-not $zip) { throw "Standalone bundle artifact missing." }
+          New-Item -ItemType Directory -Path dist/atfield -Force | Out-Null
+          Expand-Archive -Path $zip.FullName -DestinationPath dist/atfield -Force
+          Get-ChildItem dist/atfield | Format-Table -AutoSize
 
       - name: Install npm deps
         working-directory: at-field-tray
