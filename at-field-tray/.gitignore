@@ -2,6 +2,9 @@
 node_modules/
 dist/
 *.tsbuildinfo
+# tsc -b artifacts from referenced config
+vite.config.d.ts
+vite.config.js
 
 # Rust / Tauri build output
 src-tauri/target/
