@@ -316,14 +316,23 @@ class LhmSupervisor:
             self._status.pid = None
 
     def _spawn_once(self) -> None:
-        """Spawn LHM and update status. Raises on spawn failure."""
+        """Spawn LHM and update status. Raises on spawn failure.
+
+        LHM 0.9.x doesn't take CLI flags for server/port -- those are read
+        from ``LibreHardwareMonitor.config`` (an XML file LHM persists in
+        its own directory). The bundled installer drops a pre-baked
+        config there with the web server enabled on the port the
+        AT-Field LHM collector reads (8085 by default). The
+        ``port`` field on this config is informational only at the
+        moment, kept on the dataclass so that future LHM versions which
+        DO accept a CLI port flag can be supported without an API
+        change. ``extra_args`` is still honored as an escape hatch.
+        """
         args = [
             str(self._config.executable),
-            "--server",
-            "--port", str(self._config.port),
             *self._config.extra_args,
         ]
-        _log.info("starting LHM: %s", " ".join(args))
+        _log.info("starting LHM: %s (port from config file)", " ".join(args))
         proc = self._spawner.spawn(args)
         with self._proc_lock:
             self._proc = proc

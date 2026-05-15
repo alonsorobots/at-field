@@ -250,6 +250,20 @@ def run_service(
 
     audit = AuditWriter(sd)
 
+    # Best-effort spawn LibreHardwareMonitor as a child process before we
+    # probe collectors. Two reasons to do this here rather than letting
+    # the user manage LHM separately:
+    #   1. LHM is what unlocks VRAM-junction temp on consumer NVIDIA
+    #      cards and CPU-package temp; "AT-Field works" is half-true
+    #      without it.
+    #   2. Tying LHM's lifecycle to ours means it dies with us instead
+    #      of lingering as a forgotten background process.
+    # find_lhm_executable() returns None when no LHM binary is on disk;
+    # in that case we skip silently and the LHM collector's probe
+    # surfaces "unavailable" later. The bundled installer (post-v0.2.0)
+    # drops an LHM build under the install root so this Just Works.
+    lhm_supervisor = _maybe_start_lhm_supervisor()
+
     # Probe collectors -> negotiate signal map
     collectors, probe_results = _probe_all_collectors(audit)
     available_signals: set[str] = set()
@@ -463,10 +477,67 @@ def run_service(
                 c.shutdown()  # type: ignore[attr-defined]
             except Exception:
                 pass
+        # Resume any throttled processes -- a service crash mid-throttle
+        # would otherwise leave the workload paused forever.
+        try:
+            actuator.shutdown()
+        except Exception:
+            _log.debug("actuator.shutdown() raised", exc_info=True)
+        # Take LHM down with us. If we leak it, every subsequent
+        # AT-Field restart spawns a second copy and they fight for the
+        # 8085 port.
+        if lhm_supervisor is not None:
+            try:
+                lhm_supervisor.stop()
+            except Exception:
+                _log.debug("lhm_supervisor.stop() raised", exc_info=True)
         audit.write_shutdown("normal" if exit_code == 0 else "error")
         _log.info("AT-Field service stopped (exit=%d, ticks=%d)", exit_code, ticks)
 
     return exit_code
+
+
+def _maybe_start_lhm_supervisor():
+    """Locate LHM on disk and start a supervisor for it. Returns None if
+    no LHM binary is found -- AT-Field still runs without VRAM-junction
+    or CPU-package temps; the LHM collector's probe just reports
+    'unavailable' and any rules that need those signals get disabled
+    with a clear reason.
+    """
+    try:
+        from atfield.lhm_supervisor import (
+            LhmSupervisor,
+            LhmSupervisorConfig,
+            find_lhm_executable,
+        )
+    except ImportError:
+        # Module isn't a hard dep; old/dev environments without it
+        # should still be able to run the watchdog.
+        _log.debug("lhm_supervisor module not importable; skipping LHM auto-start")
+        return None
+
+    # Search next to the AT-Field binaries first (the bundled installer
+    # drops LHM there), then fall back to standard paths.
+    bundled_root: Path | None = None
+    try:
+        bundled_root = Path(sys.executable).parent
+    except Exception:
+        bundled_root = None
+
+    exe = find_lhm_executable(bundled_root=bundled_root)
+    if exe is None:
+        _log.info(
+            "LHM not found on disk; skipping auto-spawn. "
+            "Install LibreHardwareMonitor or set ATFIELD_LHM_EXE for VRAM-junction "
+            "and CPU-package temps."
+        )
+        return None
+
+    cfg = LhmSupervisorConfig(executable=exe)
+    sup = LhmSupervisor(cfg)
+    sup.start()
+    _log.info("LHM supervisor started (executable=%s, port=%d)", exe, cfg.port)
+    return sup
 
 
 # ---------------------------------------------------------------------------
