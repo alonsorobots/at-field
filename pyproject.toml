@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "atfield"
+version = "0.1.0"
+description = "Always-on Windows hardware watchdog for AI workloads. Monitors NVIDIA GPU/VRAM temps, system RAM, pagefile and CPU temperature; kills runaway Python/PyTorch processes before they damage your hardware."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Alonso Martinez" }]
+keywords = [
+    "gpu", "vram", "nvidia", "windows", "watchdog", "thermal",
+    "ai", "pytorch", "oom-killer", "monitoring", "hardware-monitor",
+    "process-killer", "machine-learning", "deep-learning", "rtx",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Hardware",
+    "Topic :: System :: Monitoring",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = [
+    "psutil>=5.9",
+    "nvidia-ml-py>=12.535",
+    "requests>=2.31",
+    "typer>=0.12",
+    "rich>=13.7",
+    "tomli>=2.0 ; python_version < '3.11'",
+]
+
+[project.urls]
+Homepage = "https://github.com/alonsorobots/at-field"
+Repository = "https://github.com/alonsorobots/at-field"
+Issues = "https://github.com/alonsorobots/at-field/issues"
+
+[project.scripts]
+atf = "atfield.cli:app"
+atfield = "atfield.cli:app"
+atfield-service = "atfield.service:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/atfield"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
