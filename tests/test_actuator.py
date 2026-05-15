@@ -45,6 +45,8 @@ class FakeProvider:
     own: int = 99999
     terminated: list[int] = field(default_factory=list)
     killed: list[int] = field(default_factory=list)
+    suspended: list[int] = field(default_factory=list)
+    resumed: list[int] = field(default_factory=list)
 
     @classmethod
     def from_tree(cls, edges: list[tuple[int, int, str, int]], own: int = 99999) -> FakeProvider:
@@ -105,6 +107,20 @@ class FakeProvider:
     def is_alive(self, pid: int) -> bool:
         p = self.procs.get(pid)
         return bool(p and p.alive)
+
+    def suspend(self, pid: int) -> bool:
+        p = self.procs.get(pid)
+        if p is None or not p.alive:
+            return False
+        self.suspended.append(pid)
+        return True
+
+    def resume(self, pid: int) -> bool:
+        p = self.procs.get(pid)
+        if p is None or not p.alive:
+            return False
+        self.resumed.append(pid)
+        return True
 
     def _flip_dead_after_terminate(self) -> None:
         for pid in self.terminated:
@@ -447,3 +463,115 @@ class TestScriptNameFromCmdline:
     def test_double_dash_terminator(self):
         cmd = ("python.exe", "--", "weirdly-named-script")
         assert script_name_from_cmdline(cmd) == "weirdly-named-script"
+
+
+# ---------------------------------------------------------------------------
+# Throttle action (suspend/resume)
+# ---------------------------------------------------------------------------
+
+
+def _throttle_action(rule_name: str = "test", signal: str = "test.signal") -> Action:
+    return Action(
+        kind="throttle",
+        rule_name=rule_name,
+        base_rule_name=rule_name,
+        signal=signal,
+        threshold=0.0,
+        fraction_over=1.0,
+        samples_considered=10,
+        latest_value=99.0,
+        triggered_at_ns=0,
+        cooldown_seconds=10,
+    )
+
+
+class TestThrottleAction:
+    def test_throttle_suspends_root_and_descendants(self, monkeypatch):
+        from dataclasses import replace as dc_replace
+        provider = FakeProvider.from_tree([
+            (1, 0, "explorer.exe", 0),
+            (100, 1, "torchrun", 1_000_000),
+            (200, 100, "python.exe", 50_000_000),
+        ])
+        cfg = default_config()
+        # Tiny duration so the test doesn't hang.
+        cfg = dc_replace(cfg, kill=dc_replace(cfg.kill, throttle_duration_seconds=1))
+        actuator = Actuator(cfg, provider=provider)
+        try:
+            report = actuator.execute(_throttle_action(), candidate_pids=[200])
+            assert report.kill_root is not None
+            # Kill root walks up to torchrun (the launcher).
+            assert report.kill_root.pid == 100
+            # Both root and descendant got suspended.
+            assert set(provider.suspended) == {100, 200}
+            # No actual kills.
+            assert provider.killed == []
+            assert provider.terminated == []
+        finally:
+            actuator.shutdown()
+
+    def test_throttle_records_succeeded_methods(self, monkeypatch):
+        from dataclasses import replace as dc_replace
+        provider = FakeProvider.from_tree([
+            (1, 0, "explorer.exe", 0),
+            (100, 1, "python.exe", 50_000_000),
+        ])
+        cfg = default_config()
+        cfg = dc_replace(cfg, kill=dc_replace(cfg.kill, throttle_duration_seconds=1))
+        actuator = Actuator(cfg, provider=provider)
+        try:
+            report = actuator.execute(_throttle_action(), candidate_pids=[100])
+            assert all(k.method == "suspend" for k in report.killed)
+            # By design throttled procs are still alive (survived=True).
+            assert all(k.survived for k in report.killed)
+        finally:
+            actuator.shutdown()
+
+    def test_shutdown_resumes_active_throttles(self):
+        from dataclasses import replace as dc_replace
+        provider = FakeProvider.from_tree([
+            (100, 0, "python.exe", 50_000_000),
+        ])
+        cfg = default_config()
+        # Long duration so the timer won't fire during the test.
+        cfg = dc_replace(cfg, kill=dc_replace(cfg.kill, throttle_duration_seconds=600))
+        actuator = Actuator(cfg, provider=provider)
+        actuator.execute(_throttle_action(), candidate_pids=[100])
+        assert 100 in provider.suspended
+        assert 100 not in provider.resumed
+
+        actuator.shutdown()
+        assert 100 in provider.resumed
+
+    def test_throttle_with_no_eligible_offender_is_noop(self):
+        provider = FakeProvider.from_tree([
+            (1, 0, "explorer.exe", 0),
+        ])
+        actuator = Actuator(default_config(), provider=provider)
+        try:
+            report = actuator.execute(_throttle_action(), candidate_pids=[1])
+            assert report.kill_root is None
+            assert "no eligible offender" in (report.skipped_reason or "")
+            assert provider.suspended == []
+        finally:
+            actuator.shutdown()
+
+    def test_overlapping_throttles_keep_latest_timer(self):
+        """Two throttles for the same PID -- the second should cancel the
+        first's timer (longest stay wins) rather than scheduling double resumes."""
+        from dataclasses import replace as dc_replace
+        provider = FakeProvider.from_tree([
+            (100, 0, "python.exe", 50_000_000),
+        ])
+        cfg = default_config()
+        cfg = dc_replace(cfg, kill=dc_replace(cfg.kill, throttle_duration_seconds=600))
+        actuator = Actuator(cfg, provider=provider)
+        actuator.execute(_throttle_action("first"), candidate_pids=[100])
+        actuator.execute(_throttle_action("second"), candidate_pids=[100])
+        try:
+            # Both calls suspended (idempotent at the provider level).
+            assert provider.suspended.count(100) == 2
+            # Only one entry tracked -- prior timer cancelled.
+            assert len(actuator._active_throttles) == 1
+        finally:
+            actuator.shutdown()

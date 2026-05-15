@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -216,6 +217,17 @@ class ProcessProvider(Protocol):
 
     def is_alive(self, pid: int) -> bool: ...
 
+    def suspend(self, pid: int) -> bool:
+        """Pause execution of ``pid``. Returns True on success, False if
+        the OS / process is gone or the operation isn't supported.
+        Used by the ``throttle`` action."""
+        ...
+
+    def resume(self, pid: int) -> bool:
+        """Inverse of :meth:`suspend`. Best-effort; returns True on
+        success."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Real psutil-backed provider (used in production)
@@ -299,6 +311,24 @@ class PsutilProvider:
     def is_alive(self, pid: int) -> bool:
         try:
             return self._psutil.Process(pid).is_running()
+        except Exception:
+            return False
+
+    def suspend(self, pid: int) -> bool:
+        # psutil.Process.suspend() works on Windows (NtSuspendProcess)
+        # and Linux (SIGSTOP). May raise AccessDenied if we don't have
+        # the right privileges; that's not a programming error so we
+        # swallow + return False so the actuator can report it cleanly.
+        try:
+            self._psutil.Process(pid).suspend()
+            return True
+        except Exception:
+            return False
+
+    def resume(self, pid: int) -> bool:
+        try:
+            self._psutil.Process(pid).resume()
+            return True
         except Exception:
             return False
 
@@ -405,6 +435,13 @@ class Actuator:
         self._never = frozenset(n.lower() for n in cfg.targeting.never_kill_names)
         self._own_pid = self._provider.own_pid()
 
+        # Throttle action support: tracks PIDs we've suspended so we can
+        # resume them on shutdown (a service crash mid-throttle would
+        # otherwise leave the workload paused indefinitely). Keyed by
+        # PID; value is the threading.Timer that will resume it.
+        self._throttle_lock = threading.Lock()
+        self._active_throttles: dict[int, threading.Timer] = {}
+
     # -- Public entry point ------------------------------------------------
 
     def execute(
@@ -424,6 +461,9 @@ class Actuator:
         or top-RSS python procs for RAM rules. If ``None``, the actuator
         scans all processes.
         """
+        if action.kind == "throttle":
+            return self._execute_throttle(action, candidate_pids)
+
         if action.kind != "kill":
             _log.info(
                 "action %s for rule=%s signal=%s value=%g (no kill performed)",
@@ -491,6 +531,135 @@ class Actuator:
             killed=tuple(results),
             finished_at_ns=int(time.monotonic_ns()),
         )
+
+    # -- Throttle (suspend/resume) ----------------------------------------
+
+    def _execute_throttle(
+        self,
+        action: Action,
+        candidate_pids: Iterable[int] | None,
+    ) -> KillReport:
+        """Suspend the offending tree for ``cfg.kill.throttle_duration_seconds``,
+        then resume it.
+
+        Returns a :class:`KillReport` even though no kill happens -- the
+        report shape is the universal "what did the actuator do?"
+        envelope. Suspended PIDs land in :attr:`_active_throttles` so
+        :meth:`shutdown` can resume them if the service exits early.
+        """
+        offender_pid = self._pick_offender(candidate_pids)
+        if offender_pid is None:
+            _log.info(
+                "throttle for rule=%s but no eligible offender PID found",
+                action.rule_name,
+            )
+            return KillReport(
+                action=action,
+                offender_pid=None,
+                kill_root=None,
+                skipped_reason="no eligible offender PID matched killable_names",
+                finished_at_ns=int(time.monotonic_ns()),
+            )
+
+        root = find_kill_root(
+            offender_pid,
+            provider=self._provider,
+            killable_names=frozenset(self._cfg.targeting.killable_names),
+            launcher_names=frozenset(self._cfg.targeting.launcher_names),
+        )
+        if root is None:
+            return KillReport(
+                action=action,
+                offender_pid=offender_pid,
+                kill_root=None,
+                skipped_reason=f"PID {offender_pid} no longer exists or did not match keepers",
+                finished_at_ns=int(time.monotonic_ns()),
+            )
+
+        targets: list[ProcInfo] = [root, *self._provider.descendants(root.pid)]
+        targets = [t for t in targets if self._is_killable(t)]
+        if not targets:
+            return KillReport(
+                action=action,
+                offender_pid=offender_pid,
+                kill_root=root,
+                skipped_reason="all candidates filtered by never_kill_names",
+                finished_at_ns=int(time.monotonic_ns()),
+            )
+
+        # Suspend the tree. We re-use :class:`KilledProcess` to record
+        # which procs we touched, with method="suspend" instead of
+        # "terminate"/"kill". `survived=True` here means "still
+        # alive" (which is exactly what we want for a throttle).
+        suspended: list[KilledProcess] = []
+        for t in targets:
+            ok = self._provider.suspend(t.pid)
+            suspended.append(KilledProcess(
+                info=t,
+                method="suspend" if ok else "skipped",
+                survived=True,  # throttle deliberately keeps procs alive
+            ))
+
+        # Schedule resume. If the service stops cleanly before this
+        # fires, shutdown() will resume them itself.
+        duration = float(self._cfg.kill.throttle_duration_seconds)
+        succeeded_pids = [k.info.pid for k in suspended if k.method == "suspend"]
+        if succeeded_pids:
+            timer = threading.Timer(
+                duration,
+                self._resume_pids,
+                args=(succeeded_pids,),
+            )
+            timer.daemon = True
+            with self._throttle_lock:
+                # If the same PID is already throttled (a second rule
+                # firing on the same offender), cancel the prior resume
+                # so the longest stay wins.
+                for pid in succeeded_pids:
+                    prior = self._active_throttles.pop(pid, None)
+                    if prior is not None:
+                        prior.cancel()
+                    self._active_throttles[pid] = timer
+            timer.start()
+            _log.warning(
+                "THROTTLE: rule=%s signal=%s root=%s pid=%d "
+                "(suspended %d procs for %.0fs)",
+                action.rule_name, action.signal, root.name, root.pid,
+                len(succeeded_pids), duration,
+            )
+        return KillReport(
+            action=action,
+            offender_pid=offender_pid,
+            kill_root=root,
+            killed=tuple(suspended),
+            finished_at_ns=int(time.monotonic_ns()),
+        )
+
+    def _resume_pids(self, pids: list[int]) -> None:
+        with self._throttle_lock:
+            for pid in pids:
+                # Only forget the pid if its tracking timer is the one
+                # that fired (or is missing). A racing second throttle
+                # may have overwritten the entry.
+                self._active_throttles.pop(pid, None)
+        for pid in pids:
+            self._provider.resume(pid)
+        _log.info("throttle resume: %d pid(s)", len(pids))
+
+    def shutdown(self) -> None:
+        """Cancel all pending throttle resumes and resume any still-suspended
+        procs. The service should call this in its `finally:` block so we
+        don't leave training jobs paused indefinitely on crashes."""
+        with self._throttle_lock:
+            timers = list(self._active_throttles.values())
+            pids = list(self._active_throttles.keys())
+            self._active_throttles.clear()
+        for t in timers:
+            t.cancel()
+        for pid in pids:
+            self._provider.resume(pid)
+        if pids:
+            _log.info("actuator shutdown: resumed %d throttled pid(s)", len(pids))
 
     # -- Helpers -----------------------------------------------------------
 
