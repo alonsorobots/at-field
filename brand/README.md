@@ -7,11 +7,20 @@ edit the master here and re-run the generator.
 
 ## Files
 
-- **`logo.png`** — 1024×1024 RGBA. Three concentric distressed-paint hexagons
-  in the AT-Field accent orange. Inspired by the *Neon Genesis Evangelion*
-  AT-Field motif (layered octahedral shielding rendered head-on).
-  Use anywhere the full mark is appropriate: app icon, README header,
-  installer artwork, social cards, etc.
+- **`logo_1024.png`** — 1024×1024 RGBA. Three concentric distressed-paint
+  hexagons in the AT-Field accent orange. Inspired by the *Neon Genesis
+  Evangelion* AT-Field motif (layered octahedral shielding rendered
+  head-on). Use anywhere the full mark is appropriate: app icon, README
+  header, installer artwork, social cards, etc.
+- **`logo_1024_thick.png`** — alternate 1024×1024 master with thicker
+  hexagon strokes. Used by `gen_icons.py` as the auto-resample fallback
+  when no hand-painted size exists; the thicker strokes survive Lanczos
+  downscale better than the default master.
+- **`logo_16.png`, `logo_28.png`, `logo_32.png`, `logo_48.png`** — hand-
+  painted small sizes. The generator prefers these over auto-resampled
+  versions because per-pixel hand control beats Lanczos at small sizes.
+  Drop a new `logo_NN.png` in this folder to add another hand-painted
+  size (it must be exactly NN×NN px or the generator will refuse).
 
 ## Regenerating derived assets
 
