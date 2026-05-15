@@ -504,6 +504,233 @@ def test_kill(
 
 
 # ---------------------------------------------------------------------------
+# doctor -- interactive health check + setup helper
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def doctor(
+    state_dir: Path = _state_dir_option(),
+) -> None:
+    """Run a one-shot diagnostic over the whole AT-Field stack.
+
+    This is the first thing to run when something seems off. It checks:
+
+      * Service heartbeat freshness
+      * Pause sentinel state
+      * Last startup event (working signal map + disabled rules)
+      * Each collector's current probe result
+      * On-disk config validity
+
+    For each problem found, prints a concrete suggested fix. Exits 0
+    when everything is green, 1 when at least one warning fired.
+    """
+    problems: list[str] = []
+    successes: list[str] = []
+
+    # 1. State directory
+    if not state_dir.exists():
+        problems.append(
+            f"state dir does not exist: {state_dir}\n"
+            "  fix: install the service with `atf install` (elevated PowerShell)"
+        )
+    else:
+        successes.append(f"state dir present: {state_dir}")
+
+    # 2. Heartbeat
+    heartbeat = state_dir / "heartbeat.txt"
+    if state_dir.exists():
+        if heartbeat.exists():
+            try:
+                first_line = heartbeat.read_text(encoding="utf-8").strip().splitlines()[0]
+                ts = datetime.fromisoformat(first_line)
+                age_s = (datetime.now(timezone.utc) - ts).total_seconds()
+                if age_s < 30:
+                    successes.append(f"heartbeat fresh ({age_s:.1f}s old)")
+                else:
+                    problems.append(
+                        f"heartbeat stale ({age_s:.0f}s old, last={first_line})\n"
+                        "  fix: restart the service:\n"
+                        "       Stop-Service ATField; Start-Service ATField"
+                    )
+            except Exception as exc:
+                problems.append(f"heartbeat unreadable: {exc}")
+        else:
+            problems.append(
+                f"no heartbeat file at {heartbeat}\n"
+                "  fix: service has never run on this box. Try `atf install`"
+            )
+
+    # 3. Pause sentinel
+    sentinel = state_dir / "pause.sentinel"
+    if sentinel.exists():
+        try:
+            until = sentinel.read_text(encoding="utf-8").strip().splitlines()[0]
+            problems.append(
+                f"AT-Field is PAUSED until {until}\n"
+                "  fix: `atf unpause` if this is unintentional"
+            )
+        except Exception:
+            problems.append(
+                "pause sentinel exists but is unreadable -- pause is permanent\n"
+                "  fix: `atf unpause`"
+            )
+
+    # 4. Last startup event
+    events = state_dir / "events.jsonl"
+    last_startup: dict | None = None
+    if events.exists():
+        for line in events.read_text(encoding="utf-8").splitlines():
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("type") == "startup":
+                last_startup = obj
+        if last_startup is None:
+            problems.append("events.jsonl exists but has no `startup` event yet")
+        else:
+            disabled = last_startup.get("disabled_rules") or []
+            if disabled:
+                lines = "\n".join(
+                    f"      - {d['rule']} (signal {d['signal']}): {d['reason']}"
+                    for d in disabled
+                )
+                problems.append(
+                    f"{len(disabled)} rule(s) disabled at last startup:\n{lines}\n"
+                    "  fix: install the missing collector. For LHM see docs/faq.md."
+                )
+            else:
+                successes.append("all rules active per last startup")
+    else:
+        # First-run; not a problem if state_dir doesn't exist yet either
+        if state_dir.exists():
+            problems.append(
+                f"no events.jsonl in {state_dir}\n"
+                "  fix: start the service so it can produce its first event"
+            )
+
+    # 5. Live collector probes (we don't need a running service for this)
+    try:
+        from atfield.collectors.lhm import LhmCollector
+        from atfield.collectors.nvml import NvmlCollector
+        from atfield.collectors.system import SystemCollector
+
+        for c in (SystemCollector(), NvmlCollector(), LhmCollector()):
+            r = c.probe()
+            if r.available:
+                successes.append(f"collector {c.name}: OK ({r.reason})")
+            else:
+                fix = ""
+                if c.name == "lhm":
+                    fix = "\n  fix: install + run LibreHardwareMonitor (see docs/faq.md)"
+                elif c.name == "nvml":
+                    fix = "\n  fix: install NVIDIA driver + reboot, or ignore if you have no NVIDIA GPU"
+                problems.append(f"collector {c.name}: UNAVAILABLE -- {r.reason}{fix}")
+            try:
+                c.shutdown()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+    except ImportError as exc:
+        problems.append(f"could not import collectors: {exc}")
+
+    # 6. Config validity
+    config_path = _resolve_config_path(state_dir)
+    if config_path is None:
+        successes.append("no config.toml found -- using locked-in defaults")
+    else:
+        try:
+            from atfield.config import load_config
+            load_config(config_path)
+            successes.append(f"config valid: {config_path}")
+        except Exception as exc:
+            problems.append(
+                f"config INVALID: {config_path}\n  {exc}\n"
+                "  fix: revert to defaults by deleting the file, or correct the indicated key"
+            )
+
+    # ── Render report ────────────────────────────────────────────────
+    console.print()
+    console.print("[bold]AT-Field doctor[/]")
+    console.print()
+    if successes:
+        console.print(f"[green]{len(successes)} check(s) passed:[/]")
+        for s in successes:
+            console.print(f"  [green]+[/] {s}")
+        console.print()
+    if problems:
+        console.print(f"[yellow]{len(problems)} issue(s) found:[/]")
+        for p in problems:
+            console.print(f"  [yellow]![/] {p}")
+        console.print()
+        console.print(
+            "[dim]Re-run after applying fixes. For deeper troubleshooting see docs/faq.md.[/]"
+        )
+        raise typer.Exit(code=1)
+    console.print("[green]All clear.[/]")
+
+
+# ---------------------------------------------------------------------------
+# set-profile -- one-shot Aggressive / Normal / Relaxed across all rules
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="set-profile")
+def set_profile(
+    profile: str = typer.Argument(
+        ...,
+        help="One of: aggressive, normal, relaxed",
+    ),
+    state_dir: Path = _state_dir_option(),
+    config: Path = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Config file to mutate (defaults to <state_dir>/config.toml)",
+    ),
+) -> None:
+    """Apply a profile preset to every known rule's threshold.
+
+    Mirrors the dashboard's preset buttons. Same atomic, comment-preserving
+    rewrite -- safe to run while the service is live; the engine will pick
+    up the new thresholds within ~1 second.
+    """
+    from atfield.config_writer import ConfigWriteError, update_rule_threshold
+    from atfield.rule_profiles import PROFILE_PRESETS
+
+    profile_lower = profile.lower()
+    if profile_lower not in PROFILE_PRESETS:
+        valid = sorted(PROFILE_PRESETS.keys())
+        raise typer.BadParameter(
+            f"unknown profile {profile!r}; pick one of {valid}"
+        )
+
+    target = config if config is not None else (state_dir / "config.toml")
+
+    preset = PROFILE_PRESETS[profile_lower]
+    console.print(f"Applying [bold cyan]{profile_lower}[/] preset to {target}")
+    failures = 0
+    for rule_name, threshold in preset.items():
+        try:
+            update_rule_threshold(target, rule_name, threshold)
+            console.print(f"  [green]+[/] {rule_name} -> {threshold}")
+        except ConfigWriteError as exc:
+            failures += 1
+            console.print(f"  [red]x[/] {rule_name}: {exc}")
+    if failures:
+        console.print(
+            f"\n[yellow]{failures} rule(s) could not be updated.[/] "
+            "If the service is running, it may not see the partial change; "
+            "fix the cause and re-run."
+        )
+        raise typer.Exit(code=1)
+    console.print(
+        "\n[green]Done.[/] The service will reload within ~1s "
+        "(or restart it manually with Stop-Service / Start-Service)."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

@@ -20,6 +20,12 @@ tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# HKCU\Run autostart registration. winreg is the standard Rust binding
+# for the Windows registry; we only depend on it on Windows targets so
+# `cargo check` on Linux/macOS during dev still passes.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
 [features]
 # This feature is used to expose the embedded ESM frontend assets via the
 # Tauri custom-protocol for production bundles. Tauri requires it to be set.

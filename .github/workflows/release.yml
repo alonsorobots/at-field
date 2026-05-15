@@ -1,0 +1,218 @@
+name: Release
+
+# Triggered on annotated tag pushes that match v* (semver tags).
+# Builds the Python wheel + the standalone PyInstaller bundle + the
+# Tauri tray app installer, then attaches everything to a GitHub
+# Release. Manual runs are also allowed via workflow_dispatch so you
+# can produce a draft release without tagging first.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.2.0). Leave blank to draft from current main."
+        required: false
+        default: ""
+
+permissions:
+  # Need write access to publish a release + upload assets. The
+  # built-in GITHUB_TOKEN is used; no PAT.
+  contents: write
+
+# Avoid two concurrent release runs (e.g. tag push + manual dispatch
+# at the same time) racing for the same release upload.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # 1. Pure-Python wheel (cross-platform, no GPU deps in the build).
+  # ─────────────────────────────────────────────────────────────────
+  wheel:
+    name: Build wheel + sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Build wheel + sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dists
+          path: dist/*
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────
+  # 2. Standalone PyInstaller bundle (Windows-only).
+  #    Produces dist/atfield/ with atfield-service.exe + atf.exe and
+  #    a shared _internal/. Zips it for the GitHub release.
+  # ─────────────────────────────────────────────────────────────────
+  standalone:
+    name: Standalone Windows bundle
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pip install "pyinstaller>=6.20"
+
+      - name: Build standalone bundle
+        run: pyinstaller --noconfirm --clean packaging/pyinstaller/atfield.spec
+
+      - name: Smoke-test bundled binaries
+        # Make sure the frozen exes at least respond to --help before we
+        # ship them. Catches missing hidden imports / data files.
+        shell: pwsh
+        run: |
+          dist/atfield/atf.exe version
+          dist/atfield/atf.exe inputs
+
+      - name: Zip standalone bundle
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          if (-not $version) { $version = "dev" }
+          Compress-Archive -Path dist/atfield/* -DestinationPath "dist/atfield-$version-windows-x64.zip"
+
+      - name: Upload standalone bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: standalone-bundle
+          path: dist/atfield-*-windows-x64.zip
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────
+  # 3. Tauri tray app installer (Windows NSIS).
+  # ─────────────────────────────────────────────────────────────────
+  tray-installer:
+    name: Tauri tray installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: at-field-tray/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "at-field-tray/src-tauri -> target"
+
+      - name: Install npm deps
+        working-directory: at-field-tray
+        run: npm ci
+
+      - name: Build Tauri NSIS installer
+        working-directory: at-field-tray
+        run: npm run tauri build -- --bundles nsis
+
+      - name: Locate installer
+        id: locate
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path at-field-tray/src-tauri/target/release/bundle/nsis -Filter *-setup.exe |
+                 Select-Object -First 1
+          if (-not $exe) { throw "No NSIS installer produced." }
+          "exe=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload tray installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: tray-installer
+          path: ${{ steps.locate.outputs.exe }}
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────
+  # 4. Publish: gather every artifact and create / update the release.
+  # ─────────────────────────────────────────────────────────────────
+  publish:
+    name: Publish GitHub Release
+    needs: [wheel, standalone, tray-installer]
+    runs-on: ubuntu-latest
+    # Only publish for real on actual tag pushes. workflow_dispatch
+    # runs upload artifacts but skip the release step (lets you
+    # validate the build without making noise).
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+        # Need full history so the release notes generator can walk
+        # since the previous tag.
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List collected assets
+        run: ls -lh release-assets/
+
+      - name: Extract changelog section for this version
+        id: changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_tag="${GITHUB_REF_NAME}"     # e.g. v0.2.0
+          version_no_v="${version_tag#v}"      # e.g. 0.2.0
+          # Pull the section between `## [<version>]` and the next `## `.
+          # Falls back to a generic message if no matching section.
+          notes=$(awk -v ver="$version_no_v" '
+            BEGIN { inside=0 }
+            /^## \[/ {
+              if (inside) exit
+              if ($0 ~ "\\[" ver "\\]") { inside=1; next }
+            }
+            inside { print }
+          ' CHANGELOG.md || true)
+          if [ -z "$notes" ]; then
+            notes="See CHANGELOG.md for details."
+          fi
+          # Multi-line outputs go through GITHUB_OUTPUT with a delimiter.
+          delim=$(openssl rand -hex 8)
+          {
+            printf 'notes<<%s\n' "$delim"
+            printf '%s\n' "$notes"
+            printf '%s\n' "$delim"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: AT-Field ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.notes }}
+          files: release-assets/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

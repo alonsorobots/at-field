@@ -1,6 +1,8 @@
 // Prevents an extra console window from opening on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
+
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -315,6 +317,21 @@ pub fn run() {
                 app.handle().clone(),
                 Arc::new(Mutex::new(TrayStatus::Down)),
             );
+
+            // User-mode autostart: register this exe in HKCU\Run so the
+            // tray shows up automatically next login. Idempotent; safe to
+            // call every launch. Failures are logged but don't block
+            // startup -- the watchdog itself runs as a service so the
+            // user is still protected even if their tray doesn't auto-launch.
+            match autostart::ensure_registered() {
+                Ok(autostart::EnsureOutcome::Registered) => {
+                    eprintln!("autostart: registered AT-Field Tray in HKCU\\Run");
+                }
+                Ok(autostart::EnsureOutcome::AlreadyRegistered) => {
+                    // Common case after first install -- silent.
+                }
+                Err(e) => eprintln!("autostart: HKCU\\Run registration failed: {e}"),
+            }
 
             Ok(())
         })
