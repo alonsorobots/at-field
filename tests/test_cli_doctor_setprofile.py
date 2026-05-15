@@ -142,3 +142,68 @@ class TestSetProfile:
         assert target.exists()
         from atfield.config import load_config
         load_config(target)  # round-trips cleanly
+
+
+# ---------------------------------------------------------------------------
+# atf setup wizard
+# ---------------------------------------------------------------------------
+
+
+class TestSetupWizard:
+    def test_yes_flag_writes_normal_observe_only_config(self, tmp_path):
+        """--yes accepts every prompt's displayed default. The default
+        for observe-only is True (we recommend it for the first hour),
+        so --yes should land in observe-only mode."""
+        sd = tmp_path / "state"
+        result = runner.invoke(app, [
+            "setup", "--state-dir", str(sd), "--yes",
+        ])
+        assert result.exit_code == 0, result.stdout
+        cfg_path = sd / "config.toml"
+        assert cfg_path.exists()
+        from atfield.config import load_config
+        cfg = load_config(cfg_path)
+        for r in cfg.rules:
+            assert r.action == "log", (
+                f"--yes should accept observe-only default; "
+                f"got {r.name}={r.action}"
+            )
+
+    def test_yes_flag_keeps_existing_config(self, tmp_path):
+        sd = tmp_path / "state"
+        sd.mkdir()
+        cfg_path = sd / "config.toml"
+        cfg_path.write_text("# pre-existing\n", encoding="utf-8")
+        result = runner.invoke(app, [
+            "setup", "--state-dir", str(sd), "--yes",
+        ])
+        assert result.exit_code == 0
+        # --yes opts to NOT overwrite an existing config.
+        assert cfg_path.read_text(encoding="utf-8") == "# pre-existing\n"
+
+    def test_interactive_aggressive_observe_only_flow(self, tmp_path):
+        sd = tmp_path / "state"
+        # Stdin: create_dir? y, profile=aggressive, observe_only=y
+        # Click prompts use yes/no toggles for confirms, free text for prompt().
+        # The flow expects: state dir prompt is hardcoded so we just answer:
+        #   - "Create it now?" y
+        #   - profile prompt (typer.prompt) -> "aggressive"
+        #   - "Start in observe-only mode?" y
+        result = runner.invoke(app, [
+            "setup", "--state-dir", str(sd),
+        ], input="y\naggressive\ny\n")
+        assert result.exit_code == 0, result.stdout
+        cfg_path = sd / "config.toml"
+        from atfield.config import load_config
+        from atfield.rule_profiles import PROFILE_PRESETS
+        cfg = load_config(cfg_path)
+        # Aggressive thresholds applied
+        for r in cfg.rules:
+            preset = PROFILE_PRESETS["aggressive"].get(r.name)
+            if preset is not None:
+                assert r.threshold == preset, (
+                    f"{r.name}: expected aggressive {preset}, got {r.threshold}"
+                )
+        # Observe-only flipped every rule to log
+        for r in cfg.rules:
+            assert r.action == "log", f"observe-only should set action=log; got {r.name}={r.action}"

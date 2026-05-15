@@ -731,6 +731,131 @@ def set_profile(
 
 
 # ---------------------------------------------------------------------------
+# setup -- interactive first-run wizard
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def setup(
+    state_dir: Path = _state_dir_option(),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Skip prompts and accept defaults. Useful for scripted installs.",
+    ),
+) -> None:
+    """Interactive first-run wizard.
+
+    Walks through the three decisions a new user has to make:
+
+      1. Where the state directory lives.
+      2. Which profile (Aggressive / Normal / Relaxed) to start with.
+      3. Whether to start the watchdog in observe-only mode for the
+         first session (recommended for the first hour so the user
+         can see what it WOULD do before letting it act).
+
+    Writes the resulting choices into ``<state_dir>/config.toml`` and
+    prints next-step instructions. Safe to re-run; existing config is
+    preserved unless the user explicitly opts to overwrite.
+    """
+    from atfield.config_writer import (
+        materialize_default_config,
+        update_rule_threshold,
+    )
+    from atfield.rule_profiles import PROFILE_PRESETS
+
+    console.print("\n[bold cyan]AT-Field setup[/]\n")
+
+    # 1. State directory
+    console.print(f"State directory: [cyan]{state_dir}[/]")
+    if not state_dir.exists():
+        if yes or typer.confirm("Create it now?", default=True):
+            state_dir.mkdir(parents=True, exist_ok=True)
+            console.print(f"  [green]+[/] created {state_dir}")
+        else:
+            console.print("[red]aborted[/] -- state dir is required")
+            raise typer.Exit(code=1)
+
+    config_path = state_dir / "config.toml"
+
+    # 2. Existing config?
+    if config_path.exists():
+        console.print(f"\nFound existing config at [cyan]{config_path}[/]")
+        # --yes accepts the default for every prompt; the default for
+        # "overwrite an existing config?" is no, so --yes preserves
+        # the user's hand-tuned config rather than nuking it.
+        overwrite = False if yes else typer.confirm(
+            "Overwrite with the wizard's choices?", default=False,
+        )
+        if not overwrite:
+            console.print("\n[yellow]Keeping existing config.[/] Edit it directly or use `atf set-profile`.")
+            raise typer.Exit(code=0)
+
+    # 3. Profile choice
+    profiles = ["aggressive", "normal", "relaxed"]
+    console.print("\n[bold]Profile presets[/] (you can change later from the dashboard or `atf set-profile`):")
+    console.print("  [cyan]aggressive[/]  Lower thresholds. Fires earlier; protective.")
+    console.print("  [cyan]normal[/]      Balanced default from PLANNING.md §3. Recommended.")
+    console.print("  [cyan]relaxed[/]     Higher thresholds. Only fires on clear hardware distress.")
+
+    if yes:
+        profile = "normal"
+    else:
+        while True:
+            answer = typer.prompt("Profile to start with", default="normal").strip().lower()
+            if answer in profiles:
+                profile = answer
+                break
+            console.print(f"  [red]not one of {profiles}[/]")
+
+    # 4. Observe-only opt-in
+    console.print("\n[bold]Observe-only mode[/]")
+    console.print("  In observe-only mode, AT-Field logs what it WOULD do but never kills.")
+    console.print("  Recommended for the first hour so you can see the system's verdicts before arming it.")
+    # --yes accepts the displayed default (True = observe-only on).
+    observe_only = True if yes else typer.confirm(
+        "Start in observe-only mode?", default=True,
+    )
+
+    # 5. Materialize + apply
+    console.print(f"\nWriting config to [cyan]{config_path}[/]…")
+    materialize_default_config(config_path)
+    if profile != "normal":
+        for rule_name, threshold in PROFILE_PRESETS[profile].items():
+            update_rule_threshold(config_path, rule_name, threshold)
+    if observe_only:
+        # Edit in-place to flip every rule's action to "log" -- no kill_writer
+        # action exists yet, so the safe primitive is to switch actions to log.
+        text = config_path.read_text(encoding="utf-8")
+        text = text.replace('action = "kill"', 'action = "log"')
+        text = text.replace('action = "throttle"', 'action = "log"')
+        config_path.write_text(text, encoding="utf-8")
+
+    console.print("[green]+[/] config written")
+
+    # 6. Final summary
+    console.print()
+    tbl = Table(show_header=False, box=None, padding=(0, 1))
+    tbl.add_column(style="cyan", justify="right")
+    tbl.add_column()
+    tbl.add_row("profile", profile)
+    tbl.add_row("observe-only", "yes" if observe_only else "no")
+    tbl.add_row("config", str(config_path))
+    tbl.add_row("state dir", str(state_dir))
+    console.print(tbl)
+
+    console.print("\n[bold]Next steps:[/]")
+    console.print("  1. Install the watchdog as a Windows service (elevated PowerShell):")
+    console.print("     [cyan]atf install[/]")
+    console.print("  2. Verify it's running:")
+    console.print("     [cyan]atf status[/]")
+    console.print("  3. Open the dashboard (after installing the tray app):")
+    console.print("     left-click the AT-Field tray icon")
+    if observe_only:
+        console.print("\n[yellow]Observe-only mode is on.[/] Once you've seen a few hours of verdicts,")
+        console.print("flip every rule's `action` back to `kill` (or `throttle`) in the config to arm it.")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
