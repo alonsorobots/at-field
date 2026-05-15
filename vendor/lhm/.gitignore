@@ -1,5 +1,8 @@
 # Vendor LHM binaries are fetched at build time, not committed.
-# scripts/fetch_lhm.ps1 populates the parent directory.
+# scripts/fetch_lhm.ps1 populates the parent directory and consumes the
+# checked-in LibreHardwareMonitor.config to enable LHM's web server (LHM
+# 0.9.x has no CLI flags for that).
 *
 !.gitignore
 !README.md
+!LibreHardwareMonitor.config
