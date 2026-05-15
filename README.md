@@ -2,9 +2,17 @@
 
 > Always-on Windows hardware watchdog for AI workloads. Monitors NVIDIA GPU and VRAM temperatures, GPU memory usage, system RAM, pagefile, and CPU package temperature — and kills runaway Python / PyTorch processes **before** they damage your hardware. Runs as a Windows Service. Tolerates load-time spikes via sustained-window thresholds.
 
-> **Status:** 🚧 design locked, implementation in progress. See [`PLANNING.md`](PLANNING.md) for the roadmap and [`docs/chat-history.md`](docs/chat-history.md) for the design rationale.
+> **Status:** pre-release, implementation in progress on `main`.
 
 In *Neon Genesis Evangelion*, an **AT Field** is an absolute defensive barrier that prevents catastrophic damage to a high-power system. Here it's recontextualized as a backronym — **A**bsolute **T**hermal-and-memory **Field** — a Python-aware Windows service that intercepts the AI jobs trying to melt your rig.
+
+## Project goals
+
+These are the north stars every design decision is measured against:
+
+1. **One-command install.** `pip install atfield && atf install` should be the entire setup. No manual NSSM download, no manual sensor-daemon install, no editing service definitions in `services.msc`.
+2. **Works on most setups out of the box.** Any Windows 10/11 box with stock Python 3.10+ and an NVIDIA GPU should get useful protection immediately. Single-GPU, multi-GPU, AMD-CPU, Intel-CPU — capability is detected at startup; rules whose sensors aren't available are auto-disabled with a clear log message rather than failing the service.
+3. **Zero config for the common case.** The shipped defaults protect a typical AI rig without the user opening `config.toml`. Configuration exists for power users, not as a prerequisite. Adding new hardware support must not require existing users to migrate their config.
 
 ## Why?
 
@@ -30,7 +38,7 @@ Existing tools either monitor without acting ([System-Resource-Monitor](https://
 
 ## Status
 
-Pre-release. Design is locked (see [`PLANNING.md`](PLANNING.md)). Implementation is in progress on `main`. v0.1.0 target is a working service with conservative defaults for NVIDIA + AMD-CPU Windows 11 rigs.
+Pre-release. Implementation in progress on `main`. v0.1.0 target is a working service with conservative defaults for NVIDIA + Windows 10/11 rigs.
 
 ## Hardware targets
 
