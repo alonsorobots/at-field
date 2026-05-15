@@ -1,0 +1,358 @@
+"""Tests for :mod:`atfield.actuator`.
+
+Built around a :class:`FakeProvider` that simulates a process tree without
+spawning real processes -- killing real processes from a test suite is a
+recipe for tears. The tree topology in each test mirrors a real ML
+training scenario (jupyter -> ipykernel -> python; torchrun -> python ;
+accelerate -> deepspeed -> python -> python workers; etc).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from atfield.actuator import (
+    Actuator,
+    ProcInfo,
+    find_kill_root,
+)
+from atfield.config import default_config
+from atfield.policy import Action
+
+
+@dataclass
+class _FakeProc:
+    pid: int
+    ppid: int
+    name: str
+    cmdline: tuple[str, ...] = ()
+    rss: int = 0
+    alive: bool = True
+
+
+@dataclass
+class FakeProvider:
+    """Test double for :class:`atfield.actuator.ProcessProvider`.
+
+    Build a tree by passing a list of ``(pid, ppid, name)`` tuples; the
+    provider exposes the same interface as PsutilProvider but does no
+    real I/O. Calls to ``terminate`` and ``kill`` are recorded so tests
+    can assert on send-order.
+    """
+
+    procs: dict[int, _FakeProc] = field(default_factory=dict)
+    own: int = 99999
+    terminated: list[int] = field(default_factory=list)
+    killed: list[int] = field(default_factory=list)
+
+    @classmethod
+    def from_tree(cls, edges: list[tuple[int, int, str, int]], own: int = 99999) -> FakeProvider:
+        """edges = [(pid, ppid, name, rss_bytes), ...]"""
+        d = {pid: _FakeProc(pid=pid, ppid=ppid, name=name, rss=rss) for pid, ppid, name, rss in edges}
+        return cls(procs=d, own=own)
+
+    def own_pid(self) -> int:
+        return self.own
+
+    def _to_info(self, p: _FakeProc) -> ProcInfo:
+        return ProcInfo(pid=p.pid, ppid=p.ppid, name=p.name, cmdline=p.cmdline, rss_bytes=p.rss)
+
+    def list_all(self) -> list[ProcInfo]:
+        return [self._to_info(p) for p in self.procs.values() if p.alive]
+
+    def get(self, pid: int):
+        p = self.procs.get(pid)
+        if p is None or not p.alive:
+            return None
+        return self._to_info(p)
+
+    def parent(self, pid: int):
+        p = self.procs.get(pid)
+        if p is None or not p.alive:
+            return None
+        parent = self.procs.get(p.ppid)
+        if parent is None:
+            return None
+        return self._to_info(parent)
+
+    def descendants(self, pid: int) -> list[ProcInfo]:
+        # BFS over alive children
+        out: list[ProcInfo] = []
+        stack = [pid]
+        seen = {pid}
+        while stack:
+            cur = stack.pop()
+            for p in self.procs.values():
+                if p.ppid == cur and p.alive and p.pid not in seen:
+                    seen.add(p.pid)
+                    out.append(self._to_info(p))
+                    stack.append(p.pid)
+        return out
+
+    def terminate(self, pid: int) -> None:
+        self.terminated.append(pid)
+        if pid in self.procs:
+            # Simulate well-behaved process: terminate -> alive=False after grace
+            # (We don't decrement here; tests opt-in via _flip_dead.)
+            pass
+
+    def kill(self, pid: int) -> None:
+        self.killed.append(pid)
+        if pid in self.procs:
+            self.procs[pid].alive = False
+
+    def is_alive(self, pid: int) -> bool:
+        p = self.procs.get(pid)
+        return bool(p and p.alive)
+
+    def _flip_dead_after_terminate(self) -> None:
+        for pid in self.terminated:
+            if pid in self.procs:
+                self.procs[pid].alive = False
+
+
+# ---------------------------------------------------------------------------
+# find_kill_root
+# ---------------------------------------------------------------------------
+
+
+class TestFindKillRoot:
+    def test_walks_up_through_python_to_torchrun(self):
+        # explorer -> torchrun -> python -> python (worker)
+        provider = FakeProvider.from_tree(
+            [
+                (10, 0, "explorer.exe", 0),
+                (20, 10, "torchrun", 0),
+                (30, 20, "python.exe", 0),
+                (40, 30, "python.exe", 0),  # worker
+            ]
+        )
+        root = find_kill_root(
+            40,
+            provider=provider,
+            killable_names=frozenset(["python.exe"]),
+            launcher_names=frozenset(["torchrun"]),
+        )
+        assert root is not None
+        assert root.pid == 20  # torchrun is the topmost keeper
+        assert root.name == "torchrun"
+
+    def test_walks_through_jupyter_chain(self):
+        # services -> jupyter -> ipykernel_launcher -> python (cell)
+        provider = FakeProvider.from_tree(
+            [
+                (5, 0, "services.exe", 0),
+                (10, 5, "jupyter", 0),
+                (20, 10, "ipykernel_launcher", 0),
+                (30, 20, "python.exe", 0),
+            ]
+        )
+        root = find_kill_root(
+            30,
+            provider=provider,
+            killable_names=frozenset(["python.exe"]),
+            launcher_names=frozenset(["jupyter", "ipykernel_launcher"]),
+        )
+        assert root is not None
+        assert root.pid == 10
+        assert root.name == "jupyter"
+
+    def test_stops_at_topmost_keeper(self):
+        # python -> python -> python (no launcher)
+        provider = FakeProvider.from_tree(
+            [
+                (5, 0, "explorer.exe", 0),
+                (10, 5, "python.exe", 0),
+                (20, 10, "python.exe", 0),
+                (30, 20, "python.exe", 0),
+            ]
+        )
+        root = find_kill_root(
+            30,
+            provider=provider,
+            killable_names=frozenset(["python.exe"]),
+            launcher_names=frozenset(),
+        )
+        assert root is not None
+        assert root.pid == 10  # topmost python whose parent is explorer
+
+    def test_offender_not_in_keepers_returns_none(self):
+        # Refuse to walk up an arbitrary non-python process
+        provider = FakeProvider.from_tree(
+            [
+                (5, 0, "explorer.exe", 0),
+                (10, 5, "chrome.exe", 0),
+            ]
+        )
+        root = find_kill_root(
+            10,
+            provider=provider,
+            killable_names=frozenset(["python.exe"]),
+            launcher_names=frozenset(),
+        )
+        assert root is None, "non-python offender must not result in a kill root"
+
+    def test_missing_pid_returns_none(self):
+        provider = FakeProvider.from_tree([(5, 0, "explorer.exe", 0)])
+        assert (
+            find_kill_root(
+                999, provider=provider,
+                killable_names=frozenset(["python.exe"]),
+                launcher_names=frozenset(),
+            )
+            is None
+        )
+
+    def test_case_insensitive_name_matching(self):
+        provider = FakeProvider.from_tree(
+            [
+                (5, 0, "explorer.exe", 0),
+                (10, 5, "PYTHON.EXE", 0),  # uppercase
+                (20, 10, "python.exe", 0),
+            ]
+        )
+        root = find_kill_root(
+            20,
+            provider=provider,
+            killable_names=frozenset(["python.exe"]),
+            launcher_names=frozenset(),
+        )
+        assert root is not None
+        assert root.pid == 10
+
+
+# ---------------------------------------------------------------------------
+# Actuator.execute
+# ---------------------------------------------------------------------------
+
+
+def _action(kind: str = "kill") -> Action:
+    return Action(
+        kind=kind,
+        rule_name="r",
+        base_rule_name="r",
+        signal="system.ram_used_percent",
+        threshold=80,
+        fraction_over=1.0,
+        samples_considered=10,
+        latest_value=95.0,
+        triggered_at_ns=0,
+        cooldown_seconds=60,
+    )
+
+
+class TestActuator:
+    def _build(self, edges, *, own=99999):
+        provider = FakeProvider.from_tree(edges, own=own)
+        return Actuator(default_config(), provider=provider, sleep=lambda _s: None), provider
+
+    def test_log_action_does_not_kill(self):
+        actuator, provider = self._build([(10, 0, "python.exe", 1)])
+        report = actuator.execute(_action(kind="log"))
+        assert report.killed == ()
+        assert report.skipped_reason is not None
+        assert provider.terminated == []
+        assert provider.killed == []
+
+    def test_kill_action_with_no_eligible_offender_skipped(self):
+        # No python procs anywhere
+        actuator, provider = self._build([(10, 0, "explorer.exe", 1)])
+        report = actuator.execute(_action(kind="kill"))
+        assert report.kill_root is None
+        assert "no eligible offender" in (report.skipped_reason or "")
+        assert provider.killed == []
+
+    def test_kill_action_terminates_then_kills_survivors(self):
+        # explorer -> torchrun -> python -> python; trigger kill on PID 40
+        actuator, provider = self._build(
+            [
+                (10, 0, "explorer.exe", 0),
+                (20, 10, "torchrun", 1000),
+                (30, 20, "python.exe", 5_000_000_000),
+                (40, 30, "python.exe", 100),
+            ]
+        )
+        report = actuator.execute(_action(kind="kill"), candidate_pids=[40, 30])
+        assert report.kill_root is not None
+        assert report.kill_root.pid == 20
+        # Should have terminated all three (root + 2 descendants)
+        assert sorted(provider.terminated) == [20, 30, 40]
+        # All survived terminate (FakeProvider doesn't auto-die), so kill() runs
+        assert sorted(provider.killed) == [20, 30, 40]
+
+    def test_self_protection_filters_own_pid(self):
+        # python -> python where one is the watchdog
+        own_pid = 99
+        actuator, provider = self._build(
+            [
+                (10, 0, "explorer.exe", 0),
+                (20, 10, "python.exe", 100),
+                (99, 20, "python.exe", 100),  # this is "us"
+            ],
+            own=own_pid,
+        )
+        report = actuator.execute(_action(kind="kill"), candidate_pids=[20])
+        # Own PID must not be in killed list
+        assert own_pid not in provider.killed
+        assert own_pid not in provider.terminated
+
+    def test_never_kill_names_filter(self):
+        actuator, provider = self._build(
+            [
+                (10, 0, "services.exe", 0),
+                (20, 10, "python.exe", 100),
+                (30, 20, "explorer.exe", 100),  # in never-kill-names
+            ]
+        )
+        report = actuator.execute(_action(kind="kill"), candidate_pids=[20])
+        # explorer must not be killed
+        assert 30 not in provider.killed
+
+    def test_picks_highest_rss_offender_from_candidates(self):
+        actuator, _provider = self._build(
+            [
+                (10, 0, "explorer.exe", 0),
+                (20, 10, "python.exe", 100),         # small
+                (30, 10, "python.exe", 1_000_000),   # bigger
+                (40, 10, "chrome.exe", 999_999_999), # excluded by name
+            ]
+        )
+        report = actuator.execute(_action(kind="kill"), candidate_pids=[20, 30, 40])
+        assert report.offender_pid == 30
+
+    def test_aggressive_mode_skips_grace_window(self):
+        cfg = default_config()
+        # Build with aggressive mode
+        from dataclasses import replace
+        cfg2 = replace(cfg, kill=replace(cfg.kill, mode="aggressive"))
+        provider = FakeProvider.from_tree(
+            [
+                (10, 0, "explorer.exe", 0),
+                (20, 10, "python.exe", 100),
+            ]
+        )
+        sleep_durations: list[float] = []
+        actuator = Actuator(cfg2, provider=provider, sleep=lambda s: sleep_durations.append(s))
+        actuator.execute(_action(kind="kill"), candidate_pids=[20])
+        # Aggressive: no grace_seconds sleep, only the brief drain
+        assert all(s < 1.0 for s in sleep_durations), f"unexpected long sleep in aggressive mode: {sleep_durations}"
+        assert provider.killed == [20]
+
+    def test_kill_report_succeeded_property(self):
+        actuator, _provider = self._build([(10, 0, "explorer.exe", 0), (20, 10, "python.exe", 100)])
+        report = actuator.execute(_action(kind="kill"), candidate_pids=[20])
+        assert report.succeeded is True
+
+    def test_kill_report_failed_when_process_survives(self):
+        # Make a python proc that survives kill() (simulated unkillable)
+        provider = FakeProvider.from_tree([(10, 0, "explorer.exe", 0), (20, 10, "python.exe", 100)])
+        # Override kill to not actually decrement alive
+        orig_kill = provider.kill
+        def stubborn_kill(pid):
+            provider.killed.append(pid)
+            # don't flip alive
+        provider.kill = stubborn_kill  # type: ignore[method-assign]
+        actuator = Actuator(default_config(), provider=provider, sleep=lambda _: None)
+        report = actuator.execute(_action(kind="kill"), candidate_pids=[20])
+        assert any(k.survived for k in report.killed)
+        assert not report.succeeded

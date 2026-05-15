@@ -29,8 +29,8 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 from atfield.config import AtFieldConfig, RuleConfig
 from atfield.signals import (
@@ -42,8 +42,8 @@ from atfield.signals import (
 
 __all__ = [
     "Action",
-    "EffectiveRule",
     "DisabledRule",
+    "EffectiveRule",
     "PolicyEngine",
     "expand_rules",
 ]

@@ -21,7 +21,6 @@ fast even on a box where NVIDIA drivers aren't installed yet.
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import sys
@@ -29,7 +28,6 @@ import time
 from datetime import datetime, timedelta, timezone
 from importlib import resources
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
@@ -64,7 +62,7 @@ def _state_dir_option() -> Path:
     )
 
 
-def _resolve_config_path(state_dir: Path) -> Optional[Path]:
+def _resolve_config_path(state_dir: Path) -> Path | None:
     """Resolve ``state_dir/config.toml`` if it exists."""
     p = state_dir / "config.toml"
     return p if p.exists() else None
@@ -131,7 +129,7 @@ def status(
     # Last startup event for working signal map
     events = state_dir / "events.jsonl"
     if events.exists():
-        last_startup: Optional[dict] = None
+        last_startup: dict | None = None
         for line in events.read_text(encoding="utf-8").splitlines():
             try:
                 obj = json.loads(line)
@@ -323,8 +321,8 @@ def _print_event(line: str) -> None:
 @app.command()
 def run(
     state_dir: Path = _state_dir_option(),
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to config.toml. Defaults to <state-dir>/config.toml."),
-    max_ticks: Optional[int] = typer.Option(None, "--max-ticks", help="Run at most N ticks then exit (for debugging)."),
+    config: Path | None = typer.Option(None, "--config", "-c", help="Path to config.toml. Defaults to <state-dir>/config.toml."),
+    max_ticks: int | None = typer.Option(None, "--max-ticks", help="Run at most N ticks then exit (for debugging)."),
 ) -> None:
     """Run the watchdog in the foreground (for debugging or as a non-NSSM service)."""
     from atfield.service import run_service
@@ -339,7 +337,7 @@ def run(
 # ---------------------------------------------------------------------------
 
 
-def _find_script(name: str) -> Optional[Path]:
+def _find_script(name: str) -> Path | None:
     """Find a packaged script by name. Looks under ``scripts/`` next to the source."""
     here = Path(__file__).resolve()
     # Editable install: scripts/ is at repo root, two above the package.
@@ -419,7 +417,7 @@ def test_kill(
     ``--dry-run`` (default) it only enumerates and prints; ``--for-real``
     actually terminates.
     """
-    from atfield.actuator import Actuator, find_kill_root, PsutilProvider
+    from atfield.actuator import Actuator, PsutilProvider, find_kill_root
     from atfield.config import default_config
 
     cfg = default_config()

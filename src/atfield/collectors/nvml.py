@@ -32,7 +32,7 @@ from typing import Any, Final
 from atfield.collectors import HealthState, ProbeResult
 from atfield.signals import Sample, monotonic_ns
 
-__all__ = ["NvmlCollector", "PER_PROCESS_VRAM_KEY"]
+__all__ = ["PER_PROCESS_VRAM_KEY", "NvmlCollector"]
 
 
 _NAME: Final = "nvml"
@@ -242,10 +242,7 @@ class NvmlCollector:
                 for p in procs:
                     used = getattr(p, "usedGpuMemory", None)
                     # NVML returns ULLONG_MAX (0xFFFFFFFFFFFFFFFF) when not measurable.
-                    if used is None or used == (1 << 64) - 1:
-                        used_int = 0
-                    else:
-                        used_int = int(used)
+                    used_int = 0 if used is None or used == (1 << 64) - 1 else int(used)
                     pairs.append((int(p.pid), used_int))
                 new_proc_map[i] = pairs
             except Exception:

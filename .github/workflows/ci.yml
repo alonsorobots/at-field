@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }} / Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Production target is Windows; cross-platform tests guard with skipif
+        # so the suite is green on Linux too. Two OS rows ensures we don't
+        # accidentally introduce a Windows-only or Linux-only regression.
+        os: [windows-latest, ubuntu-latest]
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Lint with ruff
+        run: ruff check src/ tests/
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  smoke:
+    # Fast end-to-end sanity check: build the wheel, install it into a fresh
+    # venv, run `atf inputs` (which exercises every collector probe) and `atf
+    # version`. Catches packaging regressions that pure pytest can miss.
+    name: Wheel + CLI smoke
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+
+      - name: Install built wheel into a fresh venv
+        run: |
+          python -m venv ci-smoke-venv
+          ci-smoke-venv\Scripts\python.exe -m pip install --upgrade pip
+          $wheel = (Get-ChildItem -Path dist -Filter atfield-*.whl | Select-Object -First 1).FullName
+          ci-smoke-venv\Scripts\python.exe -m pip install $wheel
+        shell: pwsh
+
+      - name: atf version
+        run: ci-smoke-venv\Scripts\atf.exe version
+
+      - name: atf inputs (probes every collector)
+        # CI has no NVIDIA GPU and no LHM, so this is the
+        # capability-negotiation-on-bare-metal scenario. Should report system
+        # collector OK, NVML unavailable, LHM unavailable -- and exit 0.
+        run: ci-smoke-venv\Scripts\atf.exe inputs

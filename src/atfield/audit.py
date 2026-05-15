@@ -28,10 +28,10 @@ from atfield.actuator import KillReport
 from atfield.policy import Action, DisabledRule
 
 __all__ = [
-    "AuditWriter",
-    "configure_service_logging",
     "EVENTS_FILENAME",
     "WATCHDOG_LOG_FILENAME",
+    "AuditWriter",
+    "configure_service_logging",
 ]
 
 

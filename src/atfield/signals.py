@@ -31,19 +31,20 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Final, Iterable
+from typing import Final
 
 __all__ = [
+    "EMA",
+    "MIN_SAMPLES_FOR_DECISION",
+    "EvalResult",
     "Sample",
     "SlidingWindow",
-    "EMA",
     "Verdict",
-    "EvalResult",
-    "MIN_SAMPLES_FOR_DECISION",
-    "fraction_over_threshold",
     "evaluate_window",
+    "fraction_over_threshold",
     "monotonic_ns",
 ]
 
@@ -115,7 +116,7 @@ class SlidingWindow:
     isn't immediately dropped from a 1-second-resolution window.
     """
 
-    __slots__ = ("_window_ns", "_slack_ns", "_buf", "_last_evict_ns")
+    __slots__ = ("_buf", "_last_evict_ns", "_slack_ns", "_window_ns")
 
     def __init__(self, window_s: float, *, slack_s: float = 0.5) -> None:
         if window_s <= 0:

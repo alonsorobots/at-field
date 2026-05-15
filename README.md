@@ -30,17 +30,82 @@ Existing tools either monitor without acting ([System-Resource-Monitor](https://
 ## What it does
 
 - **Watches every signal that matters:** per-GPU core temp, GPU memory junction temp (the GDDR temp NVML doesn't expose on consumer cards — read via LibreHardwareMonitor), VRAM used %, system RAM %, pagefile / commit charge, CPU package temp.
-- **Sustained-window logic, not instantaneous:** a 2-second spike during model warmup never triggers. An actual sustained problem triggers in seconds.
+- **Sustained-window logic, not instantaneous:** a 2-second spike during model warmup never triggers. An actual sustained problem triggers within ~15 seconds.
 - **Process-tree-aware kill:** when a runaway job is detected, walks the parent chain past known AI launchers (`torchrun`, `accelerate`, `deepspeed`, `mpiexec`, `ray`, `jupyter`) to find the *dispatcher*, then terminates the whole tree. Self-healing workers can't respawn.
 - **Runs as a Windows Service** (via NSSM) under `LocalSystem` — works without an interactive login, survives reboots, no tray icon required.
+- **Capability-negotiated:** at startup, every collector probes its source. Anything missing (no LHM running? AMD GPU? CPU sensor doesn't expose package temp?) downgrades to "rule disabled, with a clear log line" — never to "watchdog crashed" or "rule silently never fires".
 - **Audit trail:** every action lands in `%ProgramData%\ATField\events.jsonl` with full process tree, signal values that triggered the rule, and rule name.
-- **Safe by default:** malformed config → observe-only mode, never kills.
+- **Safe by default:** malformed config → observe-only mode (kills demoted to log entries), never kills the service's own PID, `never_kill_names` filter for `explorer.exe`, `services.exe`, etc.
+
+## Install
+
+```powershell
+# 1. Install the package
+pip install atfield
+
+# 2. Register the Windows Service (run from elevated PowerShell)
+atf install
+```
+
+That's it. The installer downloads NSSM into `%ProgramData%\ATField\`, registers `AT-Field Watchdog` as a `LocalSystem` auto-start service, drops a starter `config.toml`, and starts the service. Existing config is preserved on reinstall.
+
+For VRAM-junction-temp and CPU-package-temp protection (the two most thermally-relevant signals on consumer NVIDIA cards), additionally install [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) v0.9.5+ and enable its built-in HTTP server (Options → Run web server, port 8085). The watchdog auto-detects it next time the service ticks; no config changes needed.
+
+## Usage
+
+```bash
+atf status          # service health, working signal map, disabled rules
+atf inputs          # one-shot probe + sample dump (use this to verify setup)
+atf tail            # follow events.jsonl
+atf pause 30m       # suspend kill actions for 30 minutes
+atf unpause
+atf test-kill <PID> # dry-run the kill walk-up against a real PID
+atf run             # foreground run (for debugging without NSSM)
+atf uninstall
+```
+
+`atf inputs` is the verification tool — run it after installing to confirm which sensors are visible and which rules will be active:
+
+```text
+$ atf inputs
+system: OK
+  reason: psutil + Win32 GlobalMemoryStatusEx OK
+    system.commit_percent = 11.681 percent
+    system.ram_used_percent = 18.600 percent
+
+nvml: OK
+  reason: NVML driver 596.36, 2 GPU(s): NVIDIA GeForce RTX 5090, NVIDIA GeForce RTX 5090
+    gpu.0.core_temp_c = 38.000 celsius
+    gpu.0.vram_used_percent = 8.891 percent
+    gpu.1.core_temp_c = 35.000 celsius
+    ...
+
+lhm: unavailable
+  reason: LibreHardwareMonitor HTTP not reachable at http://127.0.0.1:8085/data.json;
+          ensure LHM is installed, running, and 'Run web server' is enabled in Options
+```
+
+## Configuration
+
+Defaults are conservative and protect a typical AI rig with no edits. To customize, see [`scripts/config.example.toml`](scripts/config.example.toml). The installer drops this in `%ProgramData%\ATField\config.toml` if no config exists.
+
+A rule has the form:
+
+```toml
+[[rules]]
+name              = "gpu-core-hot"
+signal            = "gpu.*.core_temp_c"   # glob expands per detected GPU
+threshold         = 83
+window_s          = 30
+min_fraction_over = 0.67                  # 67% of last 30s over threshold
+action            = "kill"                # log | throttle | kill
+```
+
+Rules referencing signals no probed collector provides are auto-disabled with a startup log line — adding new hardware support never breaks existing configs.
 
 ## Status
 
-Pre-release. Implementation in progress on `main`. v0.1.0 target is a working service with conservative defaults for NVIDIA + Windows 10/11 rigs.
-
-## Hardware targets
+Pre-release v0.1.0. End-to-end verified on the development rig (2× RTX 5090). CI runs the test suite on Windows + Linux × Python 3.10/3.11/3.12 plus a wheel install + CLI smoke test.
 
 Primary development rig:
 
@@ -49,7 +114,35 @@ Primary development rig:
 - **RAM:** 128 GB DDR5-5600
 - **OS:** Windows 11
 
-Should work on any Windows 10/11 box with NVIDIA driver ≥ 535. AMD GPU support is not in scope for v0.1 (PRs welcome).
+Should work on any Windows 10/11 box with NVIDIA driver ≥ 535. AMD-GPU support is best-effort via LibreHardwareMonitor; a dedicated AMD/ROCm collector is a v0.2 candidate (PRs welcome — the `Collector` protocol in [`src/atfield/collectors/__init__.py`](src/atfield/collectors/__init__.py) is the public extension point).
+
+## Architecture
+
+```
+┌──────────────────── Windows Service (NSSM-wrapped) ──────────────────┐
+│                                                                       │
+│   ┌─────────────┐   ┌────────────────────────┐   ┌─────────────────┐ │
+│   │ Collectors  │──►│ SignalStore + windows  │──►│ PolicyEngine    │ │
+│   │ • system    │   │ - per-rule sliding     │   │ - glob expand   │ │
+│   │ • nvml      │   │ - latest-sample        │   │ - rule eval     │ │
+│   │ • lhm       │   │   liveness check       │   │ - cooldowns     │ │
+│   │ • plugins   │   └────────────────────────┘   └────────┬────────┘ │
+│   └─────────────┘                                          │          │
+│                                                            ▼          │
+│                                              ┌───────────────────┐    │
+│                                              │ Actuator          │    │
+│                                              │ - launcher walk-up│    │
+│                                              │ - tree kill       │    │
+│                                              │ - self-protection │    │
+│                                              └─────────┬─────────┘    │
+│                                                        ▼              │
+│                                              %ProgramData%\ATField\   │
+│                                              ├── config.toml          │
+│                                              ├── watchdog.log         │
+│                                              ├── events.jsonl         │
+│                                              └── heartbeat.txt        │
+└───────────────────────────────────────────────────────────────────────┘
+```
 
 ## License
 

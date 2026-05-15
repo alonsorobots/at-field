@@ -37,15 +37,15 @@ else:  # pragma: no cover - exercised on 3.10 only
     import tomli as tomllib  # type: ignore[no-redef]
 
 __all__ = [
+    "DEFAULT_CONFIG_FILENAME",
+    "AtFieldConfig",
     "ConfigError",
     "GeneralConfig",
-    "TargetingConfig",
     "KillConfig",
     "RuleConfig",
-    "AtFieldConfig",
-    "DEFAULT_CONFIG_FILENAME",
-    "default_state_dir",
+    "TargetingConfig",
     "default_config",
+    "default_state_dir",
     "load_config",
     "load_config_from_dict",
 ]
