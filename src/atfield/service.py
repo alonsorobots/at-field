@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from atfield import __version__
-from atfield.actuator import Actuator
+from atfield.actuator import Actuator, script_name_from_cmdline
 from atfield.audit import (
     EVENTS_FILENAME,
     WATCHDOG_LOG_FILENAME,
@@ -290,6 +290,10 @@ def run_service(
         events_path=sd / EVENTS_FILENAME,
         watchdog_log_path=sd / WATCHDOG_LOG_FILENAME,
         state_dir=sd,
+        # Pass through so PATCH /rules can rewrite the same file we
+        # loaded from. None is fine -- ServiceState.config_path() falls
+        # back to state_dir/config.toml and materializes defaults.
+        config_path=Path(config_path) if config_path else None,
     )
     api_state.attach_engine(engine)
     api_state.set_collectors([
@@ -411,11 +415,21 @@ def run_service(
                 report = actuator.execute(effective, candidate_pids=candidate_pids)
                 audit.write_kill_report(report)
                 if report.kill_root:
+                    script = script_name_from_cmdline(report.kill_root.cmdline)
+                    # Surface the script on /health so the tray notification
+                    # can title itself "killed train.py" rather than the
+                    # generic "killed process".
+                    api_state.record_kill_report(script)
+                    target = script or report.kill_root.name
                     _log.warning(
-                        "ACTION %s: rule=%s signal=%s killed=%d survived=%d",
+                        "ACTION %s: rule=%s signal=%s target=%s "
+                        "(root=%s pid=%d, %d procs in tree, %d survived)",
                         effective.kind,
                         effective.rule_name,
                         effective.signal,
+                        target,
+                        report.kill_root.name,
+                        report.kill_root.pid,
                         len(report.killed),
                         sum(1 for k in report.killed if k.survived),
                     )

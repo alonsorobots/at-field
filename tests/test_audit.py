@@ -87,6 +87,63 @@ class TestAuditWriter:
         assert len(ev["killed"]) == 2
         assert ev["succeeded"] is True
 
+    def test_kill_report_includes_script_name_at_top_level(self, tmp_path):
+        """The headline name -- what the operator sees first when reading
+        events.jsonl -- should be the script the launcher was running, not
+        the launcher itself."""
+        w = AuditWriter(tmp_path)
+        root = ProcInfo(pid=10, ppid=1, name="python.exe", cmdline=("python.exe", "-u", "scripts/train.py"))
+        worker = ProcInfo(pid=20, ppid=10, name="python.exe", cmdline=("python.exe", "worker.py"))
+        report = KillReport(
+            action=_action(),
+            offender_pid=10,
+            kill_root=root,
+            killed=(
+                KilledProcess(info=root, method="terminate", survived=False),
+                KilledProcess(info=worker, method="terminate", survived=False),
+            ),
+            finished_at_ns=99,
+        )
+        w.write_kill_report(report)
+        ev = _read_lines(w.path)[0]
+        assert ev["script"] == "train.py", "top-level script == kill_root's script for headline use"
+        assert ev["kill_root"]["script"] == "train.py"
+        assert ev["killed"][0]["script"] == "train.py"
+        assert ev["killed"][1]["script"] == "worker.py"
+
+    def test_kill_report_script_field_handles_module_mode(self, tmp_path):
+        w = AuditWriter(tmp_path)
+        root = ProcInfo(
+            pid=10, ppid=1, name="python.exe",
+            cmdline=("python.exe", "-m", "torch.distributed.run", "--nproc-per-node=2"),
+        )
+        report = KillReport(
+            action=_action(),
+            offender_pid=10,
+            kill_root=root,
+            killed=(KilledProcess(info=root, method="terminate", survived=False),),
+            finished_at_ns=99,
+        )
+        w.write_kill_report(report)
+        ev = _read_lines(w.path)[0]
+        assert ev["script"] == "torch.distributed.run"
+
+    def test_kill_report_skipped_has_null_script(self, tmp_path):
+        """When no kill happens, there's nothing to attribute the script to."""
+        w = AuditWriter(tmp_path)
+        report = KillReport(
+            action=_action(kind="log"),
+            offender_pid=None,
+            kill_root=None,
+            skipped_reason="action.kind == 'log'",
+            finished_at_ns=99,
+        )
+        w.write_kill_report(report)
+        ev = _read_lines(w.path)[0]
+        assert ev["script"] is None
+        assert ev["kill_root"] is None
+        assert ev["skipped_reason"]
+
     def test_write_startup_includes_disabled_rules(self, tmp_path):
         w = AuditWriter(tmp_path)
         w.write_startup(

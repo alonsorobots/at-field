@@ -3,6 +3,7 @@ import type { HealthSnapshot, TrayStatus } from "../lib/api";
 import { api } from "../lib/api";
 
 const STATUS_LABEL: Record<TrayStatus, string> = {
+  loading: "",
   healthy: "Healthy",
   degraded: "Degraded",
   alerting: "Alerting",

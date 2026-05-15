@@ -111,10 +111,16 @@ input[type="checkbox"]:focus { outline: none; box-shadow: 0 0 0 2px rgba(167, 13
   flex-shrink: 0;
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.25) inset;
 }
+.dot[data-status="loading"]  { background: var(--color-text-tertiary); animation: pulse 1.2s ease-in-out infinite; }
 .dot[data-status="healthy"]  { background: var(--color-success); }
 .dot[data-status="degraded"] { background: var(--color-warning); }
 .dot[data-status="alerting"] { background: var(--color-danger); }
 .dot[data-status="down"]     { background: var(--color-text-tertiary); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 1.0; }
+}
 
 /* Verdict pill for rule cards. */
 .verdict-pill {
@@ -136,6 +142,83 @@ input[type="checkbox"]:focus { outline: none; box-shadow: 0 0 0 2px rgba(167, 13
   width: 100%;
   height: 32px;
 }
+
+/* SVG <text> doesn't inherit `font-family` from the document body, so
+   without this rule every chart label (axis ticks, "TRIGGER", hover
+   readouts) falls back to the browser default -- which on Windows is
+   typically "Times New Roman". This forces every SVG text element to
+   pick up the same Segoe UI / system-ui stack as the rest of the UI,
+   so chart labels stop looking like a 1995 PowerPoint. */
+svg text {
+  font-family: var(--font-sans);
+}
+
+/* Rule threshold slider -- thicker track + larger thumb than the
+   default range input so it reads as a primary control on the Rules
+   tab. The track itself is rendered as a sibling div (with tier-band
+   shading) and `background: transparent` here lets it show through. */
+input[type="range"].atfield-range {
+  background: transparent;
+  height: 24px;
+  -webkit-appearance: none;
+  appearance: none;
+  z-index: 1;
+}
+input[type="range"].atfield-range::-webkit-slider-runnable-track {
+  background: transparent;
+  height: 6px;
+}
+input[type="range"].atfield-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  border: 3px solid var(--color-bg);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
+  margin-top: -7px;
+  cursor: grab;
+  transition: transform 0.1s, box-shadow 0.15s;
+}
+input[type="range"].atfield-range::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+  box-shadow: 0 0 0 6px rgba(167, 139, 250, 0.18), 0 2px 6px rgba(0, 0, 0, 0.55);
+}
+input[type="range"].atfield-range::-webkit-slider-thumb:active {
+  cursor: grabbing;
+  transform: scale(1.05);
+}
+input[type="range"].atfield-range:focus { outline: none; }
+input[type="range"].atfield-range:focus::-webkit-slider-thumb {
+  box-shadow: 0 0 0 6px rgba(167, 139, 250, 0.22), 0 2px 6px rgba(0, 0, 0, 0.55);
+}
+
+/* Profile preset button -- pill with optional active state. */
+.preset-pill {
+  padding: 4px 12px;
+  border-radius: 9999px;
+  border: 1px solid var(--color-border-strong);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.preset-pill:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+  border-color: var(--color-accent);
+}
+.preset-pill[data-active="true"] {
+  background: var(--color-accent-light);
+  color: var(--color-text-primary);
+  border-color: var(--color-accent);
+}
+.preset-pill:disabled { opacity: 0.5; cursor: wait; }
 
 /* Tab nav (left rail). */
 .tab-rail-button {

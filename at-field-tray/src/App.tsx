@@ -1,18 +1,20 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import KillToast from "./components/KillToast";
 import StatusHeader from "./components/StatusHeader";
 import StatusScreen from "./screens/StatusScreen";
 import SignalsScreen from "./screens/SignalsScreen";
+import SignalDetailScreen from "./screens/SignalDetailScreen";
 import RulesScreen from "./screens/RulesScreen";
 import EventsScreen from "./screens/EventsScreen";
 import { api, deriveTrayStatus } from "./lib/api";
 import { usePolling } from "./lib/hooks";
 
 const TABS = [
-  { id: "status", label: "Status" },
   { id: "signals", label: "Signals" },
   { id: "rules", label: "Rules" },
   { id: "events", label: "Events" },
+  { id: "status", label: "Status" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
 
@@ -24,37 +26,50 @@ const pageVariants = {
 const pageTransition = { duration: 0.18, ease: [0.4, 0, 0.2, 1] };
 
 export default function App() {
-  const [tab, setTab] = useState<TabId>("status");
+  // Default to "signals" -- the live data view is what people open the
+  // dashboard FOR. Status is for first-run / debugging and is a click away.
+  const [tab, setTab] = useState<TabId>("signals");
 
-  // Health is the spine: drives the header status dot + Status tab.
-  // Rules is shared between Signals (for threshold lines) and Rules tab,
-  // so we lift it here too. Each polled at 1 Hz; SignalsScreen polls
-  // /signals on its own at 1 Hz to keep sparklines smooth.
+  // When non-null, SignalsScreen swaps for a per-signal detail view that
+  // pulls multi-resolution history. Clearing it returns to the grid.
+  const [selectedSignal, setSelectedSignal] = useState<string | null>(null);
+
+  // Bumped by the refresh button. Every screen that polls subscribes via
+  // a useEffect that calls its hook's `refresh()` on every change. This is
+  // simpler than threading a context through and avoids re-creating the
+  // polling hooks on each refresh.
+  const [refreshGen, setRefreshGen] = useState(0);
+  const triggerRefresh = () => setRefreshGen((g) => g + 1);
+
   const healthQ = usePolling(api.health, 1000);
   const rulesQ = usePolling(api.rules, 1000);
 
-  const trayStatus = deriveTrayStatus(healthQ.data, healthQ.reachable);
+  const trayStatus = deriveTrayStatus(healthQ.data, healthQ.reachable, healthQ.hasAttempted);
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-[var(--color-bg)] text-[var(--color-text-primary)]">
+    <div className="flex flex-col h-screen w-screen bg-[var(--color-bg)] text-[var(--color-text-primary)] relative">
+      <KillToast health={healthQ.data} />
       <StatusHeader
         status={trayStatus}
         health={healthQ.data}
         onRefresh={() => {
           healthQ.refresh();
           rulesQ.refresh();
+          triggerRefresh();
         }}
       />
 
       <div className="flex flex-1 min-h-0">
-        {/* Left rail: tab nav */}
         <nav className="w-36 border-r border-[var(--color-border)] p-2 flex flex-col gap-1 flex-shrink-0">
           {TABS.map((t) => (
             <button
               key={t.id}
               className="tab-rail-button"
               data-active={tab === t.id}
-              onClick={() => setTab(t.id)}
+              onClick={() => {
+                setTab(t.id);
+                setSelectedSignal(null);
+              }}
             >
               {t.label}
             </button>
@@ -67,11 +82,10 @@ export default function App() {
           </div>
         </nav>
 
-        {/* Right pane: active screen, with smooth transitions */}
         <main className="flex-1 min-w-0 min-h-0 relative overflow-hidden">
           <AnimatePresence mode="wait">
             <motion.div
-              key={tab}
+              key={selectedSignal ?? tab}
               className="absolute inset-0"
               variants={pageVariants}
               initial="initial"
@@ -79,10 +93,28 @@ export default function App() {
               exit="exit"
               transition={pageTransition}
             >
-              {tab === "status" && <StatusScreen health={healthQ.data} reachable={healthQ.reachable} />}
-              {tab === "signals" && <SignalsScreen rules={rulesQ.data} />}
-              {tab === "rules" && <RulesScreen rules={rulesQ.data} />}
-              {tab === "events" && <EventsScreen />}
+              {tab === "signals" && selectedSignal == null && (
+                <SignalsScreen
+                  rules={rulesQ.data}
+                  refreshGen={refreshGen}
+                  onSelectSignal={setSelectedSignal}
+                />
+              )}
+              {tab === "signals" && selectedSignal != null && (
+                <SignalDetailScreen
+                  signal={selectedSignal}
+                  rules={rulesQ.data}
+                  onBack={() => setSelectedSignal(null)}
+                  refreshGen={refreshGen}
+                />
+              )}
+              {tab === "rules" && (
+                <RulesScreen rules={rulesQ.data} onMutated={rulesQ.refresh} />
+              )}
+              {tab === "events" && <EventsScreen refreshGen={refreshGen} />}
+              {tab === "status" && (
+                <StatusScreen health={healthQ.data} reachable={healthQ.reachable} />
+              )}
             </motion.div>
           </AnimatePresence>
         </main>

@@ -351,14 +351,46 @@ def _find_script(name: str) -> Path | None:
                 return p
     except (ModuleNotFoundError, FileNotFoundError):
         pass
+    # PyInstaller-frozen install: data files live under sys._MEIPASS
+    # (which is _internal/ for onedir builds, or a temp dir for onefile).
+    # See packaging/pyinstaller/atfield.spec datas section.
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidate = Path(meipass) / "scripts" / name
+            if candidate.exists():
+                return candidate
+        # Fallback: side-by-side with the exe (for installer layouts that
+        # flatten the bundle).
+        exe_dir = Path(sys.executable).resolve().parent
+        for candidate in (exe_dir / "scripts" / name, exe_dir / name):
+            if candidate.exists():
+                return candidate
     return None
+
+
+def _frozen_service_exe() -> Path | None:
+    """When ``atf.exe`` was built by PyInstaller, return the sibling
+    ``atfield-service.exe`` so ``atf install`` can hand it to NSSM
+    instead of relying on a Python interpreter being on PATH.
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    candidate = Path(sys.executable).resolve().parent / "atfield-service.exe"
+    return candidate if candidate.exists() else None
 
 
 @app.command()
 def install(
     state_dir: Path = _state_dir_option(),
 ) -> None:
-    """Install AT-Field as a Windows Service (NSSM-based, runs as LocalSystem)."""
+    """Install AT-Field as a Windows Service (NSSM-based, runs as LocalSystem).
+
+    If ``atf`` itself was built by PyInstaller (i.e. you're running the
+    bundled binary, not ``pip install atfield``), the Windows Service is
+    pointed at the sibling ``atfield-service.exe`` -- no Python
+    interpreter required on the target machine.
+    """
     if sys.platform != "win32":
         console.print("[red]install is Windows-only[/]")
         raise typer.Exit(code=1)
@@ -366,14 +398,19 @@ def install(
     if script is None:
         console.print("[red]install_service.ps1 not found[/]; reinstall the package or run from a source checkout")
         raise typer.Exit(code=1)
-    cmd = [
+    cmd: list[str] = [
         "powershell.exe",
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-File", str(script),
         "-StateDir", str(state_dir),
-        "-PythonExe", sys.executable,
     ]
+    bundled = _frozen_service_exe()
+    if bundled is not None:
+        console.print(f"[cyan]bundled mode:[/] using {bundled}")
+        cmd += ["-BundledExe", str(bundled)]
+    else:
+        cmd += ["-PythonExe", sys.executable]
     console.print(f"[cyan]running:[/] {' '.join(cmd)}")
     rc = subprocess.call(cmd)
     raise typer.Exit(code=rc)

@@ -1,118 +1,196 @@
-"""Generate placeholder icons for the AT-Field tray app.
+"""Generate the Tauri / PyInstaller icon set from the brand masters.
 
-Draws a hexagon containing an "AT" monogram in the AT-Field accent purple
-on the dark theme background. Generates the full Tauri icon set:
+Source-of-truth artwork lives in ``brand/``. Two tiers:
 
-  icons/
-    32x32.png
-    128x128.png
-    128x128@2x.png
-    icon.png
-    icon.ico
-    tray.png
+  HAND-PAINTED (preferred)
+    brand/logo_16.png, logo_28.png, logo_32.png, logo_48.png, ...
+    Used verbatim at their native resolution -- no resize, no binarize.
+    Drop a new ``logo_NN.png`` in brand/ to add another hand-painted size.
+    Hand-painted icons always beat auto-resampled ones at small sizes;
+    every shipped Windows app does this.
 
-These are PLACEHOLDERS suitable for the v0.2 first cut. A polished hex/AT
-mark by an actual designer should replace them before v0.2.0 ships.
+  AUTO-RESAMPLED (fallback)
+    brand/logo2.png  -- thick three-hex master (1024×1024). Used at any
+                        size where no hand-painted version exists. Trim
+                        → Lanczos resize → alpha-binarize.
 
-Usage (from at-field-tray/):
-    python scripts/gen_icons.py
+Outputs (in ``at-field-tray/src-tauri/icons/``):
+
+    32x32.png          taskbar small / NSIS small      <- HAND if 32 exists
+    128x128.png        taskbar / dock at 1×            <- AUTO from logo2
+    128x128@2x.png     taskbar / dock at 2× (256 px)   <- AUTO from logo2
+    icon.png           1024×1024 brand master          <- logo2 verbatim
+    icon.ico           multi-resolution Windows icon   <- per-size: HAND
+                                                          where available,
+                                                          AUTO elsewhere
+    tray.png           32×32 systray-specific          <- HAND if 32 exists
+
+Re-run whenever ``brand/*`` changes:
+
+    .venv/Scripts/python.exe at-field-tray/scripts/gen_icons.py
 """
 
 from __future__ import annotations
 
-import math
+import re
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
-OUT_DIR = Path(__file__).resolve().parent.parent / "src-tauri" / "icons"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+BRAND = REPO_ROOT / "brand"
+THICK_MASTER = BRAND / "logo2.png"
+OUT_DIR = REPO_ROOT / "at-field-tray" / "src-tauri" / "icons"
 
-ACCENT = (167, 139, 250, 255)        # #a78bfa
-ACCENT_DARK = (139, 92, 246, 255)    # #8b5cf6
-BG = (27, 20, 31, 255)               # #1b141f
-SURFACE = (41, 36, 49, 255)          # #292431
-
-
-def draw_icon(size: int, *, transparent_bg: bool = True) -> Image.Image:
-    """Render the AT-Field mark at ``size``×``size`` pixels."""
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0) if transparent_bg else BG)
-    draw = ImageDraw.Draw(img)
-
-    cx, cy = size / 2, size / 2
-    radius = size * 0.46
-    # Hexagon with flat top -- compute six vertices.
-    points = []
-    for i in range(6):
-        angle = math.pi / 3 * i + math.pi / 6  # rotate so top is flat
-        x = cx + radius * math.cos(angle)
-        y = cy + radius * math.sin(angle)
-        points.append((x, y))
-
-    # Outer hex stroke + fill: a slightly-darker surface base with a
-    # crisp accent border so the icon reads against any tray background.
-    draw.polygon(points, fill=SURFACE, outline=ACCENT, width=max(1, size // 32))
-
-    # Inset hex glow.
-    inset = []
-    inset_radius = radius * 0.78
-    for i in range(6):
-        angle = math.pi / 3 * i + math.pi / 6
-        x = cx + inset_radius * math.cos(angle)
-        y = cy + inset_radius * math.sin(angle)
-        inset.append((x, y))
-    draw.polygon(inset, fill=ACCENT_DARK)
-
-    # "AT" monogram, centered.
-    label = "AT"
-    font_size = int(size * 0.42)
-    font = _load_font(font_size)
-    bbox = draw.textbbox((0, 0), label, font=font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    tx = cx - tw / 2 - bbox[0]
-    ty = cy - th / 2 - bbox[1]
-    draw.text((tx, ty), label, fill=(240, 239, 242, 255), font=font)
-
-    return img
+_HAND_PATTERN = re.compile(r"^logo_(\d+)\.png$", re.IGNORECASE)
 
 
-def _load_font(size: int) -> ImageFont.ImageFont:
-    """Pick a bold sans font: try Segoe UI Bold, then arial, then default."""
-    for candidate in (
-        r"C:\Windows\Fonts\segoeuib.ttf",
-        r"C:\Windows\Fonts\arialbd.ttf",
-        r"C:\Windows\Fonts\arial.ttf",
-    ):
-        try:
-            return ImageFont.truetype(candidate, size=size)
-        except OSError:
+def _discover_hand_painted() -> dict[int, Path]:
+    """Scan ``brand/`` for ``logo_NN.png`` files and validate dimensions.
+
+    Each hand-painted file must be square and exactly NN×NN pixels (the
+    point of hand-painting is to control every pixel; if the file isn't
+    NN×NN the user almost certainly made a mistake we should surface).
+    """
+    found: dict[int, Path] = {}
+    for path in sorted(BRAND.glob("logo_*.png")):
+        m = _HAND_PATTERN.match(path.name)
+        if not m:
             continue
-    return ImageFont.load_default()
+        size = int(m.group(1))
+        with Image.open(path) as im:
+            if im.size != (size, size):
+                raise ValueError(
+                    f"{path.name} declares size {size} but is {im.size}. "
+                    "Hand-painted icons must be square at the declared size."
+                )
+        found[size] = path
+    return found
+
+
+def _load(path: Path) -> Image.Image:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"brand master not found at {path}. See brand/README.md."
+        )
+    return Image.open(path).convert("RGBA")
+
+
+def _trim_alpha(img: Image.Image, padding_frac: float = 0.04) -> Image.Image:
+    """Crop transparent margins from an RGBA image, then re-pad uniformly.
+
+    Keeps the mark visually centered after the crop. The small re-pad
+    avoids edge-clipping when the result is later resized with Lanczos.
+    """
+    bbox = img.split()[-1].getbbox()
+    if bbox is None:
+        return img
+    cropped = img.crop(bbox)
+    side = max(cropped.size)
+    pad = int(side * padding_frac)
+    canvas = Image.new("RGBA", (side + 2 * pad, side + 2 * pad), (0, 0, 0, 0))
+    offset = (
+        (canvas.size[0] - cropped.size[0]) // 2,
+        (canvas.size[1] - cropped.size[1]) // 2,
+    )
+    canvas.paste(cropped, offset, cropped)
+    return canvas
+
+
+def _resize(img: Image.Image, size: int) -> Image.Image:
+    return img.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def _binarize_alpha(img: Image.Image, threshold: int = 96) -> Image.Image:
+    """Snap the alpha channel to fully opaque or fully transparent.
+
+    Why: the brand logo has a distressed/painted edge with lots of
+    partially-transparent pixels. After a big Lanczos downscale (1024 →
+    32) those partial-alpha pixels dominate the silhouette, and they
+    visually wash out / darken when composited against a dark Windows
+    taskbar (alpha 0.4 orange + black = muddy brown). Binarizing the
+    alpha keeps the painted-edge SHAPE intact while restoring the punchy
+    saturation of the source orange. We only do this at small sizes; the
+    full-resolution master keeps its texture untouched.
+    """
+    r, g, b, a = img.split()
+    a = a.point(lambda v: 255 if v >= threshold else 0)
+    return Image.merge("RGBA", (r, g, b, a))
+
+
+def _render_auto(source: Image.Image, size: int) -> Image.Image:
+    """Trim → Lanczos resize → alpha-binarize. The fallback path when no
+    hand-painted icon exists at ``size``."""
+    trimmed = _trim_alpha(source, padding_frac=0.04)
+    out = _resize(trimmed, size) if trimmed.size != (size, size) else trimmed.copy()
+    return _binarize_alpha(out)
+
+
+def _render_at(
+    size: int,
+    *,
+    hand: dict[int, Path],
+    auto_master: Image.Image,
+) -> tuple[Image.Image, str]:
+    """Render the icon at ``size`` px. Returns (image, source-tag)."""
+    if size in hand:
+        return _load(hand[size]), f"HAND ({hand[size].name})"
+    return _render_auto(auto_master, size), "auto (logo2)"
 
 
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    auto_master = _load(THICK_MASTER)
+    hand = _discover_hand_painted()
 
-    sizes = {
-        "32x32.png": 32,
-        "128x128.png": 128,
+    if hand:
+        sizes_str = ", ".join(f"{s}px" for s in sorted(hand))
+        print(f"hand-painted icons found: {sizes_str}")
+    else:
+        print("no hand-painted icons found; everything resampled from logo2.png")
+    print()
+
+    work = {
+        "32x32.png":      32,
+        "128x128.png":    128,
         "128x128@2x.png": 256,
-        "icon.png": 1024,
-        "tray.png": 32,
+        "tray.png":       32,
     }
 
-    for name, size in sizes.items():
-        img = draw_icon(size)
-        img.save(OUT_DIR / name, "PNG")
-        print(f"  wrote {name} ({size}x{size})")
+    for name, size in work.items():
+        out, tag = _render_at(size, hand=hand, auto_master=auto_master)
+        out.save(OUT_DIR / name, "PNG")
+        print(f"  wrote {name} ({size}x{size}) [{tag}]")
 
-    # Multi-resolution .ico for Windows.
-    ico_sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-    base = draw_icon(256)
-    base.save(OUT_DIR / "icon.ico", format="ICO", sizes=ico_sizes)
-    print("  wrote icon.ico (16/32/48/64/128/256)")
+    # icon.png is the in-app brand artwork (used by README header, social
+    # cards, About dialog). Always use the full-detail thick master at
+    # native 1024 -- no resize, no binarize.
+    auto_master.save(OUT_DIR / "icon.png", "PNG")
+    print(f"  wrote icon.png (1024x1024) [logo2 verbatim]")
+
+    # Multi-resolution .ico for Windows. Per-size we pick the hand-painted
+    # version if available, otherwise auto-resample from logo2. Includes
+    # the standard sizes (16/24/32/48/64/128/256) plus any non-standard
+    # hand-painted size like 28 (which Win11 uses on certain DPI configs).
+    standard = {16, 24, 32, 48, 64, 128, 256}
+    ico_targets = sorted(standard | set(hand))
+    layers = []
+    for size in ico_targets:
+        img, tag = _render_at(size, hand=hand, auto_master=auto_master)
+        layers.append(img)
+    # Pillow's ICO writer: pass the largest as base, the rest via
+    # append_images. Each one keeps its native size in the resulting .ico.
+    base = layers[-1]
+    base.save(
+        OUT_DIR / "icon.ico",
+        format="ICO",
+        sizes=[(s, s) for s in ico_targets],
+        append_images=layers[:-1],
+    )
+    print(f"  wrote icon.ico ({'/'.join(map(str, ico_targets))})")
 
     print(f"\ndone -> {OUT_DIR}")
+    print(f"auto fallback master: {THICK_MASTER.relative_to(REPO_ROOT)}")
 
 
 if __name__ == "__main__":

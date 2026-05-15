@@ -15,6 +15,7 @@ from atfield.actuator import (
     Actuator,
     ProcInfo,
     find_kill_root,
+    script_name_from_cmdline,
 )
 from atfield.config import default_config
 from atfield.policy import Action
@@ -356,3 +357,93 @@ class TestActuator:
         report = actuator.execute(_action(kind="kill"), candidate_pids=[20])
         assert any(k.survived for k in report.killed)
         assert not report.succeeded
+
+
+class TestScriptNameFromCmdline:
+    """Heuristic that extracts the human-recognizable script behind a launcher.
+
+    These cases mirror real cmdlines we've seen in the wild; if you change
+    the heuristic, please add the case here BEFORE touching the helper.
+    """
+
+    def test_empty_cmdline_returns_none(self):
+        assert script_name_from_cmdline(()) is None
+        assert script_name_from_cmdline(None) is None
+
+    def test_bare_interpreter_returns_none(self):
+        assert script_name_from_cmdline(("python.exe",)) is None
+
+    def test_simple_python_script(self):
+        cmd = ("python.exe", "train.py", "--lr", "1e-4")
+        assert script_name_from_cmdline(cmd) == "train.py"
+
+    def test_python_script_with_path(self):
+        cmd = ("python.exe", "scripts/train.py", "--lr", "1e-4")
+        assert script_name_from_cmdline(cmd) == "train.py"
+
+    def test_python_script_with_windows_path(self):
+        cmd = ("python.exe", "C:\\projects\\foo\\train.py")
+        assert script_name_from_cmdline(cmd) == "train.py"
+
+    def test_python_module_mode(self):
+        cmd = ("python.exe", "-m", "torch.distributed.run", "--nproc-per-node=2")
+        assert script_name_from_cmdline(cmd) == "torch.distributed.run"
+
+    def test_python_unbuffered_flag_then_script(self):
+        cmd = ("python.exe", "-u", "scripts/train.py")
+        assert script_name_from_cmdline(cmd) == "train.py"
+
+    def test_python_combined_short_flags_then_script(self):
+        # `-uOO` is a bundle of -u, -O, -O
+        cmd = ("python.exe", "-uOO", "train.py")
+        assert script_name_from_cmdline(cmd) == "train.py"
+
+    def test_python_inline_code_returns_marker(self):
+        cmd = ("python.exe", "-c", "import torch; torch.cuda.empty_cache()")
+        assert script_name_from_cmdline(cmd) == "<inline -c>"
+
+    def test_python_W_flag_takes_value(self):
+        # -W default::DeprecationWarning train.py
+        cmd = ("python.exe", "-W", "default::DeprecationWarning", "train.py")
+        assert script_name_from_cmdline(cmd) == "train.py"
+
+    def test_python_X_flag_takes_value(self):
+        cmd = ("python.exe", "-X", "dev", "train.py")
+        assert script_name_from_cmdline(cmd) == "train.py"
+
+    def test_python_long_flag_skipped(self):
+        cmd = ("python.exe", "--check-hash-based-pycs", "always", "train.py")
+        # We treat --foo as a flag that doesn't consume the next arg, so
+        # `always` becomes the "script". This is wrong in theory but right
+        # often enough in practice -- known tradeoff documented in the
+        # helper's docstring.
+        result = script_name_from_cmdline(cmd)
+        # Either "always" or "train.py" is acceptable; document whichever
+        # the current heuristic returns so we notice if it changes.
+        assert result == "always"
+
+    def test_powershell_file_flag(self):
+        cmd = ("powershell.exe", "-NoProfile", "-File", "C:\\foo\\bar.ps1")
+        assert script_name_from_cmdline(cmd) == "bar.ps1"
+
+    def test_powershell_command_returns_marker(self):
+        cmd = ("powershell.exe", "-Command", "Get-Process python")
+        assert script_name_from_cmdline(cmd) == "<inline -Command>"
+
+    def test_cmd_exe_slash_c(self):
+        cmd = ("cmd.exe", "/c", "run.bat")
+        assert script_name_from_cmdline(cmd) == "run.bat"
+
+    def test_node_script(self):
+        # We don't special-case node, but the "first non-flag positional"
+        # heuristic catches it.
+        cmd = ("node.exe", "server.mjs")
+        assert script_name_from_cmdline(cmd) == "server.mjs"
+
+    def test_cross_separator_basename(self):
+        cmd = ("python.exe", "C:/Users/me/projects/train.py")
+        assert script_name_from_cmdline(cmd) == "train.py"
+
+    def test_double_dash_terminator(self):
+        cmd = ("python.exe", "--", "weirdly-named-script")
+        assert script_name_from_cmdline(cmd) == "weirdly-named-script"

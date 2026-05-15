@@ -1,7 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { AuditEvent } from "../lib/api";
+import { extractScriptName } from "../lib/format";
 import { usePolling } from "../lib/hooks";
+
+interface Props {
+  /** Bumped by the global refresh button so the screen re-fetches. */
+  refreshGen?: number;
+}
 
 const EVENT_COLORS: Record<string, string> = {
   startup: "var(--color-success)",
@@ -18,9 +24,14 @@ const EVENT_COLORS: Record<string, string> = {
  * disclosure -- the goal is "I can answer 'why was my job killed?' from
  * here without grep-ing events.jsonl by hand".
  */
-export default function EventsScreen() {
-  const { data, reachable } = usePolling(() => api.events({ limit: 200 }), 2000);
+export default function EventsScreen({ refreshGen }: Props) {
+  const { data, reachable, refresh } = usePolling(() => api.events({ limit: 200 }), 2000);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+
+  useEffect(() => {
+    if (refreshGen != null && refreshGen > 0) refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshGen]);
 
   if (!reachable || !data) {
     return <div className="p-6 text-sm text-[var(--color-text-secondary)]">Loading events…</div>;
@@ -113,10 +124,25 @@ function summarize(e: AuditEvent): string {
     case "action":
       return `${e.kind} — rule ${e.rule}, signal ${e.signal} = ${e.latest_value} (over ${e.threshold}, ${(((e.fraction_over as number) ?? 0) * 100).toFixed(0)}% of window)`;
     case "kill_report": {
-      const killed = (e.killed as Array<{ pid: number; name: string }> | undefined) ?? [];
-      const root = e.kill_root as { pid: number; name: string } | null | undefined;
+      const killed = (e.killed as Array<{ pid: number; name: string; cmdline?: string[] }> | undefined) ?? [];
+      const root = e.kill_root as
+        | { pid: number; name: string; script?: string | null; cmdline?: string[] }
+        | null
+        | undefined;
       if (e.skipped_reason) return `kill skipped: ${e.skipped_reason}`;
-      return `killed ${killed.length} processes${root ? ` rooted at ${root.name} (pid ${root.pid})` : ""}`;
+      // Prefer the server-provided `script` (canonical, computed at kill
+      // time when cmdline is freshest). Fall back to client-side extraction
+      // so events.jsonl entries written before the server helper landed
+      // still get a friendly headline. The launcher exe + pid live in the
+      // expanded JSON detail; keeping the headline focused on "what was
+      // running" puts the answer to "why was my job killed?" up front.
+      const script =
+        (e.script as string | null | undefined) ??
+        root?.script ??
+        extractScriptName(root?.cmdline);
+      const headline = script ?? root?.name ?? "process";
+      const procCount = killed.length > 1 ? ` (${killed.length} processes)` : "";
+      return `killed ${headline}${procCount}`;
     }
     case "collector_health":
       return `collector ${e.collector} → ${e.state}${e.reason ? ` (${e.reason})` : ""}`;

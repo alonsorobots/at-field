@@ -57,10 +57,111 @@ __all__ = [
     "ProcessProvider",
     "PsutilProvider",
     "find_kill_root",
+    "script_name_from_cmdline",
 ]
 
 
 _log = logging.getLogger("atfield.actuator")
+
+
+# ---------------------------------------------------------------------------
+# Cmdline → "what was actually running" extraction
+# ---------------------------------------------------------------------------
+
+
+# Python flags that take NO value (so the next argv item is the script).
+# Source: `python --help` short flags. Conservative: when in doubt we treat
+# unknown short flags as value-less; the alternative (consuming the next arg)
+# can mis-identify a script as a flag value.
+_PY_VALUELESS_SHORT_FLAGS = frozenset(
+    "BOdEhiIqRsSuvVx"
+)
+# Python flags that DO take a value as the next argv item.
+_PY_VALUE_TAKING_SHORT_FLAGS = frozenset(("-W", "-X", "-c", "--check-hash-based-pycs"))
+
+
+def _basename(path: str) -> str:
+    """Cross-platform basename without the os.path round-trip.
+
+    psutil cmdlines on Windows can contain forward OR back slashes depending
+    on how the launcher was invoked, so we strip both.
+    """
+    if not path:
+        return path
+    last_sep = max(path.rfind("\\"), path.rfind("/"))
+    return path[last_sep + 1 :] if last_sep >= 0 else path
+
+
+def script_name_from_cmdline(cmdline: tuple[str, ...] | list[str] | None) -> str | None:
+    """Best-effort 'what was the user actually running?' from a cmdline.
+
+    Returns ``None`` if the cmdline doesn't carry useful info (empty, or
+    it's just an interactive interpreter like ``python.exe`` with no args).
+
+    Examples::
+
+        ('python.exe', 'train.py', '--lr', '1e-4')             → 'train.py'
+        ('python.exe', '-u', 'scripts/train.py')               → 'train.py'
+        ('python.exe', '-m', 'torch.distributed.run', '--np')  → 'torch.distributed.run'
+        ('python.exe', '-c', 'import torch; ...')              → '<inline -c>'
+        ('powershell.exe', '-File', 'C:\\\\foo\\\\bar.ps1')    → 'bar.ps1'
+        ('cmd.exe', '/c', 'run.bat')                           → 'run.bat'
+        ('node.exe', 'server.mjs')                             → 'server.mjs'
+        ('python.exe',)                                        → None
+
+    The intent is to pick the single most informative token to put in front
+    of an operator who's reading "why was my training job killed?". The
+    launcher executable name (``python.exe``, ``node.exe``) is uninformative
+    and lives elsewhere in the kill report; this is the script *behind* it.
+    """
+    if not cmdline or len(cmdline) < 2:
+        return None
+
+    argv = list(cmdline[1:])
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        # Inline-code modes
+        if arg in ("-c", "-Command"):
+            return "<inline -c>" if arg == "-c" else "<inline -Command>"
+        # Module mode: next token IS the script identifier
+        if arg == "-m":
+            return argv[i + 1] if i + 1 < len(argv) else None
+        # PowerShell -File / -f
+        if arg.lower() in ("-file", "-f") and i + 1 < len(argv):
+            return _basename(argv[i + 1])
+        # cmd.exe /c /k
+        if arg in ("/c", "/k", "/C", "/K") and i + 1 < len(argv):
+            return _basename(argv[i + 1])
+        # End-of-options: anything past `--` is positional
+        if arg == "--":
+            i += 1
+            if i < len(argv):
+                return _basename(argv[i])
+            return None
+        # Long flags: --foo, --foo=bar
+        if arg.startswith("--"):
+            i += 1
+            continue
+        # Short Python flags
+        if arg.startswith("-") and len(arg) >= 2:
+            # -W / -X take an argument
+            if arg in _PY_VALUE_TAKING_SHORT_FLAGS:
+                i += 2
+                continue
+            # Bundled short flags like -uOO or -u: peel off any value-less
+            # combo and move on.
+            stripped = arg.lstrip("-")
+            if stripped and all(c in _PY_VALUELESS_SHORT_FLAGS for c in stripped):
+                i += 1
+                continue
+            # Unknown short flag: skip just this token (don't risk eating a
+            # script name as a flag value).
+            i += 1
+            continue
+        # First positional token = the script
+        return _basename(arg)
+    return None
 
 
 # ---------------------------------------------------------------------------
