@@ -47,9 +47,23 @@ export default function SetupScreen({ onInstalled }: SetupScreenProps) {
     try {
       await installBundledService();
       await refresh();
-      // Give the service a moment to come up before signaling the parent
-      // to re-poll /health -- the CTA hides as soon as /health succeeds.
-      setTimeout(() => onInstalled(), 1500);
+      // Poll repeatedly for up to ~10s after install. NSSM's "service
+      // started" return doesn't guarantee the Python process has bound
+      // the port yet (we've seen ~3s in the wild), so a single delayed
+      // ping can miss it and leave the user staring at the CTA. We
+      // signal `onInstalled()` after each refresh -- the parent's
+      // /health poll either succeeds (CTA hides) or stays unreachable
+      // (we keep polling). 10 attempts at 1s feels right: long enough
+      // for a cold start, short enough that the user notices if it
+      // still hasn't come up and can re-trigger by closing/reopening
+      // the dashboard.
+      for (let i = 0; i < 10; i += 1) {
+        await new Promise((r) => setTimeout(r, 1000));
+        onInstalled();
+        const s = await getServiceStatus();
+        setStatus(s);
+        if (s?.running) break;
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
