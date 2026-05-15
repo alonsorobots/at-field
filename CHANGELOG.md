@@ -7,12 +7,34 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-### Notes for the next release tag (v0.2.0 candidate)
+### Added
 
-The dashboard polish + rule sliders + tray autostart work currently sits
-on `main`. Once the bundled NSIS installer (which wraps the Python
-service binaries together with the tray app) lands, this section gets
-promoted to a proper `## [0.2.0]` heading.
+- **Per-rule advanced controls** on the Rules tab. Threshold slider was
+  the v0.2 primary control; this expands the "Advanced…" toggle on each
+  card to let the user edit `window_s` (sustained-for seconds),
+  `cooldown_s` (per-rule override of the post-action cooldown), and
+  `action` (kill / throttle / log). Each editor commits debounced and
+  surfaces server validation errors inline.
+- **`PATCH /rules/<base_rule>` accepts a multi-field body**. Beyond the
+  v0.2 `{threshold}`-only contract, the API now accepts any subset of
+  `{threshold, window_s, cooldown_s, action, min_fraction_over}` in a
+  single request. Each field is bounds-checked before the comment-
+  preserving on-disk rewrite.
+- **`config_writer.update_rule_field()`**: generalized
+  comment-preserving, atomic-write rule field mutator. Replaces an
+  existing field line in place when present, injects a new one at the
+  end of the rule block when not (e.g. `cooldown_s` often omitted from
+  defaults). The dashboard whitelists which fields it's allowed to
+  mutate via `MUTABLE_RULE_FIELDS`.
+
+### Changed
+
+- **`update_rule_threshold` is now a thin wrapper** over
+  `update_rule_field`. Existing callers (CLI, profile presets) keep
+  their contract; multi-field PATCH callers use the generalized writer.
+- **`/rules` GET surfaces `cooldown_s`** so the editor can show what's
+  actually on disk vs. inheriting from
+  `kill.post_kill_cooldown_seconds`.
 
 ## [0.2.0] — Tauri tray app + dashboard
 
