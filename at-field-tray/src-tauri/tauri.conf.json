@@ -1,0 +1,56 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AT-Field",
+  "version": "0.2.0",
+  "identifier": "dev.atfield.tray",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:5174",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "AT-Field",
+        "width": 720,
+        "height": 720,
+        "minWidth": 480,
+        "minHeight": 480,
+        "resizable": true,
+        "center": true,
+        "decorations": true,
+        "visible": false,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src http://127.0.0.1:8765 ws://127.0.0.1:* http://127.0.0.1:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+    },
+    "trayIcon": {
+      "id": "atfield-tray",
+      "iconPath": "icons/tray.png",
+      "iconAsTemplate": false,
+      "tooltip": "AT-Field — Watchdog status",
+      "menuOnLeftClick": false
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "category": "Utility",
+    "shortDescription": "Hardware watchdog UI for AI workloads on Windows",
+    "longDescription": "AT-Field is an always-on hardware watchdog for AI workloads on Windows. This tray app gives you a live dashboard over the watchdog service: signal sparklines, rule verdicts, recent events, and a one-click pause toggle.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

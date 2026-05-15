@@ -1,0 +1,17 @@
+# Frontend build output / deps
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Rust / Tauri build output
+src-tauri/target/
+src-tauri/Cargo.lock
+src-tauri/gen/
+
+# Bundled installers (built by `npm run tauri build`)
+src-tauri/release/
+src-tauri/target/release/bundle/
+
+# OS / editor noise
+.DS_Store
+*.log
