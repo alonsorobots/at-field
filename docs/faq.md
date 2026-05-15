@@ -103,12 +103,24 @@ AT-Field reads CPU temp via LHM's HTTP plugin. If LHM isn't running,
 the CPU temp signal is missing — and the `cpu-running-hot` rule is
 disabled at startup with a clear reason on the Status tab.
 
-The bundled installer (post-v0.2.0) supervises LHM as a child process,
-so this all happens automatically. Until then, install
-[LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)
-manually:
+The bundled installer ships LHM out of the box and supervises it as a
+child process, so this all happens automatically. For pip-installed or
+git-cloned dev installs, run the one-shot fetcher:
 
-1. Download the latest LHM release (`LibreHardwareMonitor-net472.zip`).
+```powershell
+atf install-lhm
+# Drops LHM into ~/.atfield/lhm/ with the web server pre-configured.
+# Pass -d <path> to install elsewhere; --force to reinstall.
+
+setx ATFIELD_LHM_EXE "$env:USERPROFILE\.atfield\lhm\LibreHardwareMonitor.exe"
+# Then restart the AT-Field service so the supervisor picks it up.
+```
+
+If you'd rather install LHM by hand:
+
+1. Download the latest LHM release (`LibreHardwareMonitor-net472.zip`)
+   from
+   [github.com/LibreHardwareMonitor/LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor).
 2. Extract it somewhere persistent (`C:\Tools\LHM\`).
 3. Launch `LibreHardwareMonitor.exe` once and from its menu enable
    **Options → Run on Windows Startup** and **Options → Remote Web
