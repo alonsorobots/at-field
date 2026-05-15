@@ -42,7 +42,7 @@ Researched alternatives (see `docs/chat-history.md` §Search-results for the ful
 | **Kill scope (initial)** | Python-only (python.exe / pythonw.exe / python3.exe), config.toml extensible | conservative default, easy to widen |
 | **Working dir** | `C:\Users\admin\Desktop\RESEARCH\at-field` | local repo |
 | **State dir (runtime)** | `%ProgramData%\ATField\` | machine-wide, service-readable |
-| **Cursor workspace** | `C:\Users\admin\Dropbox\MyWork\RESEARCH\workspaces\at-field-1.code-workspace` | already pointing at the repo |
+| **Cursor workspace** | `C:\Users\admin\Desktop\RESEARCH\workspaces\at-field.code-workspace` | points at the repo via `../at-field` |
 
 ## 4. Target hardware (this user's rig, for tuning defaults)
 

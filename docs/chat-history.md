@@ -2,7 +2,7 @@
 
 > This is the reconstructed transcript of the conversation that produced the design captured in [`../PLANNING.md`](../PLANNING.md). It's preserved verbatim-in-spirit so that future contributors (human or AI) can trace any decision back to its reasoning.
 >
-> **Date:** Thursday, May 14, 2026
+> **Date:** Thursday, May 14, 2026 (last updated after the workspace move)
 > **Participants:** Alonso Martinez (user, `alonsorobots`), Cursor agent (Claude Opus 4.7)
 > **Outcome:** Repo bootstrapped at [`alonsorobots/at-field`](https://github.com/alonsorobots/at-field), planning doc committed, fresh agent handoff via this file.
 
@@ -150,7 +150,23 @@ Agent:
 1. Fixed `at-field-1.code-workspace` to point at `Desktop/RESEARCH/at-field` (was pointing at non-existent `at-field-1`)
 2. Wrote `PLANNING.md` at repo root with all decisions + architecture + todo list
 3. Wrote this file (`docs/chat-history.md`) — you are reading it.
-4. About to commit + push so a fresh agent in the workspace can pull and continue.
+4. Committed locally (not pushed).
+
+## User — folder reshuffle
+
+> shoot, I moved the folder here and changed it from at-field-1 to at-field. is that an issue? I realize it had created an at-field-1 because there was a copy. I only want the original
+> `C:\Users\admin\Desktop\RESEARCH\workspaces\at-field.code-workspace`
+
+The user moved the entire `workspaces/` folder out of Dropbox and into `Desktop/RESEARCH/workspaces/`, and renamed the workspace file `at-field-1.code-workspace → at-field.code-workspace`. A stray `Desktop/RESEARCH/at-field-1/` duplicate folder had also been auto-created by Cursor (containing only the GitHub initial-commit stub, no real work). Agent:
+
+1. Confirmed the new workspace file's `folders[].path = "../at-field"` resolves correctly to the real repo from the new location.
+2. Deleted the empty `at-field-1/` duplicate folder.
+3. Updated `PLANNING.md` and this transcript to reflect the new workspace path.
+
+**Current authoritative paths:**
+- Repo on disk: `C:\Users\admin\Desktop\RESEARCH\at-field`
+- Cursor workspace: `C:\Users\admin\Desktop\RESEARCH\workspaces\at-field.code-workspace`
+- GitHub: `https://github.com/alonsorobots/at-field`
 
 ---
 
