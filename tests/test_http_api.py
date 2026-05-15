@@ -115,11 +115,19 @@ def _get(host: str, port: int, path: str) -> tuple[int, dict]:
 
 
 def _post(host: str, port: int, path: str, body: dict | None = None) -> tuple[int, dict]:
+    return _verb(host, port, "POST", path, body)
+
+
+def _patch(host: str, port: int, path: str, body: dict | None = None) -> tuple[int, dict]:
+    return _verb(host, port, "PATCH", path, body)
+
+
+def _verb(host: str, port: int, verb: str, path: str, body: dict | None) -> tuple[int, dict]:
     conn = http.client.HTTPConnection(host, port, timeout=2.0)
     try:
         payload = json.dumps(body or {}).encode("utf-8")
         conn.request(
-            "POST",
+            verb,
             path,
             body=payload,
             headers={"Content-Type": "application/json", "Content-Length": str(len(payload))},
@@ -196,6 +204,73 @@ class TestHealth:
         assert data["heartbeat_age_s"] is not None
         assert data["heartbeat_age_s"] >= 0
 
+    def test_health_last_action_includes_signal_and_null_script_initially(self, server):
+        """record_action() alone (no kill_report yet) leaves script=None."""
+        state, host, port = server
+        action = Action(
+            kind="kill",
+            rule_name="vram-junction-hot",
+            base_rule_name="vram-junction-hot",
+            signal="gpu.0.mem_junction_temp_c",
+            threshold=98.0,
+            fraction_over=1.0,
+            samples_considered=10,
+            latest_value=99.5,
+            triggered_at_ns=12345,
+            cooldown_seconds=60,
+        )
+        state.record_action(action)
+        _, data = _get(host, port, "/health")
+        assert data["last_action"]["signal"] == "gpu.0.mem_junction_temp_c"
+        assert data["last_action"]["script"] is None, (
+            "script field exists but is None until record_kill_report fires"
+        )
+
+    def test_health_last_action_script_populated_after_kill_report(self, server):
+        """record_action(kill) then record_kill_report('train.py') makes
+        the script available on /health for the tray notification."""
+        state, host, port = server
+        action = Action(
+            kind="kill",
+            rule_name="vram-junction-hot",
+            base_rule_name="vram-junction-hot",
+            signal="gpu.0.mem_junction_temp_c",
+            threshold=98.0,
+            fraction_over=1.0,
+            samples_considered=10,
+            latest_value=99.5,
+            triggered_at_ns=12345,
+            cooldown_seconds=60,
+        )
+        state.record_action(action)
+        state.record_kill_report("train.py")
+        _, data = _get(host, port, "/health")
+        assert data["last_action"]["script"] == "train.py"
+
+    def test_health_record_action_clears_prior_script(self, server):
+        """A new action should reset the script field so a stale value
+        from a previous kill doesn't bleed into a fresh log/throttle."""
+        state, host, port = server
+        kill = Action(
+            kind="kill", rule_name="r1", base_rule_name="r1",
+            signal="s1", threshold=80.0, fraction_over=1.0,
+            samples_considered=10, latest_value=90.0,
+            triggered_at_ns=1, cooldown_seconds=60,
+        )
+        state.record_action(kill)
+        state.record_kill_report("first.py")
+        # Now a new log action lands; script should reset to None.
+        log = Action(
+            kind="log", rule_name="r2", base_rule_name="r2",
+            signal="s2", threshold=70.0, fraction_over=1.0,
+            samples_considered=10, latest_value=75.0,
+            triggered_at_ns=2, cooldown_seconds=60,
+        )
+        state.record_action(log)
+        _, data = _get(host, port, "/health")
+        assert data["last_action"]["kind"] == "log"
+        assert data["last_action"]["script"] is None
+
     def test_health_reflects_last_action(self, server):
         state, host, port = server
         action = Action(
@@ -256,10 +331,10 @@ class TestSignals:
         # Push three points well in the past, then one "now". Only the recent
         # one should survive a since-filter set to a moment ago.
         old_ts = time.time() - 100
-        state._history.setdefault("x", __import__("collections").deque(maxlen=10))
-        state._history["x"].extend([(old_ts, 1.0), (old_ts + 1, 2.0)])
+        state.record_tick(now_unix=old_ts, samples={"x": _make_sample(1.0)})
+        state.record_tick(now_unix=old_ts + 1, samples={"x": _make_sample(2.0)})
         recent_ts = time.time()
-        state._history["x"].append((recent_ts, 3.0))
+        state.record_tick(now_unix=recent_ts, samples={"x": _make_sample(3.0)})
         _, data = _get(host, port, f"/signals?since={time.time() - 5}")
         assert [pt[1] for pt in data["history"]["x"]] == [3.0]
 
@@ -416,6 +491,115 @@ class TestReload:
         assert state.consume_reload_request() is True
         # second consume should be False (one-shot)
         assert state.consume_reload_request() is False
+
+
+# ---------------------------------------------------------------------------
+# PATCH /rules/<name> + POST /profile (slider + presets)
+# ---------------------------------------------------------------------------
+
+
+class TestRulesTuningMetadata:
+    """Each /rules entry should carry tier metadata for the slider."""
+
+    def test_known_rule_has_tuning_block(self, server):
+        _, host, port = server
+        _, data = _get(host, port, "/rules")
+        ram = next(
+            r for r in data["effective"] if r["base_rule"] == "ram-pressure"
+        )
+        assert ram["tuning"] is not None
+        assert ram["tuning"]["min"] < ram["tuning"]["aggressive_max"]
+        assert ram["tuning"]["aggressive_max"] < ram["tuning"]["relaxed_min"]
+        assert ram["tuning"]["relaxed_min"] < ram["tuning"]["max"]
+        assert ram["tuning"]["unit"] == "%"
+        assert ram["tuning"]["current_tier"] in ("aggressive", "normal", "relaxed")
+        assert "presets" in ram["tuning"]
+
+
+class TestPatchRule:
+    def test_valid_threshold_writes_and_reloads(self, tmp_path, server):
+        state, host, port = server
+        # Provide a config_path so the writer has a real file to mutate.
+        state.set_config_path(tmp_path / "config.toml")
+
+        status, data = _patch(host, port, "/rules/ram-pressure",
+                              {"threshold": 78.0})
+        assert status == 200, data
+        assert data["threshold"] == 78.0
+        assert data["tier"] == "aggressive"
+        assert data["reload_queued"] is True
+
+        # File was actually written
+        text = (tmp_path / "config.toml").read_text(encoding="utf-8")
+        assert 'name = "ram-pressure"' in text
+        assert "threshold = 78.0" in text
+
+        # Reload was queued
+        assert state.consume_reload_request() is True
+
+    def test_unknown_rule_returns_400(self, server):
+        _, host, port = server
+        status, data = _patch(host, port, "/rules/nonexistent",
+                              {"threshold": 50.0})
+        assert status == 400
+        assert "nonexistent" in data["error"]
+
+    def test_threshold_out_of_range_returns_400(self, tmp_path, server):
+        state, host, port = server
+        state.set_config_path(tmp_path / "config.toml")
+        # ram-pressure profile: min=50, max=99
+        status, data = _patch(host, port, "/rules/ram-pressure",
+                              {"threshold": 150.0})
+        assert status == 400
+        assert "out of range" in data["error"]
+
+    def test_missing_threshold_returns_400(self, server):
+        _, host, port = server
+        status, data = _patch(host, port, "/rules/ram-pressure", {})
+        assert status == 400
+        assert "threshold" in data["error"]
+
+    def test_non_numeric_threshold_returns_400(self, server):
+        _, host, port = server
+        status, data = _patch(host, port, "/rules/ram-pressure",
+                              {"threshold": "high"})
+        assert status == 400
+        assert "must be a number" in data["error"]
+
+    def test_unknown_subroute_returns_404(self, server):
+        _, host, port = server
+        # PATCH /rules (no name) is unrouted -- 404 keeps the 'missing
+        # rule name' error out of the way of legitimate 4xx noise.
+        status, _data = _patch(host, port, "/rules", {"threshold": 50.0})
+        assert status == 404
+
+
+class TestApplyProfilePreset:
+    def test_aggressive_preset_writes_all_rules(self, tmp_path, server):
+        state, host, port = server
+        state.set_config_path(tmp_path / "config.toml")
+        status, data = _post(host, port, "/profile", {"profile": "aggressive"})
+        assert status == 200, data
+        assert data["profile"] == "aggressive"
+        # All five default rules got an aggressive value applied
+        applied = data["applied"]
+        assert "ram-pressure" in applied
+        assert "vram-junction-hot" in applied
+        assert "gpu-core-hot" in applied
+        assert "cpu-pkg-hot" in applied
+        # Reload queued
+        assert state.consume_reload_request() is True
+
+    def test_unknown_profile_returns_400(self, server):
+        _, host, port = server
+        status, data = _post(host, port, "/profile", {"profile": "yolo"})
+        assert status == 400
+        assert "yolo" in data["error"] or "unknown" in data["error"]
+
+    def test_missing_profile_returns_400(self, server):
+        _, host, port = server
+        status, _data = _post(host, port, "/profile", {})
+        assert status == 400
 
 
 # ---------------------------------------------------------------------------

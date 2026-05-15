@@ -9,8 +9,9 @@ use serde::Deserialize;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, WebviewWindowBuilder,
 };
+use tauri_plugin_notification::NotificationExt;
 
 const API_BASE: &str = "http://127.0.0.1:8765";
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -38,6 +39,14 @@ struct CollectorView {
 struct LastAction {
     at: f64,
     kind: String,
+    // Optional fields populated by the server for kill actions; absent
+    // for older service versions which is fine -- serde fills with None.
+    #[serde(default)]
+    rule: Option<String>,
+    #[serde(default)]
+    signal: Option<String>,
+    #[serde(default)]
+    script: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +111,13 @@ fn chrono_now() -> f64 {
 // ─────────────────────────────────────────────────────────────────────
 
 fn spawn_poller(app: AppHandle, last_status: Arc<Mutex<TrayStatus>>) {
+    // We track the timestamp of the last kill we've ALREADY notified about
+    // so we don't re-fire the toast on every poll for the same event. The
+    // initial value is set on the first /health observation (rather than 0)
+    // so we don't notify the user about a kill that happened BEFORE the
+    // tray app started -- they didn't ask for archaeology, only live alerts.
+    let last_notified_kill_at: Arc<Mutex<Option<f64>>> = Arc::new(Mutex::new(None));
+
     thread::spawn(move || loop {
         let snapshot: Option<HealthSnapshot> = ureq_get_json(&format!("{}/health", API_BASE));
         let status = derive_status(snapshot.as_ref());
@@ -117,8 +133,77 @@ fn spawn_poller(app: AppHandle, last_status: Arc<Mutex<TrayStatus>>) {
         }
         drop(guard);
 
+        // Detect a NEW kill since our last poll and fire a system
+        // notification. We only consider `kind == "kill"` (log/throttle
+        // actions get audited but don't deserve a popup), and we ignore
+        // any kill_at older than the moment we first observed the API
+        // (see init comment above).
+        if let Some(h) = snapshot.as_ref() {
+            let mut seen = last_notified_kill_at.lock().unwrap();
+            if seen.is_none() {
+                // First observation -- baseline at the current last_action
+                // (or 0 if none) so we don't replay history.
+                *seen = Some(h.last_action.as_ref().map(|la| la.at).unwrap_or(0.0));
+            }
+            if let Some(la) = h.last_action.as_ref() {
+                if la.kind == "kill" && Some(la.at) != *seen && la.at > seen.unwrap_or(0.0) {
+                    *seen = Some(la.at);
+                    fire_kill_notification(&app, la);
+                }
+            }
+        }
+
         thread::sleep(POLL_INTERVAL);
     });
+}
+
+/// Build + send a Windows toast notification announcing a kill action.
+/// We keep the body short and structured: title is "AT-Field killed
+/// <script>", body is "Rule: <rule_name>. Signal: <signal_name>."
+/// System notifications can't render colored text -- the OS theme owns
+/// that surface -- so we use a clear leading marker character + the
+/// always-recognizable AT-Field branding to convey severity. An in-app
+/// red banner (when the dashboard window is open) handles the "red text"
+/// emphasis path separately, via an emit() event consumed by React.
+fn fire_kill_notification(app: &AppHandle, la: &LastAction) {
+    let target = la
+        .script
+        .clone()
+        .unwrap_or_else(|| "a process".to_string());
+    let title = format!("AT-Field killed {}", target);
+    let mut body_parts: Vec<String> = Vec::new();
+    if let Some(rule) = la.rule.as_ref() {
+        body_parts.push(format!("Rule: {}", rule));
+    }
+    if let Some(sig) = la.signal.as_ref() {
+        body_parts.push(format!("Signal: {}", sig));
+    }
+    let body = if body_parts.is_empty() {
+        "A watchdog rule fired. Click the tray icon for details.".to_string()
+    } else {
+        body_parts.join("  ·  ")
+    };
+
+    // Best-effort -- if the notification system is unavailable (rare on
+    // Windows, but possible in locked-down corp environments) we just
+    // skip; the audit log + dashboard still capture the event.
+    let _ = app
+        .notification()
+        .builder()
+        .title(&title)
+        .body(&body)
+        .show();
+
+    // Also broadcast to the React side so a dashboard that's open can
+    // render a red toast banner ("the user wants RED text" path). Front
+    // end listens to "atfield://kill" via the Tauri event bus.
+    let payload = serde_json::json!({
+        "at": la.at,
+        "rule": la.rule,
+        "signal": la.signal,
+        "script": la.script,
+    });
+    let _ = app.emit("atfield://kill", payload);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -160,6 +245,7 @@ fn ureq_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Option<T> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // Build the tray menu.
             let show_item = MenuItem::with_id(app, "show", "Show Dashboard", true, None::<&str>)?;

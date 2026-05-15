@@ -24,7 +24,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-from atfield.actuator import KillReport
+from atfield.actuator import KillReport, script_name_from_cmdline
 from atfield.policy import Action, DisabledRule
 
 __all__ = [
@@ -147,16 +147,30 @@ class AuditWriter:
         )
 
     def write_kill_report(self, report: KillReport) -> None:
+        # Pre-compute the human-recognizable script name once. Persisted at
+        # the top level (canonical, easy to grep) AND inside kill_root /
+        # killed[] entries so grep'ing for either the root or a child gives
+        # you the script in the same line.
+        root_script = (
+            script_name_from_cmdline(report.kill_root.cmdline)
+            if report.kill_root
+            else None
+        )
         self._write(
             {
                 "type": "kill_report",
                 "rule": report.action.rule_name,
                 "signal": report.action.signal,
+                # Top-level convenience: "what was running?". May be None if
+                # the kill root was a bare interpreter or the rule was
+                # skipped before targeting.
+                "script": root_script,
                 "offender_pid": report.offender_pid,
                 "kill_root": (
                     {
                         "pid": report.kill_root.pid,
                         "name": report.kill_root.name,
+                        "script": root_script,
                         "cmdline": list(report.kill_root.cmdline),
                     }
                     if report.kill_root
@@ -166,6 +180,7 @@ class AuditWriter:
                     {
                         "pid": k.info.pid,
                         "name": k.info.name,
+                        "script": script_name_from_cmdline(k.info.cmdline),
                         "cmdline": list(k.info.cmdline),
                         "method": k.method,
                         "survived": k.survived,

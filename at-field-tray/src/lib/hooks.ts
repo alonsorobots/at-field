@@ -16,10 +16,20 @@ import { useEffect, useRef, useState } from "react";
 export function usePolling<T>(
   fetcher: () => Promise<T>,
   intervalMs: number,
-): { data: T | null; reachable: boolean; error: Error | null; refresh: () => void } {
+): {
+  data: T | null;
+  reachable: boolean;
+  error: Error | null;
+  hasAttempted: boolean;
+  refresh: () => void;
+} {
   const [data, setData] = useState<T | null>(null);
   const [reachable, setReachable] = useState<boolean>(true);
   const [error, setError] = useState<Error | null>(null);
+  // Distinguishes "we haven't tried yet" from "we tried and got nothing".
+  // Without this, the dashboard renders "Service down" for the ~1s between
+  // mount and the first poll resolving -- which lies to the user.
+  const [hasAttempted, setHasAttempted] = useState<boolean>(false);
   const mountedRef = useRef(true);
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
@@ -35,6 +45,8 @@ export function usePolling<T>(
       if (!mountedRef.current) return;
       setReachable(false);
       setError(e as Error);
+    } finally {
+      if (mountedRef.current) setHasAttempted(true);
     }
   };
 
@@ -50,5 +62,5 @@ export function usePolling<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intervalMs]);
 
-  return { data, reachable, error, refresh: tick };
+  return { data, reachable, error, hasAttempted, refresh: tick };
 }

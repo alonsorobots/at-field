@@ -25,6 +25,15 @@
 .PARAMETER PythonExe
     Path to the python.exe that will run the service. Defaults to the
     PYTHONEXECUTABLE environment variable, then to "where python".
+    Ignored when -BundledExe is supplied.
+
+.PARAMETER BundledExe
+    Path to a PyInstaller-built atfield-service.exe (a fully self-contained
+    binary; see packaging/pyinstaller/atfield.spec). When supplied, NSSM
+    runs this directly instead of "python -m atfield.service" -- no Python
+    install required on the target machine. The rest of the dist/atfield/
+    folder (containing _internal/ and atf.exe) is expected to live next to
+    the bundled exe.
 
 .PARAMETER ServiceName
     Name registered in services.msc. Default: "ATFieldWatchdog".
@@ -42,6 +51,7 @@
 param(
     [string]$StateDir    = (Join-Path $env:ProgramData 'ATField'),
     [string]$PythonExe   = '',
+    [string]$BundledExe  = '',
     [string]$ServiceName = 'ATFieldWatchdog',
     [string]$DisplayName = 'AT-Field Watchdog'
 )
@@ -126,8 +136,24 @@ function Drop-StarterConfig {
 
 Assert-Admin
 
-$python = Resolve-PythonExe -Hint $PythonExe
-Write-Host "Using Python: $python"
+# Decide which mode we're in: bundled (PyInstaller exe shipped with the
+# Tauri installer) or pip-installed (developer / `pip install atfield` path).
+# Bundled wins when supplied; pip path is the fallback so existing users'
+# `atf install` keeps working unchanged.
+$bundledMode = $false
+$bundledResolved = ''
+if ($BundledExe) {
+    if (-not (Test-Path $BundledExe)) {
+        Write-Error "BundledExe '$BundledExe' does not exist."
+        exit 1
+    }
+    $bundledResolved = (Resolve-Path $BundledExe).Path
+    $bundledMode = $true
+    Write-Host "Bundled binary: $bundledResolved"
+} else {
+    $python = Resolve-PythonExe -Hint $PythonExe
+    Write-Host "Using Python: $python"
+}
 
 if (-not (Test-Path $StateDir)) {
     New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
@@ -139,10 +165,6 @@ Drop-StarterConfig -Dir $StateDir
 $nssm = Ensure-Nssm -DestDir $StateDir
 Write-Host "NSSM:      $nssm"
 
-# Resolve atfield-service entry point. We call it via -m so we don't depend
-# on the wheel's console_scripts shim being on PATH for SYSTEM.
-$serviceArgs = '-m atfield.service'
-
 # If the service already exists, stop+remove so we can re-register cleanly.
 $existing = & $nssm status $ServiceName 2>$null
 if ($LASTEXITCODE -eq 0) {
@@ -152,12 +174,23 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 Write-Host "Registering service '$ServiceName' ..."
-& $nssm install $ServiceName $python $serviceArgs | Out-Null
+if ($bundledMode) {
+    # The bundled exe knows how to find its own state dir (default
+    # %ProgramData%\ATField); no extra args. AppDirectory is set to the
+    # bundle dir so the _internal/ runtime resolves correctly.
+    $bundleDir = Split-Path -Parent $bundledResolved
+    & $nssm install $ServiceName $bundledResolved | Out-Null
+    & $nssm set $ServiceName AppDirectory $bundleDir | Out-Null
+} else {
+    # Run via -m so we don't depend on the wheel's console_scripts shim
+    # being on PATH for the SYSTEM account.
+    & $nssm install $ServiceName $python '-m atfield.service' | Out-Null
+    & $nssm set $ServiceName AppDirectory $StateDir | Out-Null
+}
 & $nssm set $ServiceName DisplayName $DisplayName | Out-Null
 & $nssm set $ServiceName Description 'AT-Field watchdog: protects AI rig from runaway GPU/RAM pressure (kills offending Python tree).' | Out-Null
 & $nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
 & $nssm set $ServiceName ObjectName 'LocalSystem' | Out-Null
-& $nssm set $ServiceName AppDirectory $StateDir | Out-Null
 
 # Stdout/stderr -> rotating log under StateDir (NSSM handles rotation)
 $nssmStdout = Join-Path $StateDir 'service.stdout.log'
