@@ -655,6 +655,41 @@ class TestPatchRule:
         assert status == 400
         assert "1..600" in data["error"]
 
+    # ------------------------------------------------------------------
+    # CORS preflight -- regression guard for the slider "Failed to fetch"
+    # bug where PATCH was missing from Access-Control-Allow-Methods.
+    # The browser issues an OPTIONS preflight before any non-simple
+    # cross-origin request; if PATCH isn't in the allow list, it cancels
+    # the actual PATCH and the dashboard surfaces "Save failed".
+    # ------------------------------------------------------------------
+
+    def test_options_preflight_advertises_patch(self, server):
+        _, host, port = server
+        conn = http.client.HTTPConnection(host, port, timeout=2.0)
+        try:
+            conn.request(
+                "OPTIONS",
+                "/rules/ram-pressure",
+                headers={
+                    "Origin": "http://localhost:1420",
+                    "Access-Control-Request-Method": "PATCH",
+                    "Access-Control-Request-Headers": "Content-Type",
+                },
+            )
+            resp = conn.getresponse()
+            resp.read()
+            assert resp.status == 204
+            allow = resp.getheader("Access-Control-Allow-Methods", "")
+            # PATCH MUST be in the list or the slider edits fail in the
+            # browser. See also POST / GET (kept for the rest of the API).
+            for verb in ("GET", "POST", "PATCH", "OPTIONS"):
+                assert verb in allow, (
+                    f"{verb} missing from Access-Control-Allow-Methods: {allow!r}"
+                )
+            assert resp.getheader("Access-Control-Allow-Origin") == "*"
+        finally:
+            conn.close()
+
 
 class TestApplyProfilePreset:
     def test_aggressive_preset_writes_all_rules(self, tmp_path, server):
