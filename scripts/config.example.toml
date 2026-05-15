@@ -1,0 +1,134 @@
+# AT-Field configuration. Edit and reload the service to apply changes.
+# Reference: https://github.com/alonsorobots/at-field
+#
+# THIS FILE IS OPTIONAL. The shipped defaults (the values shown below) are
+# what the service uses if no config.toml is present. Copy this file to
+# %ProgramData%\ATField\config.toml only if you need to customize.
+
+# -----------------------------------------------------------------------------
+# General service behavior
+# -----------------------------------------------------------------------------
+[general]
+# How often the service polls all collectors and evaluates rules.
+# 1 Hz is plenty for thermal protection (sensor noise dominates above this).
+tick_hz = 1
+
+# Service log level. DEBUG is very chatty; INFO is the right default.
+log_level = "INFO"
+
+# Where heartbeat, events.jsonl, and watchdog.log live. The installer
+# defaults this to %ProgramData%\ATField. The service runs as LocalSystem,
+# so this path must be writable by SYSTEM.
+state_dir = "C:\\ProgramData\\ATField"
+
+
+# -----------------------------------------------------------------------------
+# Kill targeting
+# -----------------------------------------------------------------------------
+[targeting]
+# Process names the actuator is permitted to terminate. The walk-up logic
+# climbs through these (and launcher_names below) to find the dispatcher.
+killable_names    = ["python.exe", "pythonw.exe", "python3.exe"]
+
+# Process names that count as launchers. The walk-up keeps climbing past
+# these so we don't kill an inner worker while leaving the dispatcher
+# alive to respawn it. Add anything that wraps your training scripts.
+launcher_names    = [
+    "torchrun", "accelerate", "deepspeed",
+    "mpiexec", "ray", "ray-worker",
+    "jupyter", "ipykernel_launcher",
+]
+
+# Names the actuator must NEVER terminate, regardless of why a rule fires.
+# Self-protection; prevents foot-shooting if a rule misconfiguration would
+# otherwise target a system process or your editor.
+never_kill_names  = [
+    "explorer.exe", "services.exe",
+    "code.exe", "windbg.exe",
+    "atfield-service.exe", "atf.exe",
+]
+
+
+# -----------------------------------------------------------------------------
+# Kill behavior
+# -----------------------------------------------------------------------------
+[kill]
+# "graceful" sends SIGTERM-equivalent first, waits grace_seconds, then
+# force-kills survivors. "aggressive" force-kills immediately.
+# Graceful gives PyTorch DataLoaders a chance to clean up shared memory.
+mode = "graceful"
+
+# How long to wait between SIGTERM and SIGKILL when mode = "graceful".
+grace_seconds = 5
+
+# How long after a kill action a rule will refrain from firing again.
+# Prevents thrash when the killed process leaves a slow-to-cool sensor.
+post_kill_cooldown_seconds = 60
+
+
+# -----------------------------------------------------------------------------
+# Rules -- the heart of the watchdog
+# -----------------------------------------------------------------------------
+# Each rule is { name, signal, threshold, window_s, min_fraction_over, action,
+# (optional) cooldown_s }. A rule fires when at least `min_fraction_over` of
+# the samples in the last `window_s` seconds satisfy `value > threshold`.
+#
+# Effective trigger time ≈ window_s × min_fraction_over (a 30s/0.67 rule
+# triggers after ~20s of sustained over-threshold readings).
+#
+# Glob signals: `gpu.*.X` expands per detected GPU. If a signal isn't
+# provided by any probed collector, the rule is auto-disabled with a
+# clear message in the watchdog log -- no error, no service crash.
+#
+# action ∈ "log" | "throttle" | "kill"
+
+[[rules]]
+# GPU memory junction (the GDDR die temp -- this is what kills cards
+# during sustained training before the GPU core temp ever spikes).
+# Requires LibreHardwareMonitor; auto-disabled if LHM isn't running.
+name              = "vram-junction-hot"
+signal            = "gpu.*.mem_junction_temp_c"
+threshold         = 90
+window_s          = 20
+min_fraction_over = 0.67
+action            = "kill"
+
+[[rules]]
+# GPU core temperature.
+name              = "gpu-core-hot"
+signal            = "gpu.*.core_temp_c"
+threshold         = 83
+window_s          = 30
+min_fraction_over = 0.67
+action            = "kill"
+
+[[rules]]
+# System RAM usage. Catches OOM-class events before the system swaps
+# itself to death.
+name              = "ram-pressure"
+signal            = "system.ram_used_percent"
+threshold         = 85
+window_s          = 60
+min_fraction_over = 0.75
+action            = "kill"
+
+[[rules]]
+# Windows commit charge -- the actually-meaningful "memory exhaustion"
+# metric on Windows. Pagefile + RAM committed virtual memory.
+name              = "pagefile-pressure"
+signal            = "system.commit_percent"
+threshold         = 90
+window_s          = 60
+min_fraction_over = 0.75
+action            = "kill"
+
+[[rules]]
+# CPU package temperature. Requires LibreHardwareMonitor; auto-disabled
+# if LHM isn't running. (WMI thermal sensors are unreliable on consumer
+# motherboards; LHM reads the real CPU sensor via WinRing0.)
+name              = "cpu-pkg-hot"
+signal            = "system.cpu_package_temp_c"
+threshold         = 90
+window_s          = 30
+min_fraction_over = 0.67
+action            = "kill"
