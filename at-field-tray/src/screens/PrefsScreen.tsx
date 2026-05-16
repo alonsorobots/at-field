@@ -57,14 +57,9 @@ function ThemePicker() {
 
   return (
     <section>
-      <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+      <h2 className="hud text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-3">
         Color scheme
       </h2>
-      <p className="text-[11px] text-[var(--color-text-tertiary)] mb-3 leading-relaxed">
-        Each scheme retunes the entire dashboard -- background, accent,
-        sparkline colors, status dots. Default is "Nerv". Changes apply
-        instantly.
-      </p>
       <div className="grid grid-cols-2 gap-2">
         {THEMES.map((t) => (
           <button
@@ -79,16 +74,11 @@ function ThemePicker() {
             <div className="flex items-center gap-3">
               <ThemeSwatch swatches={t.swatches} />
               <div className="min-w-0 flex-1 text-left">
-                <div className="text-sm font-semibold truncate">
-                  {t.label}
-                </div>
-                <div className="text-[11px] text-[var(--color-text-tertiary)] truncate">
-                  {t.description}
-                </div>
+                <div className="hud text-sm truncate">{t.label}</div>
               </div>
               {active === t.id && (
                 <span
-                  className="text-[10px] font-bold uppercase tracking-wider"
+                  className="hud text-[10px] font-bold uppercase tracking-wider"
                   style={{ color: "var(--color-accent)" }}
                 >
                   Active
@@ -145,7 +135,7 @@ function RefreshRateSection() {
 
   return (
     <section>
-      <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+      <h2 className="hud text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
         Dashboard refresh rate
       </h2>
       <div className="frosted rounded-lg border border-[var(--color-border)] p-4 flex items-start gap-3">
@@ -204,7 +194,7 @@ function RefreshRateSection() {
 function AboutBlock() {
   return (
     <section>
-      <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+      <h2 className="hud text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
         About
       </h2>
       <div className="frosted rounded-lg border border-[var(--color-border)] p-4 text-[11px] text-[var(--color-text-tertiary)] leading-relaxed">

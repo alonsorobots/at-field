@@ -23,8 +23,18 @@ serde_json = "1"
 # HKCU\Run autostart registration. winreg is the standard Rust binding
 # for the Windows registry; we only depend on it on Windows targets so
 # `cargo check` on Linux/macOS during dev still passes.
+#
+# windows: Microsoft's official Win32 bindings. We only pull the DWM
+# functions and types so the build cost stays modest (compared to pulling
+# the full surface). Used to recolor the title bar (caption + border)
+# via DwmSetWindowAttribute(DWMWA_CAPTION_COLOR / DWMWA_BORDER_COLOR /
+# DWMWA_TEXT_COLOR), which Windows 11 22H2+ honors.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+] }
 
 [features]
 # This feature is used to expose the embedded ESM frontend assets via the

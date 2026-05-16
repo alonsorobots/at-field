@@ -33,6 +33,12 @@
   --color-bg-secondary: #16101a;
   --color-bg-neutral: #1a1a1d;
   --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+  /* HUD display font (Magi terminal vibe). Times New Roman Condensed
+     Bold ships with MS Office on virtually all Windows machines; we
+     fall back to plain Times New Roman Bold (system font) and finally
+     to a generic serif so tray UIs without Office still get the right
+     weight class even if they lose the condensed metrics. */
+  --font-display: "Times New Roman Condensed", "Times New Roman", "Times", serif;
 }
 
 /* ─────────────────────────────────────────────────────────────────────
@@ -186,18 +192,43 @@
 }
 
 /* ── Base ─────────────────────────────────────────────────────────── */
+/*
+ * The UI commits to the Magi-terminal aesthetic: the body font is the
+ * same condensed serif as our HUD elements. Mixing Segoe UI for body
+ * text against Times New Roman Condensed for tabs/wordmarks/pills
+ * read inconsistently (per user feedback in v0.2). The bloom-bearing
+ * `.hud` class still differentiates the *important* HUD elements from
+ * everyday body copy by adding the phosphor halo; the underlying font
+ * is shared.
+ *
+ * Body weight is 400 (regular) so descriptive text stays readable; HUD
+ * elements override to 700 via the `.hud` / `.hud-glow` classes. We
+ * also cap small UI controls (form inputs, sparkline tooltips) to the
+ * sans stack via `.ui-sans` so dense numeric layouts don't smear -- a
+ * serif looks great on labels but poor on rows of tabular numbers
+ * stacked 11 px tall.
+ */
 html,
 body,
 #root {
   height: 100%;
   margin: 0;
-  font-family: var(--font-sans);
+  font-family: var(--font-display);
+  font-weight: 400;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   user-select: none;
   overflow: hidden;
   background-color: var(--color-bg);
   color: var(--color-text-primary);
+}
+
+/* Opt-out class: forces the sans stack for places where condensed serif
+   is the wrong tool (small numeric tables, spinners, dense form rows).
+   Apply on the leaf element, not the parent, so neighbouring labels
+   stay in display font. */
+.ui-sans {
+  font-family: var(--font-sans);
 }
 
 button:focus { outline: none; }
@@ -253,9 +284,46 @@ input[type="checkbox"]:focus { outline: none; box-shadow: 0 0 0 2px rgba(167, 13
 /* AT-Field-specific additions                                          */
 /* ─────────────────────────────────────────────────────────────────── */
 
+/* ── HUD typography & monitor-bloom (Magi terminal aesthetic) ─────────
+   .hud  = display font (Times New Roman Condensed Bold) + glow.
+   .hud-glow = glow only, keep current font (use on tiny labels where
+               Times-Condensed gets muddy below 11px).
+   The glow uses `currentColor` so it inherits whatever the text color is
+   -- accent text glows accent, danger text glows danger, etc. Stacked
+   text-shadows fake the CRT phosphor halo: a tight inner shadow for the
+   "fringe" then progressively wider/dimmer ones for the ambient bloom. */
+.hud {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 0.045em;
+  text-shadow:
+    0 0 1px currentColor,
+    0 0 3px currentColor,
+    0 0 8px color-mix(in srgb, currentColor 55%, transparent),
+    0 0 18px color-mix(in srgb, currentColor 28%, transparent);
+}
+.hud-glow {
+  text-shadow:
+    0 0 1px currentColor,
+    0 0 3px currentColor,
+    0 0 8px color-mix(in srgb, currentColor 55%, transparent),
+    0 0 18px color-mix(in srgb, currentColor 28%, transparent);
+}
+/* Tighter bloom variant for the dim/muted HUD labels (section headers
+   in --color-text-tertiary) -- keeps them readable without making every
+   tertiary string in the UI visibly halo. */
+.hud.hud-dim,
+.hud-glow.hud-dim {
+  text-shadow:
+    0 0 1px currentColor,
+    0 0 4px color-mix(in srgb, currentColor 40%, transparent);
+}
+
 /* Status dot used in tray menu, status bar, collector cards. Color
    driven by the `data-status` attribute so a single CSS rule covers all
-   four states the tray icon can be in. */
+   four states the tray icon can be in. The phosphor glow halo (matching
+   the Magi reference) comes from a stacked box-shadow per state -- inner
+   crisp halo + outer ambient bloom. */
 .dot {
   display: inline-block;
   width: 10px;
@@ -263,32 +331,70 @@ input[type="checkbox"]:focus { outline: none; box-shadow: 0 0 0 2px rgba(167, 13
   border-radius: 50%;
   margin-right: 8px;
   flex-shrink: 0;
-  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.25) inset;
 }
 .dot[data-status="loading"]  { background: var(--color-text-tertiary); animation: pulse 1.2s ease-in-out infinite; }
-.dot[data-status="healthy"]  { background: var(--color-success); }
-.dot[data-status="degraded"] { background: var(--color-warning); }
-.dot[data-status="alerting"] { background: var(--color-danger); }
-.dot[data-status="down"]     { background: var(--color-text-tertiary); }
+.dot[data-status="healthy"] {
+  background: var(--color-success);
+  box-shadow:
+    0 0 4px var(--color-success),
+    0 0 10px color-mix(in srgb, var(--color-success) 55%, transparent),
+    0 0 0 2px rgba(0, 0, 0, 0.25) inset;
+}
+.dot[data-status="degraded"] {
+  background: var(--color-warning);
+  box-shadow:
+    0 0 4px var(--color-warning),
+    0 0 10px color-mix(in srgb, var(--color-warning) 55%, transparent),
+    0 0 0 2px rgba(0, 0, 0, 0.25) inset;
+}
+.dot[data-status="alerting"] {
+  background: var(--color-danger);
+  box-shadow:
+    0 0 4px var(--color-danger),
+    0 0 10px color-mix(in srgb, var(--color-danger) 60%, transparent),
+    0 0 0 2px rgba(0, 0, 0, 0.25) inset;
+}
+.dot[data-status="down"] {
+  background: var(--color-text-tertiary);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.25) inset;
+}
 
 @keyframes pulse {
   0%, 100% { opacity: 0.5; }
   50%      { opacity: 1.0; }
 }
 
-/* Verdict pill for rule cards. */
+/* Verdict pill for rule cards. HUD font + matching bloom so the
+   TRIGGER / BELOW state reads from across the room. The pill background
+   is a low-alpha tint of the verdict color; the outer box-shadow provides
+   the phosphor halo (currentColor wouldn't work on box-shadow so we
+   colorize per state). */
 .verdict-pill {
   display: inline-block;
   padding: 2px 8px;
   border-radius: 9999px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
-.verdict-pill[data-verdict="TRIGGER"]      { background: rgba(248, 113, 113, 0.18); color: var(--color-danger); }
-.verdict-pill[data-verdict="BELOW"]        { background: rgba(74, 222, 128, 0.14);  color: var(--color-success); }
-.verdict-pill[data-verdict="INSUFFICIENT"] { background: rgba(165, 162, 173, 0.14); color: var(--color-text-secondary); }
+.verdict-pill[data-verdict="TRIGGER"] {
+  background: color-mix(in srgb, var(--color-danger) 18%, transparent);
+  color: var(--color-danger);
+  text-shadow: 0 0 2px currentColor, 0 0 6px color-mix(in srgb, currentColor 55%, transparent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--color-danger) 35%, transparent);
+}
+.verdict-pill[data-verdict="BELOW"] {
+  background: color-mix(in srgb, var(--color-success) 14%, transparent);
+  color: var(--color-success);
+  text-shadow: 0 0 2px currentColor, 0 0 6px color-mix(in srgb, currentColor 50%, transparent);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--color-success) 28%, transparent);
+}
+.verdict-pill[data-verdict="INSUFFICIENT"] {
+  background: color-mix(in srgb, var(--color-text-secondary) 14%, transparent);
+  color: var(--color-text-secondary);
+}
 
 /* Sparkline canvas wrapper -- 80x24 by default, can override per use. */
 .sparkline {
@@ -297,15 +403,32 @@ input[type="checkbox"]:focus { outline: none; box-shadow: 0 0 0 2px rgba(167, 13
   height: 32px;
 }
 
-/* SVG <text> doesn't inherit `font-family` from the document body, so
-   without this rule every chart label (axis ticks, "TRIGGER", hover
-   readouts) falls back to the browser default -- which on Windows is
-   typically "Times New Roman". This forces every SVG text element to
-   pick up the same Segoe UI / system-ui stack as the rest of the UI,
-   so chart labels stop looking like a 1995 PowerPoint. */
+/* SVG <text> default font is finicky across browsers; force it explicitly
+   to the display font (matching the rest of the UI). Dense numeric
+   tooltips can opt into sans by wrapping the offending <text> in
+   class="ui-sans". */
 svg text {
+  font-family: var(--font-display);
+}
+svg text.ui-sans {
   font-family: var(--font-sans);
 }
+
+/* Compact numeric / form inputs: condensed serif is the wrong tool for
+   rows of digits or a select dropdown. Force the sans stack on every
+   input/select/textarea so threshold values and config rows stay
+   scannable. */
+input,
+select,
+textarea {
+  font-family: var(--font-sans);
+}
+
+/* Note: we intentionally do NOT remap Tailwind's `tabular-nums`
+   utility to the sans stack. Big prominent values (live signal,
+   stat cards) look correct in the HUD font even with digit jitter,
+   and form inputs already opt to sans via the rule above. Specific
+   small dense numeric tables can opt in via `class="ui-sans"`. */
 
 /* Rule threshold slider -- thicker track + larger thumb than the
    default range input so it reads as a primary control on the Rules
@@ -348,19 +471,21 @@ input[type="range"].atfield-range:focus::-webkit-slider-thumb {
   box-shadow: 0 0 0 6px rgba(167, 139, 250, 0.22), 0 2px 6px rgba(0, 0, 0, 0.55);
 }
 
-/* Profile preset button -- pill with optional active state. */
+/* Profile preset button -- pill with optional active state. HUD font +
+   bloom on active state mirrors the tab rail treatment. */
 .preset-pill {
   padding: 4px 12px;
   border-radius: 9999px;
   border: 1px solid var(--color-border-strong);
   background: transparent;
   color: var(--color-text-secondary);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: background 0.15s, color 0.15s, border-color 0.15s, text-shadow 0.15s, box-shadow 0.15s;
 }
 .preset-pill:hover {
   background: var(--color-surface-hover);
@@ -369,8 +494,13 @@ input[type="range"].atfield-range:focus::-webkit-slider-thumb {
 }
 .preset-pill[data-active="true"] {
   background: var(--color-accent-light);
-  color: var(--color-text-primary);
+  color: var(--color-accent);
   border-color: var(--color-accent);
+  text-shadow:
+    0 0 1px currentColor,
+    0 0 4px currentColor,
+    0 0 10px color-mix(in srgb, currentColor 45%, transparent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--color-accent) 25%, transparent);
 }
 .preset-pill:disabled { opacity: 0.5; cursor: wait; }
 
@@ -442,7 +572,10 @@ select.atfield-input {
   padding-right: 24px;
 }
 
-/* Tab nav (left rail). */
+/* Tab nav (left rail). HUD treatment on every label so the rail reads
+   like a Magi terminal panel; active tab gets the accent color + bloom
+   halo (the inactive tabs stay dim/muted with no glow so the active one
+   pops). */
 .tab-rail-button {
   display: flex;
   align-items: center;
@@ -454,9 +587,12 @@ select.atfield-input {
   color: var(--color-text-secondary);
   cursor: pointer;
   border: none;
-  font-size: 13px;
-  font-weight: 500;
-  transition: background 0.15s ease, color 0.15s ease;
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: background 0.15s ease, color 0.15s ease, text-shadow 0.15s ease;
 }
 .tab-rail-button:hover {
   background: var(--color-surface-hover);
@@ -464,5 +600,10 @@ select.atfield-input {
 }
 .tab-rail-button[data-active="true"] {
   background: var(--color-accent-light);
-  color: var(--color-text-primary);
+  color: var(--color-accent);
+  text-shadow:
+    0 0 1px currentColor,
+    0 0 4px currentColor,
+    0 0 12px color-mix(in srgb, currentColor 50%, transparent),
+    0 0 24px color-mix(in srgb, currentColor 25%, transparent);
 }

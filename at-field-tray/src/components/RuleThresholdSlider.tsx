@@ -111,11 +111,12 @@ export default function RuleThresholdSlider({
           }}
         >
           <div
-            className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-md whitespace-nowrap"
+            className="hud text-[11px] uppercase tracking-wider px-2 py-0.5 rounded-md whitespace-nowrap"
             style={{
               color: tierColor(tier),
               border: `1px solid ${tierColor(tier)}`,
               background: "var(--color-surface-raised)",
+              boxShadow: `0 0 6px color-mix(in srgb, ${tierColor(tier)} 30%, transparent)`,
             }}
             title={tierDescription(tier)}
           >
