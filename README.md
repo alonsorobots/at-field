@@ -2,7 +2,7 @@
 
 > Always-on Windows hardware watchdog for AI workloads. Monitors NVIDIA GPU and VRAM temperatures, GPU memory usage, system RAM, pagefile, and CPU package temperature — and kills runaway Python / PyTorch processes **before** they damage your hardware. Runs as a Windows Service. Tolerates load-time spikes via sustained-window thresholds.
 
-> **Status:** v0.1 (CLI + service) is implementation-complete on `main`; v0.2 adds a Tauri tray app + dashboard ([at-field-tray/](at-field-tray/)) and a single-installer `.exe`.
+> **Status:** v0.3.0 — robustness, forensics, and broader sensor coverage. Single Tauri-bundled installer ships the watchdog service + tray dashboard + LibreHardwareMonitor in one `.exe`. See [CHANGELOG.md](CHANGELOG.md) and [docs/sensors.md](docs/sensors.md) for the full layered sensor strategy.
 
 In *Neon Genesis Evangelion*, an **AT Field** is an absolute defensive barrier that prevents catastrophic damage to a high-power system. Here it's recontextualized as a backronym — **A**bsolute **T**hermal-and-memory **Field** — a Python-aware Windows service that intercepts the AI jobs trying to melt your rig.
 
@@ -50,11 +50,13 @@ Existing tools either monitor without acting ([System-Resource-Monitor](https://
 
 ## What it does
 
-- **Watches every signal that matters:** per-GPU core temp, GPU memory junction temp (the GDDR temp NVML doesn't expose on consumer cards — read via LibreHardwareMonitor), VRAM used %, system RAM %, pagefile / commit charge, CPU package temp.
+- **Watches every signal that matters:** per-GPU core + memory junction temp, VRAM used %, system RAM %, pagefile / commit charge, CPU package temp. v0.3 adds **PSU rail voltages** (+12V / +5V / +3.3V / VCore) when LibreHardwareMonitor enumerates them — useful for catching voltage sag patterns that correlate with NVIDIA TDR / Kernel-Power 41 events on high-transient cards.
 - **Sustained-window logic, not instantaneous:** a 2-second spike during model warmup never triggers. An actual sustained problem triggers within ~15 seconds.
 - **Process-tree-aware kill:** when a runaway job is detected, walks the parent chain past known AI launchers (`torchrun`, `accelerate`, `deepspeed`, `mpiexec`, `ray`, `jupyter`) to find the *dispatcher*, then terminates the whole tree. Self-healing workers can't respawn.
+- **Rolling forensic buffer (v0.3):** every per-tick sample is flushed to `forensics.jsonl` every 5 seconds and rotated on service start, so the next BSOD / power loss / hard reboot doesn't take pre-crash signal history with it. `atf forensics --include-prev --since 10m` reads back the last few minutes regardless of whether the watchdog survived. Append-only JSONL — the only format guaranteed partially readable after a power loss.
+- **Layered sensor coverage (v0.3):** NVML for NVIDIA, ROCm-SMI for AMD, psutil for system signals, **bundled LibreHardwareMonitor** for VRAM-junction temp + CPU temp + voltages (the supervisor re-asserts LHM's config on every spawn so version bumps don't silently break the HTTP integration). Auto-detected HWiNFO Shared Memory collector planned for v0.3.1. Full confidence matrix per signal × hardware × OS combo in [docs/sensors.md](docs/sensors.md).
 - **Runs as a Windows Service** (via NSSM) under `LocalSystem` — works without an interactive login, survives reboots, no tray icon required.
-- **Capability-negotiated:** at startup, every collector probes its source. Anything missing (no LHM running? AMD GPU? CPU sensor doesn't expose package temp?) downgrades to "rule disabled, with a clear log line" — never to "watchdog crashed" or "rule silently never fires".
+- **Capability-negotiated:** at startup, every collector probes its source. Anything missing (no LHM? AMD GPU? CPU sensor doesn't expose package temp?) downgrades to "rule disabled, with a clear log line" — never to "watchdog crashed" or "rule silently never fires".
 - **Audit trail:** every action lands in `%ProgramData%\ATField\events.jsonl` with full process tree, signal values that triggered the rule, and rule name.
 - **Safe by default:** malformed config → observe-only mode (kills demoted to log entries), never kills the service's own PID, `never_kill_names` filter for `explorer.exe`, `services.exe`, etc.
 
@@ -70,7 +72,13 @@ atf install
 
 That's it. The installer downloads NSSM into `%ProgramData%\ATField\`, registers `AT-Field Watchdog` as a `LocalSystem` auto-start service, drops a starter `config.toml`, and starts the service. Existing config is preserved on reinstall.
 
-For VRAM-junction-temp and CPU-package-temp protection (the two most thermally-relevant signals on consumer NVIDIA cards), additionally install [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) v0.9.5+ and enable its built-in HTTP server (Options → Run web server, port 8085). The watchdog auto-detects it next time the service ticks; no config changes needed.
+### LibreHardwareMonitor — bundled (v0.3+)
+
+The Tauri-bundled installer (single `.exe` from the GitHub release) includes LibreHardwareMonitor v0.9.6 unmodified, supervised as a child process of the watchdog service. The supervisor *re-asserts LHM's config on every spawn* (web server enabled, port 8085, start minimized) so a future LHM version bump can't silently break the integration the way v0.9.4 → v0.9.6 did in v0.2.
+
+If you installed via `pip install atfield` instead of the bundled `.exe`, run `atf install-lhm` to fetch the same LHM build into `%ProgramData%\ATField\` — or set `ATFIELD_LHM_EXE` to point at an existing LibreHardwareMonitor.exe (v0.9.5+).
+
+For all the gory details — confidence matrix per signal × hardware combo, why we don't bundle HWiNFO, the v0.3.1 HWiNFO Shared Memory collector roadmap — see [docs/sensors.md](docs/sensors.md).
 
 ## Usage
 
@@ -82,6 +90,8 @@ atf pause 30m       # suspend kill actions for 30 minutes
 atf unpause
 atf test-kill <PID> # dry-run the kill walk-up against a real PID
 atf run             # foreground run (for debugging without NSSM)
+atf forensics       # read forensics.jsonl (rolling crash buffer); --include-prev pulls last run
+atf install-lhm     # download LibreHardwareMonitor v0.9.6 into %ProgramData%\ATField\
 atf uninstall
 ```
 
