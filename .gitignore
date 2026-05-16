@@ -50,3 +50,9 @@ resources/LibreHardwareMonitor/
 /PLANNING.md
 /docs/chat-history.md
 /docs/planning/
+
+# Ad-hoc diagnostic scripts + reports (crash investigations, font A/Bs, etc.)
+/diag-*.ps1
+/diag-*-report.txt
+/font-comparison.html
+/nul
