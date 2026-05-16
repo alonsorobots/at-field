@@ -7,8 +7,36 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-15 — Robustness, forensics, and sensor coverage
+
+This release is the response to a hard system reboot the user
+experienced during a flux-fill workload on dual RTX 5090s. The
+investigation surfaced three product gaps: no per-tick history that
+survived the crash, no PSU rail voltage monitoring, and a brittle
+LHM-config approach that broke between LHM versions. v0.3 closes
+all three plus surfaces the new failure modes in the dashboard.
+
 ### Added
 
+- **Default `vram-pressure` rule** (`gpu.*.vram_used_percent` @ 92%,
+  30s window, 75% fraction-over). Catches CUDA OOM — the #1 training
+  crash cause and previously uncovered by the defaults. Tier metadata
+  added so the slider Aggressive/Normal/Relaxed presets work
+  immediately. Auto-disables on rigs without a GPU collector.
+- **`/health.lhm_supervisor`** field exposes the per-spawn supervisor
+  status (running / http_ready / pid / restart_count / last_error /
+  next_retry_at) plus a derived single-token `state` (`ready`,
+  `process_up_no_http`, `backoff`, `stopping`, `down`) for switch-on-
+  string UI rendering. The dashboard's StatusScreen renders a
+  `SupervisorPill` on the LHM collector card with state-specific
+  detail (PID + restart count when ready, retry countdown when in
+  backoff, the supervisor's error string when `process_up_no_http`).
+- **First-launch tray toast.** When the autostart writer registers
+  the tray for the first time on a user account, fires a system
+  notification pointing to the Win11 overflow chevron — addressing
+  the "tray didn't show up after reboot" report (which was actually
+  Win11 hiding new tray icons by default; autostart was working
+  correctly all along).
 - **Forensic rolling buffer** (`src/atfield/forensics.py`). Every
   sampled signal is staged in memory and flushed to
   `%ProgramData%\ATField\forensics.jsonl` every 5 seconds. The
