@@ -64,96 +64,106 @@ export const THEMES: ThemeMeta[] = [
       [225, 32, 56],
     ],
   },
+  // Each Eva theme's swatch tuple is [Base-surface, Accent, Other Detail]
+  // and each ramp climbs from "blends with bg" → Accent at the threshold
+  // anchor (index 6, t=0.85) → Other Detail at over-threshold (index 7,
+  // t=1.0). Matches the design spec: Accent at 25% drives the sparkline
+  // mid-to-high attention, Other Detail at 10% punctuates the moment a
+  // value crosses the trigger.
+  {
+    id: "eva-00",
+    label: "EVA-00",
+    swatches: ["#1a2456", "#ffffff", "#1e8562"],
+    // Base=Blue #345ac9, Accent=White, Other Detail=Green #1e8562.
+    // Climbs from deep navy up to pure white (Rei's pale highlights)
+    // then hard-cuts to the green eye over-threshold.
+    ramp: [
+      [20, 30, 70],
+      [40, 60, 110],
+      [70, 90, 150],
+      [110, 130, 190],
+      [160, 175, 220],
+      [210, 220, 240],
+      [255, 255, 255],
+      [30, 133, 98],
+    ],
+  },
   {
     id: "eva-01",
     label: "EVA-01",
     swatches: ["#1a0f24", "#41bb42", "#e8790c"],
-    // Cool purple base picks up the body color, ramps through green to
-    // shoulder orange at threshold (the "warning" anchor that matches
-    // EVA-01's color story); over-threshold lands on a bright red so it
-    // still reads as urgent against the green-purple field.
+    // Base=Purple, Accent=Green #41bb42, Other Detail=Burnt Orange #e8790c.
+    // Cool purple recess → green at threshold → shoulder orange over-
+    // threshold (the classic EVA-01 alarm color).
     ramp: [
       [40, 30, 60],
       [60, 45, 80],
       [85, 60, 95],
       [85, 130, 80],
-      [140, 150, 60],
-      [200, 140, 40],
+      [70, 175, 80],
+      [60, 200, 70],
+      [65, 187, 66],
       [232, 121, 12],
-      [232, 50, 38],
-    ],
-  },
-  {
-    id: "eva-00",
-    label: "EVA-00",
-    swatches: ["#1a1500", "#f6e201", "#f66e25"],
-    // Olive base climbs through dim mustard up to the prototype yellow
-    // at threshold, ending on the EVA-00 orange-red over-threshold.
-    ramp: [
-      [40, 38, 20],
-      [70, 65, 30],
-      [110, 100, 30],
-      [160, 140, 30],
-      [220, 195, 25],
-      [240, 215, 18],
-      [246, 226, 1],
-      [246, 110, 37],
     ],
   },
   {
     id: "eva-02",
     label: "EVA-02",
-    swatches: ["#1f0708", "#d93b48", "#f6e201"],
-    // Asuka tradeoff: the iconic body color is red, but red also has to
-    // mean "over threshold" semantically. Resolution: yellow visor as
-    // the threshold anchor (it IS the warning color in the suit), red
-    // takes over for sustained over-threshold (the body color firing
-    // up). Cool maroon base recedes against the dark red bg.
+    swatches: ["#2a0808", "#e45e15", "#8a2d75"],
+    // Base=Bright Red #e41d18, Accent=Burnt Orange #e45e15,
+    // Other Detail=Magenta #8a2d75. Dark red recess → burnt orange at
+    // threshold → magenta over-threshold (the unit IS red, so magenta
+    // carries the over-threshold beat without disappearing into the bg).
     ramp: [
-      [50, 30, 35],
-      [80, 50, 55],
-      [120, 70, 70],
-      [160, 130, 60],
-      [210, 175, 40],
-      [240, 215, 30],
-      [246, 226, 1],
-      [217, 59, 72],
+      [50, 20, 20],
+      [80, 30, 25],
+      [120, 50, 30],
+      [170, 70, 25],
+      [210, 85, 20],
+      [225, 90, 18],
+      [228, 94, 21],
+      [138, 45, 117],
     ],
   },
   {
     id: "eva-03",
     label: "EVA-03",
-    swatches: ["#15161a", "#4da8da", "#aaaab2"],
-    // Cool slate-blue base climbs through cyan to the Bardiel cyan
-    // accent at threshold; over-threshold falls back to the standard
-    // warning red since EVA-03's palette has no native "danger" hue.
+    swatches: ["#1a1e3f", "#ffffff", "#83365e"],
+    // Base=Muted Purple #1a1e3f, Accent=White, Other Detail=Brighter
+    // Purple #83365e. Recess through deeper purples up to white at
+    // threshold, dropping to the brighter purple over-threshold so the
+    // theme stays "all purple" even when alarms fire.
     ramp: [
-      [30, 35, 45],
-      [60, 70, 85],
-      [85, 105, 120],
-      [100, 130, 145],
-      [90, 150, 180],
-      [80, 165, 205],
-      [77, 168, 218],
-      [248, 113, 113],
+      [35, 40, 70],
+      [55, 60, 95],
+      [85, 95, 135],
+      [130, 140, 180],
+      [180, 185, 215],
+      [220, 220, 235],
+      [255, 255, 255],
+      [131, 54, 94],
     ],
   },
   {
     id: "eva-04",
     label: "EVA-04",
-    swatches: ["#1f1a10", "#c9b27a", "#80c060"],
-    // Dark olive base ramps through warm tan up to the EVA-04 desert
-    // tan at threshold; over-threshold lands on a burnt rust-orange
-    // that fits the warm-earth palette.
+    swatches: ["#f4f4f6", "#4a4a4f", "#e8202d"],
+    // LIGHT theme. Base=White, Accent=Gray #4a4a4f, Other Base=Black,
+    // Other Detail=BRIGHT RED. On a white page, the ramp starts NEAR
+    // the bg color (very light gray) and climbs DOWN in lightness to
+    // dark gray at threshold, then bright red over-threshold. Same
+    // semantic shape as the dark themes (low value = recede, high
+    // value = pop) but inverted in lightness because the page itself
+    // is light.
     ramp: [
-      [50, 40, 25],
-      [80, 65, 40],
-      [120, 90, 55],
-      [160, 130, 80],
-      [200, 170, 110],
-      [220, 185, 130],
-      [201, 178, 122],
-      [217, 108, 74],
+      [220, 220, 222],
+      [190, 190, 195],
+      [160, 160, 165],
+      [130, 130, 138],
+      [100, 100, 108],
+      [80, 80, 88],
+      [74, 74, 79],
+      [232, 32, 45],
     ],
   },
 ];

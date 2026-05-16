@@ -137,117 +137,141 @@
   filter: none !important;
 }
 
-/* EVA-01 (Test Type, Shinji) -- the iconic purple/green/orange combo.
-   Accent is the green (Eva-01's chest plate / face); warning rides the
-   shoulder orange. */
+/* ─────────────────────────────────────────────────────────────────────
+ * Each Eva palette below applies the 50 / 25 / 15 / 10 proportion
+ * target from the design notes: the unit's Base color owns the
+ * **page surface stack** (--color-bg, --color-bg-secondary,
+ * --color-surface, --color-surface-hover, --color-surface-raised,
+ * --color-border-strong) so the dashboard reads as that color at a
+ * glance. The Accent color owns active states, focus rings, and the
+ * sparkline threshold anchor (where the eye lands when something is
+ * about to fire). Other Base is the deepest neutral (typically near-
+ * black) used by --color-bg-neutral and mode separators -- it gives
+ * the UI its structural framing. Other Detail is the 10% spice color
+ * applied to over-threshold pills, danger indicators, and the SVG
+ * threshold line drop-shadow -- the "this just fired" beat.
+ *
+ * Note: --color-surface and friends derive from the Base hue at
+ * progressively higher lightness; the saturated Base lives at
+ * --color-border-strong so card outlines visibly carry the unit's
+ * color even when surface tints sit further from pure Base for
+ * contrast reasons.
+ * ───────────────────────────────────────────────────────────────────── */
+
+/* EVA-00 (Prototype, Rei).
+   Base=Blue #345ac9, Accent=White, Other Base=Black, Other Detail=Green #1e8562 */
+:root[data-theme="eva-00"] {
+  --color-bg: #0c1330;
+  --color-bg-secondary: #060a1f;
+  --color-bg-neutral: #000000;
+  --color-surface: #182356;
+  --color-surface-hover: #1f2c6b;
+  --color-surface-raised: #243380;
+  --color-border: #1a2456;
+  --color-border-strong: #345ac9;
+  --color-accent: #ffffff;
+  --color-accent-hover: #ededf2;
+  --color-accent-light: rgba(255, 255, 255, 0.16);
+  --color-text-primary: #f0eff2;
+  --color-text-secondary: #b8c0d4;
+  --color-text-tertiary: #7884a3;
+  --color-danger: #1e8562;
+  --color-success: #1e8562;
+  --color-warning: #1e8562;
+}
+
+/* EVA-01 (Test Type, Shinji).
+   Base=Purple, Accent=Green, Other Base=Black, Other Detail=Burnt Orange */
 :root[data-theme="eva-01"] {
+  --color-bg: #1a0f24;
+  --color-bg-secondary: #110718;
+  --color-bg-neutral: #050308;
+  --color-surface: #2c1840;
+  --color-surface-hover: #36204e;
+  --color-surface-raised: #3f2659;
+  --color-border: #2c1840;
+  --color-border-strong: #7a3fb3;
   --color-accent: #41bb42;
   --color-accent-hover: #57d058;
   --color-accent-light: rgba(65, 187, 66, 0.18);
-  --color-surface: #221330;
-  --color-surface-hover: #2c1840;
-  --color-surface-raised: #2f1944;
-  --color-border: #2c1840;
-  --color-border-strong: #553584;
   --color-text-primary: #f0eff2;
   --color-text-secondary: #c5b6dc;
   --color-text-tertiary: #8a7ba0;
-  --color-danger: #f87171;
+  --color-danger: #e8790c;
   --color-success: #41bb42;
   --color-warning: #e8790c;
-  --color-bg: #1a0f24;
-  --color-bg-secondary: #150a1f;
-  --color-bg-neutral: #1d1228;
 }
 
-/* EVA-00 (Prototype, Rei -- yellow incarnation). Accent is the
-   prototype yellow #f6e201 (also the official series brand yellow).
-   Danger leans into the EVA-00 reddish-orange. */
-:root[data-theme="eva-00"] {
-  --color-accent: #f6e201;
-  --color-accent-hover: #ffea33;
-  --color-accent-light: rgba(246, 226, 1, 0.16);
-  --color-surface: #2a2300;
-  --color-surface-hover: #332b00;
-  --color-surface-raised: #3d3300;
-  --color-border: #2c2400;
-  --color-border-strong: #6e5e00;
-  --color-text-primary: #fff8c8;
-  --color-text-secondary: #d4c97a;
-  --color-text-tertiary: #8a8253;
-  --color-danger: #f66e25;
-  --color-success: #41bb42;
-  --color-warning: #ffaa00;
-  --color-bg: #1a1500;
-  --color-bg-secondary: #120f00;
-  --color-bg-neutral: #1d1800;
-}
-
-/* EVA-02 (Production Model, Asuka -- bright red). Accent is the
-   Eva-02 red. Warning rides Asuka's yellow visor. */
+/* EVA-02 (Production Model, Asuka).
+   Base=Bright Red #e41d18, Accent=Burnt Orange #e45e15, Other Base=Black,
+   Other Detail=Magenta #8a2d75.
+   The unit IS red, so "danger" can't be plain red without disappearing
+   into the background -- magenta carries the over-threshold beat. */
 :root[data-theme="eva-02"] {
-  --color-accent: #d93b48;
-  --color-accent-hover: #ed4f5c;
-  --color-accent-light: rgba(217, 59, 72, 0.18);
-  --color-surface: #2a0c0e;
-  --color-surface-hover: #350f12;
-  --color-surface-raised: #3d1115;
-  --color-border: #2e1012;
-  --color-border-strong: #6e2228;
-  --color-text-primary: #f5e9eb;
-  --color-text-secondary: #d4a5aa;
-  --color-text-tertiary: #8a6b6e;
-  --color-danger: #ff3b3b;
+  --color-bg: #2a0808;
+  --color-bg-secondary: #1a0404;
+  --color-bg-neutral: #0a0202;
+  --color-surface: #4a1010;
+  --color-surface-hover: #561414;
+  --color-surface-raised: #631818;
+  --color-border: #3a0c0c;
+  --color-border-strong: #e41d18;
+  --color-accent: #e45e15;
+  --color-accent-hover: #f37428;
+  --color-accent-light: rgba(228, 94, 21, 0.18);
+  --color-text-primary: #fae9e7;
+  --color-text-secondary: #e8b8b3;
+  --color-text-tertiary: #a07978;
+  --color-danger: #8a2d75;
   --color-success: #41bb42;
-  --color-warning: #f6e201;
-  --color-bg: #1f0708;
-  --color-bg-secondary: #150405;
-  --color-bg-neutral: #210a0b;
+  --color-warning: #8a2d75;
 }
 
-/* EVA-03 (Production, Toji -- Bardiel-possessed dark gray). Accent is
-   the Bardiel cyan. Surfaces stay extremely cool/neutral. */
+/* EVA-03 (Production, Toji -- Bardiel-possessed).
+   Base=Muted Purple #1a1e3f, Accent=White, Other Base=Black,
+   Other Detail=Brighter Purple #83365e */
 :root[data-theme="eva-03"] {
-  --color-accent: #4da8da;
-  --color-accent-hover: #6cbae8;
-  --color-accent-light: rgba(77, 168, 218, 0.16);
-  --color-surface: #1e1f24;
-  --color-surface-hover: #25262d;
-  --color-surface-raised: #2a2c33;
-  --color-border: #25262d;
-  --color-border-strong: #44464f;
+  --color-bg: #1a1e3f;
+  --color-bg-secondary: #11142c;
+  --color-bg-neutral: #050616;
+  --color-surface: #262b54;
+  --color-surface-hover: #303668;
+  --color-surface-raised: #3a4178;
+  --color-border: #262b54;
+  --color-border-strong: #4a527d;
+  --color-accent: #ffffff;
+  --color-accent-hover: #ededf2;
+  --color-accent-light: rgba(255, 255, 255, 0.16);
   --color-text-primary: #f0eff2;
-  --color-text-secondary: #aaaab2;
-  --color-text-tertiary: #6e6e78;
-  --color-danger: #f87171;
+  --color-text-secondary: #b8b8c8;
+  --color-text-tertiary: #777a90;
+  --color-danger: #83365e;
   --color-success: #4ade80;
-  --color-warning: #fbbf24;
-  --color-bg: #15161a;
-  --color-bg-secondary: #101115;
-  --color-bg-neutral: #18191e;
+  --color-warning: #83365e;
 }
 
-/* EVA-04 (lost, never recovered). Tan/olive desert palette --
-   reference imagery is sparse so this leans on the few extant
-   sketches/figures. Reads as a warm, faded biological color. */
+/* EVA-04 (lost). LIGHT THEME.
+   Base=White, Accent=Gray, Other Base=Black, Other Detail=BRIGHT RED.
+   Text colors flip to dark since the page is light; .dot halos and
+   .hud bloom still work because they use currentColor + color-mix(). */
 :root[data-theme="eva-04"] {
-  --color-accent: #c9b27a;
-  --color-accent-hover: #d8c08b;
-  --color-accent-light: rgba(201, 178, 122, 0.18);
-  --color-surface: #2c2519;
-  --color-surface-hover: #342c1f;
-  --color-surface-raised: #3a3023;
-  --color-border: #2a2317;
-  --color-border-strong: #5a4a30;
-  --color-text-primary: #f5ecd9;
-  --color-text-secondary: #c2b690;
-  --color-text-tertiary: #8a7e60;
-  --color-danger: #d96c4a;
-  --color-success: #80c060;
-  --color-warning: #d4a44b;
-  --color-bg: #1f1a10;
-  --color-bg-secondary: #17130a;
-  --color-bg-neutral: #221c12;
+  --color-bg: #f4f4f6;
+  --color-bg-secondary: #ffffff;
+  --color-bg-neutral: #1a1a1d;
+  --color-surface: #ffffff;
+  --color-surface-hover: #ebebef;
+  --color-surface-raised: #e0e0e6;
+  --color-border: #d0d0d8;
+  --color-border-strong: #888890;
+  --color-accent: #4a4a4f;
+  --color-accent-hover: #2a2a2f;
+  --color-accent-light: rgba(74, 74, 79, 0.12);
+  --color-text-primary: #1a1a1d;
+  --color-text-secondary: #4a4a52;
+  --color-text-tertiary: #8a8a92;
+  --color-danger: #e8202d;
+  --color-success: #1e8562;
+  --color-warning: #e8202d;
 }
 
 /* ── Base ─────────────────────────────────────────────────────────── */
