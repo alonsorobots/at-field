@@ -192,6 +192,35 @@ if ($bundledMode) {
 & $nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
 & $nssm set $ServiceName ObjectName 'LocalSystem' | Out-Null
 
+# Auto-detect a nearby LibreHardwareMonitor.exe and bake its path into
+# the service's environment so the supervisor can find it without the
+# user setting ATFIELD_LHM_EXE manually after install. Without this the
+# service runs but the LHM supervisor never starts and the LHM-derived
+# signals (mem_junction_temp_c, cpu_package_temp_c, +12V rail) silently
+# stay disabled. Search order matches find_lhm_executable():
+#   1. Existing ATFIELD_LHM_EXE in this elevated session (preserved).
+#   2. dist\atfield\LibreHardwareMonitor.exe relative to repo root
+#      (dev workflow: PyInstaller-built bundle).
+#   3. %ProgramFiles%\LibreHardwareMonitor\LibreHardwareMonitor.exe
+#      (upstream installer path).
+$lhmExe = $env:ATFIELD_LHM_EXE
+if (-not $lhmExe) {
+    $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.ScriptName)
+    $bundledLhm = Join-Path $repoRoot 'dist\atfield\LibreHardwareMonitor.exe'
+    if (Test-Path $bundledLhm) {
+        $lhmExe = (Resolve-Path $bundledLhm).Path
+    } else {
+        $pfLhm = Join-Path $env:ProgramFiles 'LibreHardwareMonitor\LibreHardwareMonitor.exe'
+        if (Test-Path $pfLhm) { $lhmExe = $pfLhm }
+    }
+}
+if ($lhmExe) {
+    Write-Host "LHM:       $lhmExe"
+    & $nssm set $ServiceName AppEnvironmentExtra "ATFIELD_LHM_EXE=$lhmExe" | Out-Null
+} else {
+    Write-Host "LHM:       not found nearby; run 'atf install-lhm' from elevated PowerShell or set ATFIELD_LHM_EXE on the service to enable VRAM-junction/CPU temp signals."
+}
+
 # Stdout/stderr -> rotating log under StateDir (NSSM handles rotation)
 $nssmStdout = Join-Path $StateDir 'service.stdout.log'
 $nssmStderr = Join-Path $StateDir 'service.stderr.log'

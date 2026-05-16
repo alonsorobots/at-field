@@ -634,6 +634,43 @@ def doctor(
     except ImportError as exc:
         problems.append(f"could not import collectors: {exc}")
 
+    # 5b. LHM supervisor reachability (service-mode footgun catch).
+    # When the watchdog is running as a Windows Service, the LHM
+    # supervisor needs ATFIELD_LHM_EXE pointing at a real binary --
+    # find_lhm_executable()'s defaults look next to sys.executable
+    # which under NSSM is the .venv\Scripts\python.exe, not where
+    # LHM actually lives. install_service.ps1 now auto-detects nearby
+    # LHM and bakes the env var into the service, but pre-v0.3.1
+    # installs (or unusual paths) can still hit this. We surface it
+    # here with a concrete `nssm set ... AppEnvironmentExtra ...`
+    # command the user can paste.
+    try:
+        import os as _os
+
+        from atfield.lhm_supervisor import find_lhm_executable
+
+        env_path = _os.environ.get("ATFIELD_LHM_EXE")
+        found = find_lhm_executable()
+        if found is not None:
+            note = " (via ATFIELD_LHM_EXE)" if env_path else " (via default search)"
+            successes.append(f"LHM binary discoverable at {found}{note}")
+        else:
+            problems.append(
+                "LHM binary not discoverable\n"
+                "  This is fine if you don't want VRAM-junction / CPU-temp / "
+                "PSU voltage signals. Otherwise:\n"
+                "    elevated PowerShell:\n"
+                '      atf install-lhm    # downloads to %USERPROFILE%\\.atfield\\lhm\\\n'
+                "    then either:\n"
+                '      setx ATFIELD_LHM_EXE "<path>\\LibreHardwareMonitor.exe"   # user-shell sessions\n'
+                "    or for the running Windows Service:\n"
+                '      C:\\ProgramData\\ATField\\nssm.exe set ATFieldWatchdog '
+                'AppEnvironmentExtra "ATFIELD_LHM_EXE=<path>\\LibreHardwareMonitor.exe"\n'
+                "      Restart-Service ATFieldWatchdog"
+            )
+    except ImportError:
+        pass
+
     # 6. Forensic buffer
     if state_dir.exists():
         from atfield.forensics import FORENSICS_FILENAME, FORENSICS_PREV_FILENAME
