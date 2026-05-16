@@ -35,7 +35,6 @@ export default function PrefsScreen() {
     <div className="p-5 space-y-5 overflow-y-auto h-full">
       <ThemePicker />
       <RefreshRateSection />
-      <AboutBlock />
     </div>
   );
 }
@@ -187,22 +186,3 @@ function RefreshRateSection() {
   );
 }
 
-// ──────────────────────────────────────────────────────────────────────
-// About
-// ──────────────────────────────────────────────────────────────────────
-
-function AboutBlock() {
-  return (
-    <section>
-      <h2 className="hud text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
-        About
-      </h2>
-      <div className="frosted rounded-lg border border-[var(--color-border)] p-4 text-[11px] text-[var(--color-text-tertiary)] leading-relaxed">
-        Theme references taken from the official Neon Genesis Evangelion
-        color guide and reference imagery. EVA-01 (Test Type) provides
-        the iconic purple / green / orange combination that loosely
-        inspired the AT-Field brand.
-      </div>
-    </section>
-  );
-}
