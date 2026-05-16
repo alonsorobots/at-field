@@ -10,11 +10,16 @@
 @import "tailwindcss";
 
 @theme {
-  /* ── Default palette = "Nerv" theme (lifted from VideoBricks) ──────
+  /* ── Default palette = "Civvie" theme (lifted from VideoBricks) ────
      These values feed Tailwind's utility generator AND the runtime CSS
      vars. Each Eva theme below overrides the same variables at
      :root[data-theme="..."], which lets us swap palettes without
-     re-rendering the React tree. */
+     re-rendering the React tree.
+
+     "Civvie" intentionally keeps the original sans-serif body font
+     and no bloom -- it's the calm out-of-box look that ships first
+     run. The Eva themes pile on the HUD font + phosphor halos on top
+     of these defaults. */
   --color-accent: #a78bfa;          /* lavender — live values, focus, links */
   --color-accent-hover: #8b5cf6;
   --color-accent-light: #271e36;
@@ -56,9 +61,15 @@
  * with the new variable values on the next style flush.
  * ───────────────────────────────────────────────────────────────────── */
 
-/* "Nerv" -- the default. Explicit selector kept so the picker can
-   highlight it as the active choice without fighting the @theme block. */
-:root[data-theme="nerv"] {
+/* "Civvie" -- the default. Same colors as the @theme block above, but
+   re-stated explicitly so the picker can highlight it as the active
+   choice and so the font/bloom overrides further down the file can
+   target this selector (they need to override the HUD-font + halo
+   rules introduced for the Eva themes). The point of Civvie is "the
+   pre-Magi-aesthetic look you booted into v0.2 with": calm sans body
+   text, no phosphor bloom, no SVG glow. The Eva themes turn those
+   things back on. */
+:root[data-theme="civvie"] {
   --color-accent: #a78bfa;
   --color-accent-hover: #8b5cf6;
   --color-accent-light: #271e36;
@@ -76,6 +87,54 @@
   --color-bg: #1b141f;
   --color-bg-secondary: #16101a;
   --color-bg-neutral: #1a1a1d;
+
+  /* Old font (calm sans, no HUD serif). Every place that references
+     var(--font-display) -- .hud / .hud-glow / .verdict-pill / .preset-pill
+     / .tab-rail-button / svg <text> / body -- automatically gets the
+     Segoe UI stack. No per-class overrides needed. */
+  --font-display: var(--font-sans);
+}
+
+/* Civvie "no glow" overrides. Disables the phosphor halo effects that
+   the Eva themes wear on every HUD class, status dot, verdict pill,
+   active tab/preset pill, and SVG sparkline. Each rule cancels exactly
+   the bloom contribution (text-shadow, the halo layer of box-shadow,
+   or the SVG filter) and leaves the layout / color / background
+   shadow that actually communicates state. The result reads as the
+   pre-v0.3 dashboard: same palette, calm finish. */
+:root[data-theme="civvie"] .hud,
+:root[data-theme="civvie"] .hud-glow,
+:root[data-theme="civvie"] .hud.hud-dim,
+:root[data-theme="civvie"] .hud-glow.hud-dim,
+:root[data-theme="civvie"] .verdict-pill,
+:root[data-theme="civvie"] .preset-pill[data-active="true"],
+:root[data-theme="civvie"] .tab-rail-button[data-active="true"] {
+  text-shadow: none;
+}
+/* Status dots: keep the colored circle, drop the halo (the inset
+   ring at 2px is purely structural — kept for the subtle bevel). */
+:root[data-theme="civvie"] .dot[data-status="healthy"],
+:root[data-theme="civvie"] .dot[data-status="degraded"],
+:root[data-theme="civvie"] .dot[data-status="alerting"] {
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.25) inset;
+}
+/* Verdict pill: the tinted background already carries the verdict;
+   strip the outer halo. */
+:root[data-theme="civvie"] .verdict-pill[data-verdict="TRIGGER"],
+:root[data-theme="civvie"] .verdict-pill[data-verdict="BELOW"] {
+  box-shadow: none;
+}
+/* Active preset pill: keep the accent border, drop the halo. */
+:root[data-theme="civvie"] .preset-pill[data-active="true"] {
+  box-shadow: none;
+}
+/* SVG sparkline + detail-chart curves: their `filter="url(#bloom)"`
+   presentation attribute renders the CRT glow. CSS `filter: none`
+   wins over the presentation attribute. Same for the threshold-line
+   dropshadow in SignalDetailScreen (inline style → !important). */
+:root[data-theme="civvie"] svg polyline,
+:root[data-theme="civvie"] svg line {
+  filter: none !important;
 }
 
 /* EVA-01 (Test Type, Shinji) -- the iconic purple/green/orange combo.
