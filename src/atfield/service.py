@@ -325,6 +325,12 @@ def run_service(
         collector_view_from_probe(name, result, "HEALTHY" if result.available else "FAILED")
         for name, result in probe_results.items()
     ])
+    # Hand the LHM supervisor (if we managed to start one) to the API
+    # state so /health can surface its per-spawn status -- in particular
+    # the http_ready bit that distinguishes "process up but server
+    # didn't bind" from "process is down".
+    if lhm_supervisor is not None:
+        api_state.set_lhm_supervisor(lhm_supervisor)
 
     api_server: ApiServer | None = None
     if cfg.api.enabled:

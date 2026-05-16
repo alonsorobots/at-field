@@ -260,6 +260,17 @@ class ServiceState:
         self._last_action_signal: str | None = None
         self._last_action_script: str | None = None
 
+        # Optional: handle to the live LhmSupervisor instance (if LHM is
+        # being supervised this run). When present, snapshot_health()
+        # surfaces the supervisor's per-spawn state -- in particular
+        # http_ready, which tells the dashboard the difference between
+        # "LHM process is alive but its HTTP server didn't bind"
+        # (config wrong, port stolen) and "LHM never started"
+        # (binary missing, requires elevation, etc.). The collector's
+        # own probe-based 'available' flag is necessary but not
+        # sufficient -- it can lag the supervisor by a tick.
+        self._lhm_supervisor: Any = None
+
     # ------------------------------------------------------------------
     # Writers (called by the service tick loop)
     # ------------------------------------------------------------------
@@ -271,6 +282,13 @@ class ServiceState:
     def set_collectors(self, views: Iterable[_CollectorView]) -> None:
         with self._lock:
             self._collectors = list(views)
+
+    def set_lhm_supervisor(self, supervisor: Any) -> None:
+        """Register the live :class:`atfield.lhm_supervisor.LhmSupervisor`
+        so /health can surface its status. ``None`` clears the binding
+        (used in tests / when LHM is not being supervised this run)."""
+        with self._lock:
+            self._lhm_supervisor = supervisor
 
     def update_collector_health(self, name: str, health_name: str) -> None:
         with self._lock:
@@ -350,6 +368,49 @@ class ServiceState:
             engine = self._engine
             rules_active = len(engine.effective_rules) if engine else 0
             rules_disabled = len(engine.disabled_rules) if engine else 0
+
+            # LHM supervisor view, when one is bound. Read OUTSIDE the
+            # main lock would be cleaner but the supervisor's
+            # snapshot_status() is itself thread-safe (its own lock,
+            # different from ours), so nested access is fine and avoids
+            # a separate snapshot variable + reordering.
+            lhm_supervisor_view: dict[str, Any] | None = None
+            sup = self._lhm_supervisor
+            if sup is not None:
+                try:
+                    s = sup.snapshot_status()
+                    # Derive a single-token state for UIs that don't want
+                    # to interpret the full status struct. The supervisor
+                    # exposes the raw fields below for callers that do.
+                    if s.stopping:
+                        state = "stopping"
+                    elif s.running and s.http_ready:
+                        state = "ready"
+                    elif s.running and not s.http_ready:
+                        state = "process_up_no_http"
+                    elif s.next_retry_at is not None:
+                        state = "backoff"
+                    else:
+                        state = "down"
+                    lhm_supervisor_view = {
+                        "state": state,
+                        "running": s.running,
+                        "http_ready": s.http_ready,
+                        "pid": s.pid,
+                        "started_at": s.started_at,
+                        "restart_count": s.restart_count,
+                        "last_exit_code": s.last_exit_code,
+                        "last_exit_at": s.last_exit_at,
+                        "next_retry_at": s.next_retry_at,
+                        "last_error": s.last_error,
+                    }
+                except Exception:
+                    # Defensive: never let a supervisor-snapshot bug
+                    # crash /health. The dashboard treats a missing key
+                    # as "no supervisor info" and falls back to the
+                    # collector's own availability flag.
+                    lhm_supervisor_view = None
+
             return {
                 "version": self._version,
                 "mode": "observe-only" if self._observe_only else "armed",
@@ -361,6 +422,7 @@ class ServiceState:
                 "last_tick_at": self._last_tick_at or None,
                 "heartbeat_age_s": heartbeat_age,
                 "collectors": collector_views,
+                "lhm_supervisor": lhm_supervisor_view,
                 "rules_active": rules_active,
                 "rules_disabled": rules_disabled,
                 "last_action": (

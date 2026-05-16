@@ -41,11 +41,15 @@ class TestDefaults:
         assert cfg.kill.grace_seconds == 5
         assert cfg.kill.post_kill_cooldown_seconds == 60
 
-    def test_default_rules_are_the_five_locked_in(self):
+    def test_default_rules_are_the_six_locked_in(self):
+        # vram-pressure was added in v0.3 to catch the #1 training crash
+        # cause (CUDA OOM). See _default_rules() docstring for the
+        # threshold rationale.
         cfg = default_config()
         names = {r.name for r in cfg.rules}
         assert names == {
             "vram-junction-hot",
+            "vram-pressure",
             "gpu-core-hot",
             "ram-pressure",
             "pagefile-pressure",
@@ -56,6 +60,7 @@ class TestDefaults:
         "name, signal, threshold, window_s, min_fraction",
         [
             ("vram-junction-hot", "gpu.*.mem_junction_temp_c", 90.0, 20, 0.67),
+            ("vram-pressure", "gpu.*.vram_used_percent", 92.0, 30, 0.75),
             ("gpu-core-hot", "gpu.*.core_temp_c", 83.0, 30, 0.67),
             ("ram-pressure", "system.ram_used_percent", 85.0, 60, 0.75),
             ("pagefile-pressure", "system.commit_percent", 90.0, 60, 0.75),

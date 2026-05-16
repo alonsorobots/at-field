@@ -1,4 +1,4 @@
-import type { HealthSnapshot } from "../lib/api";
+import type { HealthSnapshot, LhmSupervisorView } from "../lib/api";
 
 interface Props {
   health: HealthSnapshot | null;
@@ -55,10 +55,16 @@ export default function StatusScreen({ health, reachable }: Props) {
                   <span className="text-[10px] text-[var(--color-text-tertiary)] font-mono uppercase">
                     {c.health}
                   </span>
+                  {c.name === "lhm" && health.lhm_supervisor && (
+                    <SupervisorPill view={health.lhm_supervisor} />
+                  )}
                 </div>
                 <div className="text-xs text-[var(--color-text-secondary)] mt-0.5 leading-relaxed">
                   {c.reason}
                 </div>
+                {c.name === "lhm" && health.lhm_supervisor && (
+                  <SupervisorDetail view={health.lhm_supervisor} />
+                )}
                 {c.signals.length > 0 && (
                   <div className="text-[11px] text-[var(--color-text-tertiary)] mt-1">
                     {c.signals.length} signal{c.signals.length === 1 ? "" : "s"}
@@ -71,6 +77,100 @@ export default function StatusScreen({ health, reachable }: Props) {
       </section>
     </div>
   );
+}
+
+/**
+ * Compact pill that distills the LhmSupervisor's status matrix
+ * (running × http_ready × backoff × stopping) into one badge.
+ *
+ * Each state maps to a verb the user can act on:
+ *   ready              – nothing to do
+ *   process_up_no_http – LHM is alive but its HTTP server isn't bound;
+ *                        usually means our config didn't take, or another
+ *                        LHM instance owns port 8085. Surfacing this
+ *                        distinctly from "down" was the whole point of
+ *                        the v0.2.1 supervisor refactor.
+ *   backoff            – will retry; show the countdown so users don't
+ *                        wonder if we've given up
+ *   stopping           – shutdown in progress; transient
+ *   down               – process never started (e.g. binary missing,
+ *                        elevation refused)
+ */
+function SupervisorPill({ view }: { view: LhmSupervisorView }) {
+  const { label, tone } = supervisorPillProps(view);
+  return (
+    <span
+      className="text-[10px] font-mono uppercase px-1.5 py-0.5 rounded"
+      style={{
+        background: `var(--color-${tone}-bg, var(--color-surface-raised))`,
+        color: `var(--color-${tone}-fg, var(--color-text-secondary))`,
+      }}
+      title={view.last_error ?? undefined}
+    >
+      {label}
+    </span>
+  );
+}
+
+function supervisorPillProps(view: LhmSupervisorView): { label: string; tone: string } {
+  switch (view.state) {
+    case "ready":
+      return { label: "supervisor: ready", tone: "ok" };
+    case "process_up_no_http":
+      return { label: "supervisor: no http", tone: "warn" };
+    case "backoff":
+      return { label: "supervisor: retrying", tone: "warn" };
+    case "stopping":
+      return { label: "supervisor: stopping", tone: "muted" };
+    case "down":
+    default:
+      return { label: "supervisor: down", tone: "danger" };
+  }
+}
+
+/**
+ * Inline detail line under the LHM collector card.
+ *
+ * Surfaces the most useful piece of supervisor metadata for the
+ * current state — a countdown for backoff, the error string for
+ * unhealthy states, the PID + restart count for healthy ones.
+ * Kept terse on purpose; the supervisor's full status struct is
+ * available via the API for power users.
+ */
+function SupervisorDetail({ view }: { view: LhmSupervisorView }) {
+  if (view.state === "ready" && view.pid !== null) {
+    const restarts = view.restart_count > 0
+      ? ` · restarts: ${view.restart_count}`
+      : "";
+    return (
+      <div className="text-[11px] text-[var(--color-text-tertiary)] mt-1 font-mono">
+        pid {view.pid}{restarts}
+      </div>
+    );
+  }
+  if (view.state === "backoff" && view.next_retry_at !== null) {
+    const secs = Math.max(0, Math.round(view.next_retry_at - Date.now() / 1000));
+    return (
+      <div className="text-[11px] text-[var(--color-text-tertiary)] mt-1">
+        Next retry in {secs}s{view.last_error ? ` — ${view.last_error}` : ""}
+      </div>
+    );
+  }
+  if (view.state === "process_up_no_http" && view.last_error) {
+    return (
+      <div className="text-[11px] text-[var(--color-warn-fg,var(--color-text-secondary))] mt-1 leading-relaxed">
+        {view.last_error}
+      </div>
+    );
+  }
+  if (view.last_error) {
+    return (
+      <div className="text-[11px] text-[var(--color-text-tertiary)] mt-1">
+        {view.last_error}
+      </div>
+    );
+  }
+  return null;
 }
 
 function Stat({ label, value, muted }: { label: string; value: string; muted?: boolean }) {

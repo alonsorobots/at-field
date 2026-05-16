@@ -75,6 +75,21 @@ RULE_PROFILES: Final[dict[str, RuleProfile]] = {
         min=80.0, aggressive_max=88.0, relaxed_min=98.0, max=110.0,
         aggressive_value=85.0, normal_value=92.0, relaxed_value=100.0,
     ),
+    # Tier bands rationale (CUDA OOM is a sharp cliff, not a slope):
+    # * Aggressive 85% — kills early; useful for power users who run
+    #   several training runs in parallel and want headroom for any
+    #   one of them to spike.
+    # * Normal 92% — closest to the actual OOM cliff (typically 93-95%
+    #   with allocator fragmentation factored in) without firing on the
+    #   brief spike at the start of a forward pass.
+    # * Relaxed 96% — for users who would rather risk an OOM than have
+    #   their job killed; also appropriate for inference workloads
+    #   where peak VRAM is more predictable than training.
+    "vram-pressure": RuleProfile(
+        name="vram-pressure", unit="%",
+        min=70.0, aggressive_max=87.0, relaxed_min=94.0, max=99.0,
+        aggressive_value=85.0, normal_value=92.0, relaxed_value=96.0,
+    ),
     "ram-pressure": RuleProfile(
         name="ram-pressure", unit="%",
         min=50.0, aggressive_max=80.0, relaxed_min=92.0, max=99.0,

@@ -70,6 +70,54 @@ detail — JSONL is just the canonical store.
 
 ---
 
+## "I installed AT-Field but I don't see the tray icon"
+
+Almost certainly Windows 11 hiding it. Win11 buries every new tray
+icon in the **overflow chevron** (the `^` arrow at the left edge of
+the system tray) by default — apps can't pin themselves visible, only
+the user can.
+
+The fix takes one click:
+
+1. Click the `^` chevron on your taskbar to expand the overflow.
+2. Drag the AT-Field icon out into the visible tray area, **or**
+   right-click it and pick *"Show in taskbar"* (wording varies by
+   Win11 build).
+
+After that, Windows remembers the preference and AT-Field stays
+visible on every login. The first launch after install fires a system
+toast pointing this out for exactly this reason.
+
+If you don't see the icon in the overflow either, the tray app didn't
+start. Check Task Manager for `at-field-tray.exe`; if it's missing,
+launch it manually from `%LOCALAPPDATA%\AT-Field\at-field-tray.exe`
+or re-run the installer.
+
+---
+
+## "How do I read forensics after a crash?"
+
+If the rig hard-rebooted (BSOD, Kernel-Power 41, power loss) AT-Field
+keeps a rolling per-tick history of every signal it sampled at
+`%ProgramData%\ATField\forensics.jsonl`. The previous run is rotated
+to `forensics-prev.jsonl` on the next service start, so the data
+survives the reboot that killed the watchdog.
+
+To inspect what happened in the seconds before the crash:
+
+```pwsh
+atf forensics --include-prev --since 10m --format jsonl
+# Filter to a specific signal:
+atf forensics --include-prev --signal mem_junction --format table
+# Pipe into jq for ad-hoc analysis:
+atf forensics --include-prev --since 1h --format jsonl | jq '.samples."gpu.0.core_temp_c"'
+```
+
+The format is append-only JSONL — the only format guaranteed to be
+partially readable after a power loss mid-write.
+
+---
+
 ## "Why does the tray icon say *Degraded*?"
 
 Three things flip the icon to yellow:

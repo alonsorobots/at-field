@@ -349,14 +349,43 @@ pub fn run() {
             // call every launch. Failures are logged but don't block
             // startup -- the watchdog itself runs as a service so the
             // user is still protected even if their tray doesn't auto-launch.
-            match autostart::ensure_registered() {
-                Ok(autostart::EnsureOutcome::Registered) => {
-                    eprintln!("autostart: registered AT-Field Tray in HKCU\\Run");
-                }
-                Ok(autostart::EnsureOutcome::AlreadyRegistered) => {
-                    // Common case after first install -- silent.
-                }
-                Err(e) => eprintln!("autostart: HKCU\\Run registration failed: {e}"),
+            let just_registered = matches!(
+                autostart::ensure_registered(),
+                Ok(autostart::EnsureOutcome::Registered)
+            );
+            if just_registered {
+                eprintln!("autostart: registered AT-Field Tray in HKCU\\Run");
+            }
+
+            // First-launch discoverability toast.
+            //
+            // Windows 11 hides every new tray icon in the overflow chevron
+            // by default -- the user has to right-click the icon there and
+            // pick "Show in taskbar" once. Without an active prompt that
+            // looks identical to "the app didn't start" (which is what the
+            // user reported after the v0.2 hard-reboot incident).
+            //
+            // We send one notification on the very first launch per
+            // install (state file marker), which fires a system toast
+            // the user can't miss and which is a clickable hint to
+            // promote the icon out of the overflow.
+            //
+            // ``just_registered`` is the proxy for "first launch on this
+            // user account" -- ensure_registered() returns Registered
+            // exactly once per (exe path, user) pair. Subsequent launches
+            // (and reboots) return AlreadyRegistered and stay silent.
+            if just_registered {
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("AT-Field is watching")
+                    .body(
+                        "Your AI workloads are protected. The tray icon \
+                         lives in the system tray (click the ^ chevron \
+                         in your taskbar if you don't see it), or open \
+                         the dashboard from there.",
+                    )
+                    .show();
             }
 
             Ok(())
