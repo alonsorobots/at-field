@@ -242,7 +242,7 @@ export function formatTimeOfDay(unixSeconds: number): string {
 // The ramp itself is theme-owned -- defined per Eva color scheme in
 // lib/theme.ts. getActiveRamp() looks up the active scheme's ramp by
 // reading data-theme on <html>, which setTheme() stamps. This commit
-// replaced the previous module-level RAMP_BRAND constant; the Nerv
+// replaced the previous module-level RAMP_BRAND constant; the Civvie
 // theme's ramp is byte-identical to RAMP_BRAND, so existing renders
 // don't visually change unless the user picks a different theme.
 

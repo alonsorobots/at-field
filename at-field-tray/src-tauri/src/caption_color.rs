@@ -73,7 +73,7 @@ pub fn apply_to_hwnd(hwnd: HWND, caption: COLORREF, text: COLORREF, border: COLO
     }
 }
 
-/// Default brand purple: matches the surface tone of the Nerv theme
+/// Default brand purple: matches the surface tone of the Civvie theme
 /// (`--color-surface-raised` ≈ `#2b1f3d`). Lighter than `--color-bg`
 /// so the bar reads as part of the chrome, not as the page itself,
 /// while still being unmistakably purple.

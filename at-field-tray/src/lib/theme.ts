@@ -12,7 +12,7 @@
  */
 
 export type ThemeId =
-  | "nerv"
+  | "civvie"
   | "eva-01"
   | "eva-00"
   | "eva-02"
@@ -43,12 +43,16 @@ export interface ThemeMeta {
 
 export const THEMES: ThemeMeta[] = [
   {
-    id: "nerv",
-    label: "Nerv",
+    id: "civvie",
+    label: "Civvie",
     swatches: ["#1b141f", "#a78bfa", "#fbbf24"],
-    // Original brand ramp -- warm slate that recedes into the dark
-    // purple bg, ramping up to brand orange at threshold and deep red
-    // for sustained over-threshold values.
+    // The "civilian" theme -- the calm, no-frills look the dashboard
+    // shipped with before the Magi-terminal aesthetic pass. Same warm
+    // slate ramp that recedes into the dark purple bg, ramping up to
+    // brand orange at threshold and deep red for sustained over-
+    // threshold values. Pairs with the CSS override in globals.css
+    // that swaps the HUD font for sans and strips the phosphor bloom
+    // -- so picking Civvie genuinely reverts to the pre-bloom UI.
     ramp: [
       [58, 50, 64],
       [76, 64, 76],
@@ -180,7 +184,7 @@ export function getActiveRamp(): readonly RGB[] {
 }
 
 const STORAGE_KEY = "atfield.theme";
-const DEFAULT_THEME: ThemeId = "nerv";
+const DEFAULT_THEME: ThemeId = "civvie";
 
 const VALID_IDS = new Set<string>(THEMES.map((t) => t.id));
 
@@ -189,10 +193,19 @@ function isThemeId(value: unknown): value is ThemeId {
 }
 
 /** Read the persisted theme id, falling back to the default if anything
-    is unset, corrupted, or no longer recognized. */
+    is unset, corrupted, or no longer recognized.
+ *
+ * Migrates the pre-v0.3.1 "nerv" stored value to its new id ("civvie")
+ * silently and rewrites the storage slot, so users who picked the
+ * default theme before the rename don't get reset to default on first
+ * launch after upgrade. */
 export function getTheme(): ThemeId {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (raw === "nerv") {
+      window.localStorage.setItem(STORAGE_KEY, "civvie");
+      return "civvie";
+    }
     if (isThemeId(raw)) return raw;
   } catch {
     // localStorage can throw in private browsing or sandboxed contexts;
