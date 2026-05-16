@@ -36,7 +36,7 @@ export default function StatusScreen({ health, reachable }: Props) {
 
       {/* Collectors */}
       <section>
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+        <h2 className="hud hud-dim text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
           Collectors
         </h2>
         <div className="space-y-2">
@@ -76,7 +76,7 @@ export default function StatusScreen({ health, reachable }: Props) {
 function Stat({ label, value, muted }: { label: string; value: string; muted?: boolean }) {
   return (
     <div className="frosted rounded-lg px-4 py-3 border border-[var(--color-border)]">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)]">
+      <div className="hud hud-dim text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)]">
         {label}
       </div>
       <div className={`text-lg font-semibold mt-0.5 ${muted ? "text-[var(--color-text-secondary)]" : ""}`}>
@@ -102,7 +102,7 @@ function ServiceUnreachable() {
       </div>
 
       <section>
-        <div className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+        <div className="hud hud-dim text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
           Option 1 — install as a Windows service (recommended)
         </div>
         <div className="frosted rounded-lg border border-[var(--color-border)] p-4 space-y-2">
@@ -117,7 +117,7 @@ function ServiceUnreachable() {
       </section>
 
       <section>
-        <div className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+        <div className="hud hud-dim text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
           Option 2 — try it in a terminal first
         </div>
         <div className="frosted rounded-lg border border-[var(--color-border)] p-4 space-y-2">
@@ -129,7 +129,7 @@ function ServiceUnreachable() {
       </section>
 
       <section>
-        <div className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+        <div className="hud hud-dim text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
           Already installed?
         </div>
         <div className="text-sm text-[var(--color-text-secondary)] leading-relaxed">

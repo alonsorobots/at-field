@@ -54,8 +54,11 @@ export default function StatusHeader({ status, health, onRefresh }: Props) {
           transition={{ duration: 0.15 }}
         />
         <div className="flex flex-col min-w-0">
-          <div className="text-sm font-semibold truncate">
-            AT-Field <span className="text-[var(--color-text-secondary)] font-normal">{STATUS_LABEL[status]}</span>
+          <div className="text-base truncate">
+            <span className="hud" style={{ color: "var(--color-accent)" }}>AT-FIELD</span>{" "}
+            <span className="hud text-sm" style={{ color: "var(--color-text-secondary)" }}>
+              {STATUS_LABEL[status].toUpperCase()}
+            </span>
           </div>
           <div className="text-[11px] text-[var(--color-text-tertiary)] truncate">
             {health ? (

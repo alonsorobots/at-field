@@ -28,8 +28,6 @@ export interface ThemeMeta {
   id: ThemeId;
   /** Human-readable name shown in the picker. */
   label: string;
-  /** One-line flavor copy for the picker tile. */
-  description: string;
   /** Three swatch hexes (bg, accent, secondary-accent) for the picker
       preview chip. Pulled by hand from the matching CSS block so the
       picker tile reads honestly even when the theme isn't active. */
@@ -47,7 +45,6 @@ export const THEMES: ThemeMeta[] = [
   {
     id: "nerv",
     label: "Nerv",
-    description: "Calm watchdog. Muted dark purple, lavender accent.",
     swatches: ["#1b141f", "#a78bfa", "#fbbf24"],
     // Original brand ramp -- warm slate that recedes into the dark
     // purple bg, ramping up to brand orange at threshold and deep red
@@ -66,7 +63,6 @@ export const THEMES: ThemeMeta[] = [
   {
     id: "eva-01",
     label: "EVA-01",
-    description: "Test Type. Deep purple, bright green, shoulder orange.",
     swatches: ["#1a0f24", "#41bb42", "#e8790c"],
     // Cool purple base picks up the body color, ramps through green to
     // shoulder orange at threshold (the "warning" anchor that matches
@@ -86,7 +82,6 @@ export const THEMES: ThemeMeta[] = [
   {
     id: "eva-00",
     label: "EVA-00",
-    description: "Prototype. Deep yellow / orange the original Rei colors.",
     swatches: ["#1a1500", "#f6e201", "#f66e25"],
     // Olive base climbs through dim mustard up to the prototype yellow
     // at threshold, ending on the EVA-00 orange-red over-threshold.
@@ -104,7 +99,6 @@ export const THEMES: ThemeMeta[] = [
   {
     id: "eva-02",
     label: "EVA-02",
-    description: "Production Model. Asuka red with the visor yellow.",
     swatches: ["#1f0708", "#d93b48", "#f6e201"],
     // Asuka tradeoff: the iconic body color is red, but red also has to
     // mean "over threshold" semantically. Resolution: yellow visor as
@@ -125,7 +119,6 @@ export const THEMES: ThemeMeta[] = [
   {
     id: "eva-03",
     label: "EVA-03",
-    description: "Bardiel. Cool dark gray, cyan accent.",
     swatches: ["#15161a", "#4da8da", "#aaaab2"],
     // Cool slate-blue base climbs through cyan to the Bardiel cyan
     // accent at threshold; over-threshold falls back to the standard
@@ -144,7 +137,6 @@ export const THEMES: ThemeMeta[] = [
   {
     id: "eva-04",
     label: "EVA-04",
-    description: "Lost. Desert tan and olive.",
     swatches: ["#1f1a10", "#c9b27a", "#80c060"],
     // Dark olive base ramps through warm tan up to the EVA-04 desert
     // tan at threshold; over-threshold lands on a burnt rust-orange

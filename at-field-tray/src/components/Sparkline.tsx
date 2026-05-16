@@ -61,7 +61,9 @@ export default function Sparkline({
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-  const gradientId = `sparkline-grad-${useId().replace(/:/g, "")}`;
+  const uid = useId().replace(/:/g, "");
+  const gradientId = `sparkline-grad-${uid}`;
+  const bloomId = `sparkline-bloom-${uid}`;
 
   // Normalize input to Point[] internally.
   const points: Point[] =
@@ -151,23 +153,35 @@ export default function Sparkline({
         onClick={onClick}
         style={{ cursor: onClick ? "pointer" : "default" }}
       >
-        {useGradient && (
-          <defs>
-            {/* userSpaceOnUse: gradient is anchored to the SVG viewBox (0..height)
-                rather than the polyline's bounding box. The bbox version can
-                quietly shrink to whatever Y range the data actually covers,
-                which collapses the opacity range to invisibility when most
-                samples sit at one end. Anchoring to the viewBox keeps the
-                top of the chart at full opacity and the bottom at TROUGH
-                opacity REGARDLESS of the line's extent. */}
+        <defs>
+          {useGradient && (
+            /* userSpaceOnUse: gradient is anchored to the SVG viewBox (0..height)
+               rather than the polyline's bounding box. The bbox version can
+               quietly shrink to whatever Y range the data actually covers,
+               which collapses the opacity range to invisibility when most
+               samples sit at one end. Anchoring to the viewBox keeps the
+               top of the chart at full opacity and the bottom at TROUGH
+               opacity REGARDLESS of the line's extent. */
             <linearGradient id={gradientId} gradientUnits="userSpaceOnUse"
               x1={0} y1={0} x2={0} y2={height}>
               {stops.map((s, i) => (
                 <stop key={i} offset={s.offset} stopColor={s.color} stopOpacity={s.opacity} />
               ))}
             </linearGradient>
-          </defs>
-        )}
+          )}
+          {/* CRT phosphor bloom: blur a copy of the curve and merge it
+              UNDER the original. The blurred copy inherits the polyline's
+              stroke color (gradient included) so the halo is automatically
+              theme-aware. stdDeviation tuned small (1.6) so the line itself
+              still reads sharply at 1.1px stroke width. */}
+          <filter id={bloomId} x="-15%" y="-15%" width="130%" height="130%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="1.6" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        </defs>
         {thresholdY != null && (
           <line
             x1={0}
@@ -187,6 +201,7 @@ export default function Sparkline({
           strokeWidth={1.1}
           strokeLinejoin="round"
           strokeLinecap="round"
+          filter={`url(#${bloomId})`}
         />
         {hoverX != null && (
           <>

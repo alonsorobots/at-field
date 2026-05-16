@@ -3,6 +3,8 @@
 
 mod autostart;
 #[cfg(windows)]
+mod caption_color;
+#[cfg(windows)]
 mod service_installer;
 
 use std::sync::{Arc, Mutex};
@@ -251,14 +253,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init());
 
-    // Service-installer commands are only useful on Windows; the rest of
-    // the tray builds (and runs in dev mode) on Linux/macOS for editor
-    // ergonomics. On non-Windows we simply don't expose the commands.
+    // Service-installer + caption-color commands are only useful on
+    // Windows; the rest of the tray builds (and runs in dev mode) on
+    // Linux/macOS for editor ergonomics. On non-Windows we simply
+    // don't expose the commands.
     #[cfg(windows)]
     let builder = builder.invoke_handler(tauri::generate_handler![
         service_installer::service_status,
         service_installer::install_service,
         service_installer::uninstall_service,
+        caption_color::set_caption_color,
     ]);
 
     builder
@@ -331,6 +335,14 @@ pub fn run() {
                 app.handle().clone(),
                 Arc::new(Mutex::new(TrayStatus::Down)),
             );
+
+            // Pre-stamp the main window with the brand caption colour
+            // before the user ever sees it. The window starts visible=false
+            // but Tauri creates it eagerly so we can grab the HWND now.
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                apply_brand_caption(&window);
+            }
 
             // User-mode autostart: register this exe in HKCU\Run so the
             // tray shows up automatically next login. Idempotent; safe to
@@ -431,12 +443,40 @@ fn toggle_main_window(app: &AppHandle) {
         } else {
             let _ = window.show();
             let _ = window.set_focus();
+            // Re-apply the brand caption colour every time we show the
+            // window. Cheap (one DWM call) and bullet-proof against the
+            // OS occasionally resetting attributes after focus changes
+            // or DPI events.
+            #[cfg(windows)]
+            apply_brand_caption(&window);
         }
     } else {
         // First show after silent boot: build the window from config.
-        let _ = WebviewWindowBuilder::from_config(
+        if let Ok(window) = WebviewWindowBuilder::from_config(
             app,
             &app.config().app.windows[0],
+        )
+        .and_then(|b| b.build())
+        {
+            #[cfg(windows)]
+            apply_brand_caption(&window);
+        }
+    }
+}
+
+/// Push the brand-purple title bar onto a freshly-shown window. No-op
+/// on Windows 10 / pre-22H2 (the DWM call returns failure silently).
+#[cfg(windows)]
+fn apply_brand_caption(window: &tauri::WebviewWindow) {
+    if let Ok(hwnd) = window.hwnd() {
+        let (cr, cg, cb) = caption_color::BRAND_CAPTION;
+        let (tr, tg, tb) = caption_color::BRAND_TEXT;
+        let (br, bg, bb) = caption_color::BRAND_BORDER;
+        caption_color::apply_to_hwnd(
+            hwnd,
+            caption_color::colorref_from_rgb(cr, cg, cb),
+            caption_color::colorref_from_rgb(tr, tg, tb),
+            caption_color::colorref_from_rgb(br, bg, bb),
         );
     }
 }

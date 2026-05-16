@@ -96,7 +96,7 @@ export default function KillToast({ health }: Props) {
             />
             <div className="min-w-0">
               <div
-                className="text-sm font-semibold leading-tight"
+                className="hud text-base leading-tight uppercase"
                 style={{ color: "var(--color-danger)" }}
               >
                 AT-Field killed {visible.script ?? "a process"}

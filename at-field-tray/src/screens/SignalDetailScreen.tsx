@@ -196,7 +196,9 @@ function DetailChart({
   threshold: number | null;
   fmt: (v: number) => string;
 }) {
-  const gradientId = `detail-chart-grad-${useId().replace(/:/g, "")}`;
+  const uid = useId().replace(/:/g, "");
+  const gradientId = `detail-chart-grad-${uid}`;
+  const bloomId = `detail-chart-bloom-${uid}`;
   const width = 1000;
   const height = 360;
   const padL = 56;
@@ -315,6 +317,16 @@ function DetailChart({
               <stop key={i} offset={s.offset} stopColor={s.color} stopOpacity={s.opacity} />
             ))}
           </linearGradient>
+          {/* CRT phosphor bloom (Magi terminal aesthetic). Slightly
+              larger stdDeviation than the tile sparkline because this
+              chart has more vertical real estate and a thicker stroke. */}
+          <filter id={bloomId} x="-10%" y="-10%" width="120%" height="120%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="2.2" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
         </defs>
 
         {/* Y-axis grid + labels */}
@@ -377,10 +389,15 @@ function DetailChart({
               x={width - padR - 4}
               y={thresholdY - 5}
               textAnchor="end"
-              fontSize={10}
-              fontWeight={600}
-              letterSpacing="0.04em"
+              fontFamily="var(--font-display)"
+              fontSize={12}
+              fontWeight={700}
+              letterSpacing="0.08em"
               fill="var(--color-danger)"
+              style={{
+                filter:
+                  "drop-shadow(0 0 2px var(--color-danger)) drop-shadow(0 0 6px color-mix(in srgb, var(--color-danger) 50%, transparent))",
+              }}
             >
               TRIGGER {fmt(threshold!)}
             </text>
@@ -395,6 +412,7 @@ function DetailChart({
           strokeWidth={1.25}
           strokeLinejoin="round"
           strokeLinecap="round"
+          filter={`url(#${bloomId})`}
         />
 
         {/* Hover crosshair */}
@@ -508,10 +526,13 @@ function Stat({
     : "var(--color-text-primary)";
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-tertiary)]">
+      <div className="hud hud-dim text-[10px] uppercase tracking-wider text-[var(--color-text-tertiary)]">
         {label}
       </div>
-      <div className="text-sm tabular-nums font-medium" style={{ color }}>
+      <div
+        className={`text-sm tabular-nums font-medium${highlight || (!muted && !highlight) ? " hud-glow" : ""}`}
+        style={{ color }}
+      >
         {value}
       </div>
     </div>

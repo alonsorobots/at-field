@@ -50,7 +50,7 @@ export default function RulesScreen({ rules, onMutated }: Props) {
       )}
 
       <section>
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+        <h2 className="hud hud-dim text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
           Active rules
         </h2>
         {rules.effective.length === 0 ? (
@@ -68,7 +68,7 @@ export default function RulesScreen({ rules, onMutated }: Props) {
 
       {rules.disabled.length > 0 && (
         <section>
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+          <h2 className="hud hud-dim text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
             Disabled rules
           </h2>
           <p className="text-[11px] text-[var(--color-text-tertiary)] mb-2">
