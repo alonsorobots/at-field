@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import io
 import zipfile
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -118,30 +117,28 @@ class TestInstallLhm:
             == b"FAKE EXE BYTES"
         )
 
-    def test_drops_prebaked_config_when_available(self, tmp_path, runner):
+    def test_writes_lhm_config_with_required_keys(self, tmp_path, runner):
+        # We don't ship a vendored config file anymore (LHM 0.9.6 broke
+        # that pattern). Instead install-lhm calls
+        # atfield.lhm_config.ensure_lhm_config() directly to materialize
+        # a fresh, schema-correct file with all AT-Field-required keys.
+        from atfield.lhm_config import REQUIRED_KEYS
+
         zip_bytes = _make_fake_lhm_zip(nested=False)
-        # Run from the repo root so the vendor/lhm/.../config fallback hits.
-        # (The vendored config is tracked in git; see vendor/lhm/.gitignore.)
-        repo_root = Path(__file__).parents[1]
-        original_cwd = Path.cwd()
-        try:
-            import os
-            os.chdir(repo_root)
-            with patch(
-                "urllib.request.urlopen",
-                return_value=_FakeUrlopenResponse(zip_bytes),
-            ):
-                result = runner.invoke(
-                    cli.app,
-                    ["install-lhm", "--dir", str(tmp_path), "--no-env-hint"],
-                )
-        finally:
-            os.chdir(original_cwd)
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_FakeUrlopenResponse(zip_bytes),
+        ):
+            result = runner.invoke(
+                cli.app,
+                ["install-lhm", "--dir", str(tmp_path), "--no-env-hint"],
+            )
         assert result.exit_code == 0
         config = tmp_path / "LibreHardwareMonitor.config"
-        assert config.is_file(), "pre-baked config should be staged next to LHM"
-        # Sanity: the config file has the WebServerEnabled key we ship.
-        assert "WebServer" in config.read_text(), config.read_text()[:200]
+        assert config.is_file(), "config should be materialized next to LHM"
+        text = config.read_text(encoding="utf-8")
+        for key in REQUIRED_KEYS:
+            assert key in text, f"required LHM key {key!r} missing from config"
 
     def test_env_hint_prints_setx_on_windows(self, tmp_path, runner, monkeypatch):
         zip_bytes = _make_fake_lhm_zip(nested=False)

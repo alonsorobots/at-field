@@ -634,7 +634,37 @@ def doctor(
     except ImportError as exc:
         problems.append(f"could not import collectors: {exc}")
 
-    # 6. Config validity
+    # 6. Forensic buffer
+    if state_dir.exists():
+        from atfield.forensics import FORENSICS_FILENAME, FORENSICS_PREV_FILENAME
+        forensics = state_dir / FORENSICS_FILENAME
+        forensics_prev = state_dir / FORENSICS_PREV_FILENAME
+        if forensics.exists():
+            try:
+                size_kb = forensics.stat().st_size / 1024
+                age_s = time.time() - forensics.stat().st_mtime
+                if age_s < 30:
+                    successes.append(
+                        f"forensic buffer fresh ({size_kb:.1f} KB, last write {age_s:.1f}s ago)"
+                    )
+                else:
+                    problems.append(
+                        f"forensic buffer stale ({size_kb:.1f} KB, last write {age_s:.0f}s ago)\n"
+                        "  fix: service may not be sampling -- check `atf status`"
+                    )
+            except OSError:
+                pass
+        elif forensics_prev.exists():
+            successes.append(
+                "previous run's forensic buffer present "
+                f"({forensics_prev.stat().st_size // 1024} KB) -- "
+                "service hasn't started a new run yet"
+            )
+        else:
+            # Not a hard error: a fresh install hasn't sampled yet.
+            successes.append("forensic buffer not yet written (fresh install)")
+
+    # 7. Config validity
     config_path = _resolve_config_path(state_dir)
     if config_path is None:
         successes.append("no config.toml found -- using locked-in defaults")
@@ -862,10 +892,22 @@ def setup(
 
 # Pinned LHM release. Bumping this is a deliberate choice: every version
 # change has a small chance of breaking the .config XML schema we ship.
-_LHM_VERSION = "v0.9.4"
+#
+# v0.9.6 (2026-02-14) was picked over v0.9.4 because it adds the NvAPI
+# workaround for the RTX 5090 memory-junction sensor (NVIDIA removed
+# the public API for it in the 50-series driver), exposes GPU core
+# voltage as a first-class signal, and adds foundational support for
+# MSI B850 / X870 / Z890 boards plus ASUS Astral 50-series GPUs. See
+# docs/sensors.md for the full per-signal coverage matrix.
+#
+# Note the asset name changed in v0.9.5 from `LibreHardwareMonitor-net472.zip`
+# to `LibreHardwareMonitor.zip` (the .NET Framework 4.7.2 build kept the
+# same in-box-on-Win10+ compatibility properties; the filename is just
+# different).
+_LHM_VERSION = "v0.9.6"
 _LHM_ZIP_URL = (
     f"https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/"
-    f"download/{_LHM_VERSION}/LibreHardwareMonitor-net472.zip"
+    f"download/{_LHM_VERSION}/LibreHardwareMonitor.zip"
 )
 
 
@@ -910,7 +952,6 @@ def install_lhm(
     import tempfile
     import urllib.request
     import zipfile
-    from importlib import resources as _res
 
     install_dir = install_dir.expanduser()
     binary = install_dir / "LibreHardwareMonitor.exe"
@@ -963,40 +1004,165 @@ def install_lhm(
         console.print(f"[red]error[/] LHM zip extracted but {binary.name} missing")
         raise typer.Exit(code=2)
 
-    # Drop our pre-baked config (web server on, minimize to tray, no auto-update)
-    # so LHM starts up the way the supervisor expects without a UI tour.
-    config_target = install_dir / "LibreHardwareMonitor.config"
+    # Drop a starter LibreHardwareMonitor.config with the AT-Field
+    # required keys (web server on, minimize to tray, no auto-update)
+    # so the very first LHM launch -- before the AT-Field service has
+    # a chance to call ensure_lhm_config() itself -- still comes up
+    # with the HTTP server enabled.
+    #
+    # Once the service is running, atfield.lhm_supervisor calls
+    # ensure_lhm_config() before every spawn, so this starter file
+    # only matters in the narrow window between `atf install-lhm`
+    # and the next service start.
+    from atfield.lhm_config import ensure_lhm_config
     try:
-        from atfield import _vendored_lhm_config  # type: ignore[attr-defined]
-
-        config_target.write_text(_vendored_lhm_config.read_text())
-    except (ImportError, AttributeError):
-        # Vendored config wasn't packaged (e.g. editable install). Try to
-        # find it in the repo checkout.
-        for candidate in (
-            Path(__file__).parents[2] / "vendor" / "lhm" / "LibreHardwareMonitor.config",
-            Path.cwd() / "vendor" / "lhm" / "LibreHardwareMonitor.config",
-        ):
-            if candidate.is_file():
-                shutil.copy2(candidate, config_target)
-                break
-        else:
-            try:
-                # Try as an installed package resource, if pyproject was set
-                # up to ship it (forward-compat).
-                with _res.as_file(_res.files("atfield") / "data" / "LibreHardwareMonitor.config") as p:
-                    shutil.copy2(p, config_target)
-            except (FileNotFoundError, ModuleNotFoundError):
-                console.print(
-                    "[yellow]warning[/] couldn't find pre-baked "
-                    "LibreHardwareMonitor.config; LHM web server may not "
-                    "be enabled. Open LHM once and tick "
-                    "Options -> Remote Web Server -> Run."
-                )
+        ensure_lhm_config(install_dir)
+    except OSError as exc:
+        console.print(
+            f"[yellow]warning[/] couldn't write LibreHardwareMonitor.config: {exc}. "
+            "LHM web server may not be enabled on first launch. Start the "
+            "AT-Field service and it will re-assert the config."
+        )
 
     console.print(f"[green]+[/] LHM installed at [cyan]{binary}[/]")
     if env_hint:
         _print_lhm_env_hint(binary)
+
+
+# ---------------------------------------------------------------------------
+# forensics -- post-crash signal history reader
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def forensics(
+    state_dir: Path = _state_dir_option(),
+    since: str = typer.Option(
+        "10m",
+        "--since",
+        help="Time window from now: '5m', '1h', '24h', or 'all'",
+    ),
+    signal_filter: str = typer.Option(
+        "",
+        "--signal",
+        help="Substring filter on signal name (e.g. 'gpu.0' or 'voltage')",
+    ),
+    include_prev: bool = typer.Option(
+        True,
+        "--include-prev/--no-include-prev",
+        help="Include the previous run's archived buffer too "
+             "(useful right after a crash)",
+    ),
+    output_format: str = typer.Option(
+        "table",
+        "--format",
+        "-f",
+        help="One of: table, jsonl, csv",
+    ),
+) -> None:
+    """Read the rolling forensic buffer.
+
+    The watchdog flushes every signal sample to
+    ``%ProgramData%\\ATField\\forensics.jsonl`` every 5 seconds, with the
+    previous run rotated to ``forensics-prev.jsonl``. This command makes
+    that data easy to inspect after a crash.
+
+    Examples:
+
+        atf forensics --since 5m
+        atf forensics --since 1h --signal gpu.0 --format csv > out.csv
+        atf forensics --since all --signal voltage
+    """
+    from atfield.forensics import FORENSICS_FILENAME, FORENSICS_PREV_FILENAME
+
+    cur = state_dir / FORENSICS_FILENAME
+    prev = state_dir / FORENSICS_PREV_FILENAME
+
+    sources: list[Path] = []
+    if include_prev and prev.exists():
+        sources.append(prev)
+    if cur.exists():
+        sources.append(cur)
+    if not sources:
+        console.print(f"[yellow]no forensic buffer at {state_dir}[/]")
+        console.print(
+            "[dim]start the service so it can begin sampling, then re-run.[/]"
+        )
+        raise typer.Exit(code=1)
+
+    cutoff = _parse_since(since)
+    needle = signal_filter.strip().lower()
+
+    rows: list[tuple[float, str, float]] = []
+    for src in sources:
+        try:
+            for line in src.read_text(encoding="utf-8", errors="replace").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # torn last line after a crash; skip
+                ts = obj.get("ts")
+                samples = obj.get("samples")
+                if not isinstance(ts, (int, float)) or not isinstance(samples, dict):
+                    continue
+                if cutoff is not None and ts < cutoff:
+                    continue
+                for sig, val in samples.items():
+                    if needle and needle not in sig.lower():
+                        continue
+                    if isinstance(val, (int, float)):
+                        rows.append((float(ts), sig, float(val)))
+        except OSError as exc:
+            console.print(f"[yellow]warning[/] could not read {src}: {exc}")
+
+    if not rows:
+        console.print("[yellow]no rows matched the filter window.[/]")
+        raise typer.Exit(code=1)
+
+    rows.sort(key=lambda r: (r[0], r[1]))
+
+    fmt = output_format.lower()
+    if fmt == "jsonl":
+        for ts, sig, val in rows:
+            print(json.dumps({"ts": ts, "signal": sig, "value": val}))
+        return
+    if fmt == "csv":
+        print("ts,ts_iso,signal,value")
+        for ts, sig, val in rows:
+            iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            print(f"{ts},{iso},{sig},{val}")
+        return
+
+    # Default: a Rich table, but capped so we don't dump 10k rows to terminal.
+    cap = 200
+    table = Table(
+        title=f"forensic samples ({len(rows)} match{'es' if len(rows) != 1 else ''}, showing last {min(cap, len(rows))})",
+        show_lines=False,
+    )
+    table.add_column("ts (UTC)")
+    table.add_column("signal")
+    table.add_column("value", justify="right")
+    for ts, sig, val in rows[-cap:]:
+        iso = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        table.add_row(iso, sig, f"{val:.3f}")
+    console.print(table)
+
+
+def _parse_since(spec: str) -> float | None:
+    """Convert '5m' / '1h' / '24h' / 'all' to a unix-epoch cutoff."""
+    s = spec.strip().lower()
+    if s in ("all", "*", ""):
+        return None
+    m = re.fullmatch(r"(\d+)\s*([smhd])", s)
+    if not m:
+        raise typer.BadParameter(
+            f"invalid --since {spec!r}; use e.g. '30s', '5m', '2h', '1d', or 'all'"
+        )
+    n, unit = int(m.group(1)), m.group(2)
+    seconds = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    return time.time() - n * seconds
 
 
 def _print_lhm_env_hint(binary: Path) -> None:
