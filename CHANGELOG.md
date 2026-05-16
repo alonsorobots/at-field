@@ -9,6 +9,66 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Added
 
+- **Forensic rolling buffer** (`src/atfield/forensics.py`). Every
+  sampled signal is staged in memory and flushed to
+  `%ProgramData%\ATField\forensics.jsonl` every 5 seconds. The
+  previous run's file is rotated to `forensics-prev.jsonl` (with two
+  more numbered archives behind it) on service start, so a hard
+  system crash (Kernel-Power 41, BSOD, power loss) doesn't take the
+  pre-crash signal history with it. Format is append-only JSONL --
+  the only format that's guaranteed partially-readable after a power
+  loss. Auto-rotates at 50 MB; ~250 MB on-disk cap.
+- **`atf forensics` CLI** for reading the rolling buffer.
+  `--since 5m / 1h / 24h / all`, `--signal <substring>`, output as
+  `--format table | jsonl | csv`. Includes the previous run's
+  archive by default so it works right after a crash without
+  manually concatenating files.
+- **Rail voltage signals** from LibreHardwareMonitor: when LHM
+  enumerates them, AT-Field now exposes `system.psu_12v_volts`,
+  `system.psu_5v_volts`, `system.psu_3v3_volts`, and
+  `system.cpu_vcore_volts`. Catches PSU sag patterns that correlate
+  with NVIDIA TDR / Kernel-Power 41 events on high-transient cards.
+  No default rules ship -- thresholds depend on PSU quality and
+  board design; users can add a rule via the slider after watching
+  their own baseline.
+- **`docs/sensors.md`**: full strategy doc covering the layered
+  sensor stack (NVML → ROCm-SMI → psutil → bundled LHM →
+  auto-detected HWiNFO), license matrix, and roadmap for v0.3
+  (HWiNFO Shared Memory collector) and v0.4 (kernel-mode driver).
+- **`atf doctor`** now reports the forensic buffer's freshness as
+  one of its checks, distinguishing a fresh install (no buffer
+  yet) from a stale buffer (service stopped sampling).
+
+### Fixed
+
+- **LHM 0.9.6 compatibility regression.** The v0.2 approach of shipping
+  a static pre-baked `LibreHardwareMonitor.config` next to the binary
+  broke when LHM 0.9.6 began rewriting the file from its in-memory
+  defaults on first boot, silently disabling the HTTP server and
+  leaving the dashboard "Degraded". Replaced with `atfield.lhm_config`
+  + a supervisor pre-spawn hook: every time the supervisor spawns LHM
+  it merges the AT-Field-required keys (`runWebServerMenuItem=True`,
+  `webServerPortNumeric.Value=<port>`, `startMinMenuItem=True`,
+  `minimizeToTrayMenuItem=True`, `checkUpdatesAtStartMenuItem=False`)
+  into whatever's currently on disk, preserving any unrelated keys
+  the user set via the LHM UI. Atomic write (temp file + `os.replace`)
+  so a power loss mid-write can't leave an unparseable config.
+  Version-agnostic: any LHM 0.9.x release that honors the standard
+  .NET `appSettings` schema works.
+- **LHM HTTP-ready probe.** The supervisor now polls
+  `127.0.0.1:<port>` for up to 15 s after spawn and records a clear
+  `LhmStatus.last_error` if the server doesn't come up — distinguishing
+  "process is alive but server never bound" from "process exited"
+  on the dashboard. New `LhmStatus.http_ready` boolean exposes the
+  result to the API.
+
+### Changed
+
+- **GPU/CPU device detection in the LHM collector** now matches
+  vendor names ("NVIDIA GeForce RTX 5090", "Intel Core i9-13900K",
+  "AMD Ryzen 9 7950X3D") rather than requiring the literal word
+  "GPU"/"CPU" in the device label, which LHM rarely uses.
+
 - **Per-rule advanced controls** on the Rules tab. Threshold slider was
   the v0.2 primary control; this expands the "Advanced…" toggle on each
   card to let the user edit `window_s` (sustained-for seconds),

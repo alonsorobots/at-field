@@ -47,6 +47,8 @@ from atfield.collectors.lhm import LhmCollector
 from atfield.collectors.nvml import PER_PROCESS_VRAM_KEY, NvmlCollector
 from atfield.collectors.system import SystemCollector
 from atfield.config import AtFieldConfig, ConfigError, default_config, load_config
+from atfield.forensics import ForensicBuffer
+from atfield.forensics import rotate_on_startup as rotate_forensics_on_startup
 from atfield.http_api import ApiServer, ServiceState, collector_view_from_probe
 from atfield.policy import PolicyEngine
 from atfield.signals import Sample
@@ -250,6 +252,15 @@ def run_service(
 
     audit = AuditWriter(sd)
 
+    # Rotate the previous run's forensic stream and start a fresh one.
+    # The ForensicBuffer captures every sampled signal to disk on a 5 s
+    # cadence so a hard system crash (Kernel-Power 41, BSOD, power loss)
+    # doesn't take the pre-crash signal history with it. Two generations
+    # are always preserved -- the file stays readable as raw JSONL.
+    rotate_forensics_on_startup(sd)
+    forensics = ForensicBuffer(sd)
+    forensics.start()
+
     # Best-effort spawn LibreHardwareMonitor as a child process before we
     # probe collectors. Two reasons to do this here rather than letting
     # the user manage LHM separately:
@@ -385,7 +396,11 @@ def run_service(
 
             # Push samples into the API state mirror BEFORE evaluation so the
             # tray dashboard can show "current value" even if the rule abstained.
-            api_state.record_tick(now_unix=time.time(), samples=samples)
+            tick_unix = time.time()
+            api_state.record_tick(now_unix=tick_unix, samples=samples)
+            # Stage this tick for the on-disk forensic stream. Non-blocking;
+            # the actual write happens in the flusher thread.
+            forensics.record(samples, ts=tick_unix)
 
             # Evaluate
             try:
@@ -491,6 +506,14 @@ def run_service(
                 lhm_supervisor.stop()
             except Exception:
                 _log.debug("lhm_supervisor.stop() raised", exc_info=True)
+        # Drain pending forensic samples to disk before exit. On a clean
+        # shutdown this is a tiny last batch; on a crash the finally
+        # block may not run at all, which is exactly why the flusher
+        # writes every 5 s rather than only at exit.
+        try:
+            forensics.stop()
+        except Exception:
+            _log.debug("forensics.stop() raised", exc_info=True)
         audit.write_shutdown("normal" if exit_code == 0 else "error")
         _log.info("AT-Field service stopped (exit=%d, ticks=%d)", exit_code, ticks)
 

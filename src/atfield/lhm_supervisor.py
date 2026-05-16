@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -53,6 +54,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
+
+from atfield.lhm_config import ensure_lhm_config
 
 __all__ = [
     "LhmStatus",
@@ -62,6 +65,7 @@ __all__ = [
     "ProcessSpawner",
     "RealProcessSpawner",
     "find_lhm_executable",
+    "probe_lhm_http",
 ]
 
 
@@ -149,6 +153,22 @@ class LhmSupervisorConfig:
     shutdown_grace_s: float = 5.0
     """How long to wait for LHM's terminate() before kill() on shutdown."""
 
+    http_ready_timeout_s: float = 15.0
+    """How long to wait after spawn for LHM's HTTP server to start
+    accepting connections on ``port``. LHM takes a few seconds on
+    cold start (kernel driver load + sensor enumeration). When this
+    timeout elapses without the port opening, the supervisor records
+    a clear error on :attr:`LhmStatus.last_error` -- distinguishing
+    "spawned but unreachable" from "exited cleanly" so the dashboard
+    can show the right diagnosis."""
+
+    manage_config: bool = True
+    """Whether to call :func:`atfield.lhm_config.ensure_lhm_config`
+    before each spawn. True in production -- LHM's persisted config
+    might have been overwritten by the user / a prior LHM run /
+    a previous AT-Field version, and we want the HTTP server reliably
+    enabled. Disabled in tests where there's no real exe."""
+
 
 @dataclass
 class LhmStatus:
@@ -163,6 +183,10 @@ class LhmStatus:
     last_exit_at: float | None = None
     next_retry_at: float | None = None
     last_error: str | None = None
+    # True once LHM's HTTP server has accepted at least one connection
+    # since the last spawn. Distinguishes "process is alive but server
+    # never came up" from "process is alive and serving data".
+    http_ready: bool = False
     # Whether the supervisor is in shutdown -- distinguishes "LHM died,
     # we're respawning" from "we asked LHM to stop, expected".
     stopping: bool = field(default=False)
@@ -261,6 +285,7 @@ class LhmSupervisor:
                 last_exit_at=self._status.last_exit_at,
                 next_retry_at=self._status.next_retry_at,
                 last_error=self._status.last_error,
+                http_ready=self._status.http_ready,
                 stopping=self._status.stopping,
             )
 
@@ -318,21 +343,45 @@ class LhmSupervisor:
     def _spawn_once(self) -> None:
         """Spawn LHM and update status. Raises on spawn failure.
 
-        LHM 0.9.x doesn't take CLI flags for server/port -- those are read
-        from ``LibreHardwareMonitor.config`` (an XML file LHM persists in
-        its own directory). The bundled installer drops a pre-baked
-        config there with the web server enabled on the port the
-        AT-Field LHM collector reads (8085 by default). The
-        ``port`` field on this config is informational only at the
-        moment, kept on the dataclass so that future LHM versions which
-        DO accept a CLI port flag can be supported without an API
-        change. ``extra_args`` is still honored as an escape hatch.
+        LHM 0.9.x doesn't take CLI flags for server/port -- those are
+        read from ``LibreHardwareMonitor.config`` (an XML file LHM
+        persists next to its exe). LHM tends to rewrite that file from
+        its in-memory settings on first boot, which has historically
+        clobbered our pre-baked version (and broke us between v0.9.4
+        and v0.9.6). The robust pattern is to *re-assert* the config
+        on every spawn:
+
+        1. Patch the config file to enforce our required keys
+           (HTTP server enabled, port = our port, start minimized,
+           no auto-update). User-set unrelated keys are preserved.
+        2. Spawn the process.
+        3. Probe the configured port for up to
+           ``http_ready_timeout_s`` seconds. If we never see the
+           server, log a clear error and let the supervise loop
+           handle restart on the next iteration -- we don't kill
+           the process here because a slow-starting LHM might still
+           be useful once it comes up; subsequent restarts will
+           catch a permanently broken state.
         """
+        if self._config.manage_config:
+            lhm_dir = Path(self._config.executable).parent
+            try:
+                ensure_lhm_config(lhm_dir, port=self._config.port)
+            except OSError as exc:
+                # Config write failures are not fatal -- LHM may have
+                # a usable config from a previous run, or the user may
+                # have set things via the GUI. Log loudly and proceed.
+                _log.warning(
+                    "could not ensure LHM config at %s: %s; "
+                    "spawning anyway with whatever is on disk",
+                    lhm_dir, exc,
+                )
+
         args = [
             str(self._config.executable),
             *self._config.extra_args,
         ]
-        _log.info("starting LHM: %s (port from config file)", " ".join(args))
+        _log.info("starting LHM: %s (port=%d via config)", " ".join(args), self._config.port)
         proc = self._spawner.spawn(args)
         with self._proc_lock:
             self._proc = proc
@@ -345,6 +394,42 @@ class LhmSupervisor:
             )
             self._status.next_retry_at = None
             self._status.last_error = None
+            self._status.http_ready = False
+
+        # Best-effort port probe. Failures don't tear down the process
+        # -- LHM might come up late, and an unreachable HTTP server is
+        # surfaced via the collector's own probe path. What we want to
+        # avoid is the dashboard reporting "LHM running" while the
+        # collector reports "LHM unreachable", which is exactly what
+        # silently broke between v0.9.4 and v0.9.6.
+        #
+        # ``http_ready_timeout_s <= 0`` skips the probe entirely. Useful
+        # in tests with fake spawners that have no real port to probe.
+        if self._config.http_ready_timeout_s > 0:
+            if probe_lhm_http(
+                host="127.0.0.1",
+                port=self._config.port,
+                timeout_s=self._config.http_ready_timeout_s,
+                sleep=self._sleep,
+                clock=self._clock,
+                stop_event=self._stop_event,
+            ):
+                with self.status_lock:
+                    self._status.http_ready = True
+                _log.info("LHM HTTP server up on 127.0.0.1:%d", self._config.port)
+            else:
+                with self.status_lock:
+                    self._status.last_error = (
+                        f"LHM started (pid={proc.pid}) but its HTTP server did "
+                        f"not come up on port {self._config.port} within "
+                        f"{self._config.http_ready_timeout_s:.0f}s. "
+                        "Check that the config file enables the web server -- "
+                        "see docs/sensors.md."
+                    )
+                _log.warning(
+                    "LHM spawned (pid=%d) but port %d did not open within %.0fs",
+                    proc.pid, self._config.port, self._config.http_ready_timeout_s,
+                )
 
     def _wait_for_proc(self) -> int | None:
         """Block until the current LHM proc exits or stop is requested.
@@ -444,3 +529,43 @@ def find_lhm_executable(
         if c.is_file():
             return c
     return None
+
+
+# ---------------------------------------------------------------------------
+# Port probe
+# ---------------------------------------------------------------------------
+
+
+def probe_lhm_http(
+    *,
+    host: str,
+    port: int,
+    timeout_s: float,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    stop_event: threading.Event | None = None,
+    poll_interval_s: float = 0.5,
+) -> bool:
+    """Poll ``host:port`` until a TCP connect succeeds or ``timeout_s``
+    elapses. Returns True on success, False on timeout.
+
+    A successful TCP connect means LHM's HTTP server is bound and ready
+    to serve ``/data.json`` -- the collector will be able to read it on
+    its next sample. We don't bother sending an HTTP GET as part of the
+    probe; LHM doesn't open the listening socket until the server is
+    fully initialized, so the TCP handshake is sufficient.
+
+    Returns early if ``stop_event`` is set, so a supervisor shutdown
+    during a slow LHM start doesn't have to wait the full timeout.
+    """
+    deadline = clock() + timeout_s
+    while clock() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return True
+        except (TimeoutError, OSError):
+            pass
+        sleep(poll_interval_s)
+    return False

@@ -32,6 +32,24 @@ If you build AT-Field from source you must comply with the same terms.
 The `scripts/fetch_lhm.ps1` script is the canonical, automated way to
 populate this directory.
 
+## Configuration
+
+We do **not** vendor a static `LibreHardwareMonitor.config` here.
+
+We tried that in v0.2.0 and it broke between LHM 0.9.4 and 0.9.6
+because LHM 0.9.6 rewrites the file from its in-memory settings on
+first boot — overwriting our keys before AT-Field could connect to
+the HTTP server. The robust pattern lives in
+`atfield.lhm_config.ensure_lhm_config()`: the supervisor re-asserts
+the AT-Field-required keys (web server enabled, port = 8085,
+minimize to tray, no auto-update) **on every spawn**, merging into
+whatever's currently on disk. Unrelated keys the user set via the
+LHM UI are preserved.
+
+That makes us version-agnostic: any LHM 0.9.x release that still
+honors the standard .NET `appSettings` schema (which all of them do)
+will Just Work, regardless of what the upstream defaults look like.
+
 ## How the binaries get here
 
 This directory is intentionally empty in source control. Binaries are

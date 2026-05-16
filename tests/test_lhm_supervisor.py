@@ -14,10 +14,12 @@ from pathlib import Path
 
 import pytest
 
+from atfield.lhm_config import LHM_CONFIG_FILENAME, REQUIRED_KEYS
 from atfield.lhm_supervisor import (
     LhmSupervisor,
     LhmSupervisorConfig,
     find_lhm_executable,
+    probe_lhm_http,
 )
 
 # ---------------------------------------------------------------------------
@@ -106,6 +108,13 @@ def _config(tmp_path: Path) -> LhmSupervisorConfig:
         backoff_max_s=0.2,
         backoff_factor=2.0,
         shutdown_grace_s=0.2,
+        # Tests use fake spawners; there's no real port to probe.
+        # 0.0 disables the probe entirely.
+        http_ready_timeout_s=0.0,
+        # Tests don't ship a real LHM exe so the parent dir is a
+        # tmp scratch space; the config writer would no-op there
+        # but skipping it removes one source of cross-test noise.
+        manage_config=False,
     )
 
 
@@ -153,6 +162,8 @@ class TestSpawnedArgs:
             port=9090,
             extra_args=("--config", "custom.xml"),
             backoff_initial_s=0.05,
+            http_ready_timeout_s=0.0,
+            manage_config=False,
         )
         sup = LhmSupervisor(cfg, spawner=spawner)
         sup.start()
@@ -246,6 +257,8 @@ class TestSpawnFailure:
             executable=tmp_path / "FakeLHM.exe",
             backoff_initial_s=0.05,
             backoff_max_s=0.1,
+            http_ready_timeout_s=0.0,
+            manage_config=False,
         )
         sup = LhmSupervisor(cfg, spawner=spawner)
         sup.start()
@@ -341,3 +354,134 @@ class TestFindLhmExecutable:
         (extras / "LibreHardwareMonitor.exe").write_bytes(b"")
         result = find_lhm_executable(extra_search_paths=(extras,))
         assert result == extras / "LibreHardwareMonitor.exe"
+
+
+# ---------------------------------------------------------------------------
+# Config management on spawn (post-v0.2 robustness fix)
+# ---------------------------------------------------------------------------
+
+
+class TestConfigManagement:
+    """The supervisor re-asserts LHM's config on every spawn.
+
+    This is the central robustness property after the v0.9.4 -> v0.9.6
+    regression where LHM rewrote our pre-baked config and the HTTP
+    server silently stopped coming up. Now: regardless of what's on
+    disk before spawn, our required keys are present after spawn.
+    """
+
+    def test_ensures_config_before_spawn_when_enabled(self, tmp_path):
+        spawner = _ScriptedSpawner()
+        spawner.script.append(_FakeProc(exit_code=None, linger_until_terminated=True))
+        cfg = LhmSupervisorConfig(
+            executable=tmp_path / "FakeLHM.exe",
+            port=8085,
+            backoff_initial_s=0.05,
+            http_ready_timeout_s=0.0,
+            manage_config=True,
+        )
+        sup = LhmSupervisor(cfg, spawner=spawner)
+        sup.start()
+        try:
+            assert spawner.wait_for_spawn(2.0)
+            cfg_path = tmp_path / LHM_CONFIG_FILENAME
+            assert cfg_path.exists(), (
+                "supervisor should have ensured the LHM config file before spawn"
+            )
+            text = cfg_path.read_text(encoding="utf-8")
+            for key in REQUIRED_KEYS:
+                assert key in text, f"required LHM key {key!r} missing from config"
+            assert 'value="8085"' in text  # port matches config
+        finally:
+            sup.stop()
+
+    def test_overwrites_stale_config_keys_but_preserves_unrelated(self, tmp_path):
+        # Pre-populate a config with our keys WRONG and an unrelated
+        # user key. The supervisor should fix ours and leave theirs alone.
+        cfg_path = tmp_path / LHM_CONFIG_FILENAME
+        cfg_path.write_text(
+            """<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <appSettings>
+    <add key="runWebServerMenuItem" value="False" />
+    <add key="webServerPortNumeric.Value" value="9999" />
+    <add key="userFavoriteSensor" value="GPU Core Temp" />
+  </appSettings>
+</configuration>
+""",
+            encoding="utf-8",
+        )
+        spawner = _ScriptedSpawner()
+        spawner.script.append(_FakeProc(exit_code=None, linger_until_terminated=True))
+        cfg = LhmSupervisorConfig(
+            executable=tmp_path / "FakeLHM.exe",
+            port=8085,
+            backoff_initial_s=0.05,
+            http_ready_timeout_s=0.0,
+            manage_config=True,
+        )
+        sup = LhmSupervisor(cfg, spawner=spawner)
+        sup.start()
+        try:
+            assert spawner.wait_for_spawn(2.0)
+            text = cfg_path.read_text(encoding="utf-8")
+            assert 'key="runWebServerMenuItem" value="True"' in text
+            assert 'key="webServerPortNumeric.Value" value="8085"' in text
+            assert 'key="userFavoriteSensor" value="GPU Core Temp"' in text, (
+                "supervisor must preserve unrelated user keys"
+            )
+        finally:
+            sup.stop()
+
+
+# ---------------------------------------------------------------------------
+# Port probe
+# ---------------------------------------------------------------------------
+
+
+class TestProbeLhmHttp:
+    def test_returns_true_when_port_accepts_connection(self):
+        # Bind a real listening socket on an ephemeral port so the
+        # probe's TCP connect succeeds.
+        import socket as _sock
+
+        srv = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        try:
+            ok = probe_lhm_http(
+                host="127.0.0.1",
+                port=port,
+                timeout_s=2.0,
+                sleep=lambda _: None,
+                poll_interval_s=0.01,
+            )
+            assert ok is True
+        finally:
+            srv.close()
+
+    def test_returns_false_when_port_never_opens(self):
+        # An ephemeral port that's NOT bound should never accept --
+        # we expect timeout.
+        ok = probe_lhm_http(
+            host="127.0.0.1",
+            port=1,  # privileged + unlikely to be bound
+            timeout_s=0.2,
+            sleep=lambda _: None,
+            poll_interval_s=0.05,
+        )
+        assert ok is False
+
+    def test_stop_event_short_circuits_wait(self):
+        stop = threading.Event()
+        stop.set()
+        ok = probe_lhm_http(
+            host="127.0.0.1",
+            port=1,
+            timeout_s=10.0,  # would otherwise wait 10s
+            sleep=lambda _: None,
+            stop_event=stop,
+            poll_interval_s=0.05,
+        )
+        assert ok is False

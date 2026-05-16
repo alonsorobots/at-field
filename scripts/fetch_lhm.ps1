@@ -23,21 +23,29 @@
     dir, where atfield-service.exe lives).
 
 .PARAMETER Version
-    LHM tag to fetch. Default: v0.9.4 (stable as of 2026-Q1, ships the
-    --server CLI we depend on).
+    LHM tag to fetch. Default: v0.9.6 (released 2026-02-14). Picked
+    over v0.9.4 because it:
+      * Adds the NvAPI workaround for the RTX 5090 memory-junction
+        sensor that NVIDIA removed from the public NVML / nvidia-smi
+        surface in the 50-series driver (LHM PR #1878 / issue #1686).
+      * Adds NVIDIA GPU core voltage as a first-class signal (PR #2175).
+      * Adds foundational support for MSI B840/B850, X870(E), and Z890
+        motherboards (PR #2216), plus ASUS Astral 50-series GPUs.
+      * Adds Thermal Grizzly WireView Pro 2 + Arctic Fan Controller
+        coverage for users with those PSU/fan monitors inline.
 
 .PARAMETER Force
     Overwrite an existing LibreHardwareMonitor.exe at the destination.
 
 .EXAMPLE
     pwsh scripts/fetch_lhm.ps1
-    pwsh scripts/fetch_lhm.ps1 -Destination dist/atfield -Version v0.9.4
+    pwsh scripts/fetch_lhm.ps1 -Destination dist/atfield -Version v0.9.6
 #>
 
 [CmdletBinding()]
 param(
     [string]$Destination = (Join-Path (Get-Location) "dist/atfield"),
-    [string]$Version     = "v0.9.4",
+    [string]$Version     = "v0.9.6",
     [switch]$Force
 )
 
@@ -54,11 +62,18 @@ if (-not (Test-Path $Destination)) {
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 }
 
-# LHM publishes a `LibreHardwareMonitor-net472.zip` under each release
-# (the .NET 4.7.2 build is the one with the lowest install footprint --
-# .NET Framework 4.7.2 is in-box on Windows 10 1803+ / 11). The CLI
-# `--server`/`--port` flags we depend on land in v0.9.x.
-$asset = "LibreHardwareMonitor-net472.zip"
+# LHM publishes two zips per release as of v0.9.5+:
+#   * LibreHardwareMonitor.zip           -- .NET Framework 4.7.2 build
+#                                          (in-box on Windows 10 1803+ / 11)
+#   * LibreHardwareMonitor.NET.10.zip    -- .NET 10 build, smaller but
+#                                          requires the .NET 10 runtime
+# We grab the .NET Framework build for the same in-box compatibility
+# reasoning we used in v0.2 -- it runs on stock Windows 10/11 without
+# a separate runtime install.
+#
+# (Pre-0.9.5 the file was named LibreHardwareMonitor-net472.zip; the
+# rename happened upstream in v0.9.5.)
+$asset = "LibreHardwareMonitor.zip"
 $url = "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/download/$Version/$asset"
 
 $zipPath = Join-Path $env:TEMP "lhm-$Version.zip"
@@ -84,18 +99,17 @@ if (-not (Test-Path $lhmExe)) {
     exit 1
 }
 
-# Drop our pre-baked LibreHardwareMonitor.config alongside the binary so
-# the web server starts on the AT-Field-expected port (8085) without
-# the user clicking through LHM's Options menu. LHM rewrites this file
-# when the user changes settings, but our defaults are what they get on
-# first boot. A user-tweaked file is preserved (we don't overwrite if
-# present, unless -Force was supplied).
-$configSrc = Join-Path $PSScriptRoot "../vendor/lhm/LibreHardwareMonitor.config"
-$configDst = Join-Path $Destination "LibreHardwareMonitor.config"
-if ((Test-Path $configSrc) -and (-not (Test-Path $configDst) -or $Force.IsPresent)) {
-    Copy-Item -Path $configSrc -Destination $configDst -Force
-    Write-Host "Wrote AT-Field LHM config: $configDst"
-}
+# Note: we used to ship a pre-baked LibreHardwareMonitor.config here
+# (in v0.2.0). That approach broke between LHM v0.9.4 and v0.9.6 because
+# LHM rewrites the file from its in-memory settings on first boot,
+# overwriting our keys before the supervisor could connect.
+#
+# The robust pattern lives in atfield.lhm_config: the supervisor
+# re-asserts the config on every spawn, merging our required keys
+# (web server enabled, port = 8085, start minimized, no auto-update)
+# into whatever LHM / the user left on disk. So we don't ship a
+# config file at build time anymore -- the supervisor materializes
+# one on first run.
 
 Write-Host ""
 Write-Host "Vendored LHM $Version into $Destination"

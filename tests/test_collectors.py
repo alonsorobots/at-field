@@ -132,3 +132,109 @@ class TestLhmCollectorBehavior:
         # Should not raise; just return empty
         assert c.sample() == {}
         c.shutdown()
+
+
+class TestLhmSensorDiscovery:
+    """White-box tests of the JSON-tree walker.
+
+    LHM's sensor tree is too tedious to mock end-to-end via HTTP, but the
+    walker itself is pure -- we can hand it a fixture that mirrors a
+    realistic LHM 0.9.6 payload and verify the right signals come out.
+    """
+
+    @staticmethod
+    def _gpu_node(label: str, junction_label: str | None = None) -> dict:
+        children = []
+        if junction_label is not None:
+            children.append(
+                {"Text": junction_label, "Value": "84.0 °C", "Children": []}
+            )
+        children.append(
+            {"Text": "GPU Core", "Value": "67.0 °C", "Children": []}
+        )
+        return {"Text": label, "Children": children}
+
+    @staticmethod
+    def _cpu_node(label: str, package_label: str = "CPU Package") -> dict:
+        return {
+            "Text": label,
+            "Children": [
+                {"Text": package_label, "Value": "55.0 °C", "Children": []},
+                {"Text": "Core #1", "Value": "53.0 °C", "Children": []},
+            ],
+        }
+
+    @staticmethod
+    def _mb_voltage_node() -> dict:
+        return {
+            "Text": "ASUS Mainboard / IT8688E",
+            "Children": [
+                {"Text": "+12V", "Value": "12.096 V", "Children": []},
+                {"Text": "+5V", "Value": "5.040 V", "Children": []},
+                {"Text": "+3.3V", "Value": "3.312 V", "Children": []},
+                {"Text": "VCore", "Value": "1.184 V", "Children": []},
+                # An anonymous "Voltage #5" must NOT be picked up.
+                {"Text": "Voltage #5", "Value": "1.024 V", "Children": []},
+            ],
+        }
+
+    def test_discovers_gpu_junction_and_cpu_package(self):
+        tree = {
+            "Text": "Computer",
+            "Children": [
+                self._gpu_node("NVIDIA GeForce RTX 5090", "GPU Memory Junction"),
+                self._cpu_node("Intel Core i9-13900K"),
+            ],
+        }
+        c = LhmCollector()
+        paths = c._discover_sensors(tree)
+        signals = {p.signal_name for p in paths}
+        assert "gpu.0.mem_junction_temp_c" in signals
+        assert "system.cpu_package_temp_c" in signals
+        # Units flow through to Sample.unit -- celsius for these.
+        for p in paths:
+            assert p.unit == "celsius"
+
+    def test_discovers_psu_rail_voltages(self):
+        tree = {
+            "Text": "Computer",
+            "Children": [self._mb_voltage_node()],
+        }
+        c = LhmCollector()
+        paths = c._discover_sensors(tree)
+        sigs_to_paths = {p.signal_name: p for p in paths}
+        assert "system.psu_12v_volts" in sigs_to_paths
+        assert "system.psu_5v_volts" in sigs_to_paths
+        assert "system.psu_3v3_volts" in sigs_to_paths
+        assert "system.cpu_vcore_volts" in sigs_to_paths
+        # The unlabeled "Voltage #5" sensor must not have been emitted.
+        assert not any(p.full_path.endswith("Voltage #5") for p in paths)
+        # Voltage paths carry unit="volts".
+        for sig in ("system.psu_12v_volts", "system.cpu_vcore_volts"):
+            assert sigs_to_paths[sig].unit == "volts"
+
+    def test_voltage_dedup_keeps_first_match(self):
+        # Two +12V sensors (e.g. SuperIO and EC) -- we must emit only one.
+        tree = {
+            "Text": "Computer",
+            "Children": [
+                {
+                    "Text": "Mainboard",
+                    "Children": [
+                        {"Text": "+12V", "Value": "12.10 V", "Children": []},
+                    ],
+                },
+                {
+                    "Text": "EC",
+                    "Children": [
+                        {"Text": "+12V", "Value": "12.05 V", "Children": []},
+                    ],
+                },
+            ],
+        }
+        c = LhmCollector()
+        paths = c._discover_sensors(tree)
+        rail_paths = [p for p in paths if p.signal_name == "system.psu_12v_volts"]
+        assert len(rail_paths) == 1
+        # First match wins; should be the Mainboard reading.
+        assert "Mainboard" in rail_paths[0].full_path

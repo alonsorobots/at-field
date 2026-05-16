@@ -1,8 +1,8 @@
-"""LibreHardwareMonitor HTTP collector: VRAM-junction temp + CPU-package temp.
+"""LibreHardwareMonitor HTTP collector: thermal + voltage sensors.
 
 LHM exposes a sensor-tree JSON document at ``http://127.0.0.1:8085/data.json``
 when its built-in HTTP server is enabled. We poll that and pattern-match on
-sensor names to extract the two values NVML and psutil cannot give us:
+sensor names to extract values NVML and psutil cannot give us:
 
 * **GPU memory junction temperature** -- the VRAM die temp, which on
   NVIDIA consumer cards (RTX 30/40/50 series) is the actual temperature
@@ -12,6 +12,11 @@ sensor names to extract the two values NVML and psutil cannot give us:
   WMI's ``MSAcpi_ThermalZoneTemperature`` is unreliable on consumer
   motherboards (famously returns 27.85 C constant); LHM reads the actual
   CPU sensors via the WinRing0 driver.
+* **PSU rail voltages** -- ``+12V``, ``+5V``, ``+3.3V`` rails as exposed
+  by Super I/O voltage sensors on the motherboard. Catches PSU sag
+  patterns that correlate with GPU TDR / Kernel-Power 41 events on
+  high-transient cards (RTX 4090 / 5090). Also surfaces VCore (CPU core
+  voltage) and GPU core voltage when reported.
 
 This is the most fragile collector in the project. Things that go wrong:
 
@@ -20,6 +25,10 @@ This is the most fragile collector in the project. Things that go wrong:
 * Sensor names drift between LHM versions (e.g. "GPU Memory Junction" vs
   "Memory Junction" vs "GPU Hot Spot"). We pattern-match a list of known
   aliases and log which one matched at probe time.
+* Voltage rails on consumer boards may be labelled by Super I/O register
+  ("Voltage #2", "Voltage #4") rather than rail name -- some boards
+  expose nothing useful here. We emit only the labels we can confidently
+  identify, never guessing.
 * Brief HTTP timeouts during sample() -> single failures are absorbed,
   three consecutive failures trip DEGRADED.
 """
@@ -56,6 +65,72 @@ _CPU_PACKAGE_PATTERNS: Final = (
     re.compile(r"core \(tctl/tdie\)", re.IGNORECASE),  # AMD Ryzen variant
 )
 
+# Substrings (case-insensitive) that mark a node as belonging to a GPU
+# device. LHM names devices by vendor + model ("NVIDIA GeForce RTX 5090",
+# "AMD Radeon RX 7900 XTX") rather than the literal word "GPU", so a
+# naive ``"gpu" in name`` check misses real cards. We scope GPU sensor
+# attribution by checking any of these markers in the parent path.
+_GPU_DEVICE_MARKERS: Final = (
+    "gpu",
+    "nvidia",
+    "geforce",
+    "radeon",
+    " rtx ",
+    " gtx ",
+    "quadro",
+    "tesla ",
+)
+
+# Same idea for CPUs. LHM labels CPU nodes "Intel Core i9-13900K" or
+# "AMD Ryzen 9 7950X3D" rather than the literal word "CPU".
+_CPU_DEVICE_MARKERS: Final = (
+    "cpu",
+    "intel",
+    " core ",
+    " core(",  # "Core(TM)"
+    "amd",
+    "ryzen",
+    "epyc",
+    "threadripper",
+    "xeon",
+)
+
+
+def _looks_like_gpu_device(path_text: str) -> bool:
+    lower = " " + path_text.lower() + " "
+    return any(marker in lower for marker in _GPU_DEVICE_MARKERS)
+
+
+def _looks_like_cpu_device(path_text: str) -> bool:
+    lower = " " + path_text.lower() + " "
+    return any(marker in lower for marker in _CPU_DEVICE_MARKERS)
+
+
+# Voltage rail patterns. Each entry maps a regex to the canonical signal
+# suffix we'll emit. The system. prefix is added at discovery time. We
+# intentionally only enumerate well-known PSU rails -- random Super I/O
+# "Voltage #N" labels are too unreliable to wire into rules, even though
+# users can still see them in LHM directly.
+#
+# Why these matter: PSU transients (sub-millisecond +12V sag during a
+# GPU power burst) are the leading cause of NVIDIA TDR / Kernel-Power 41
+# events on high-end consumer cards. Logging the rail voltage at 1 Hz
+# won't catch the actual sag (those happen in microseconds) but a
+# *baseline* +12V that drifts below 11.7 V or above 12.5 V is a red
+# flag that the rail is loaded at the edge of its regulation envelope.
+_RAIL_VOLTAGE_PATTERNS: Final = (
+    # Order matters: more-specific labels first so "+12V" doesn't gobble
+    # "+12V VR" or similar.
+    (re.compile(r"\+?12\s*v(?:olts?)?$", re.IGNORECASE), "psu_12v_volts"),
+    (re.compile(r"\+?12\s*v rail", re.IGNORECASE), "psu_12v_volts"),
+    (re.compile(r"\+?5\s*v(?:olts?)?$", re.IGNORECASE), "psu_5v_volts"),
+    (re.compile(r"\+?5\s*v rail", re.IGNORECASE), "psu_5v_volts"),
+    (re.compile(r"\+?3\.3\s*v(?:olts?)?$", re.IGNORECASE), "psu_3v3_volts"),
+    (re.compile(r"\+?3\.3\s*v rail", re.IGNORECASE), "psu_3v3_volts"),
+    (re.compile(r"vcore", re.IGNORECASE), "cpu_vcore_volts"),
+    (re.compile(r"cpu core voltage", re.IGNORECASE), "cpu_vcore_volts"),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class _SensorPath:
@@ -64,6 +139,7 @@ class _SensorPath:
     signal_name: str
     full_path: str  # human-readable; for logging
     indices: tuple[int, ...]  # path through Children[i] arrays
+    unit: str = "celsius"  # "celsius" | "volts" -- governs Sample.unit
 
 
 class LhmCollector:
@@ -159,7 +235,7 @@ class LhmCollector:
             if value is None:
                 continue
             out[path.signal_name] = Sample(
-                value=value, taken_at_ns=now, source_id=_NAME, unit="celsius"
+                value=value, taken_at_ns=now, source_id=_NAME, unit=path.unit
             )
 
         if out:
@@ -179,10 +255,13 @@ class LhmCollector:
         """Walk the LHM JSON tree, return sensor paths matching our patterns.
 
         For GPU memory junction temps we want one per GPU. For CPU package
-        we want one per CPU socket. We track which devices we've matched
-        so we don't double-count when LHM exposes both "Memory Junction"
-        and "GPU Hot Spot" on the same device (we prefer the first
-        pattern match, hence the ordered tuple above).
+        we want one per CPU socket. For PSU rail voltages we want one per
+        rail label, regardless of where in the tree it lives -- some
+        boards put +12V under "Mainboard / IT8688E", others under "CPU /
+        Voltages". We track which devices we've matched so we don't
+        double-count when LHM exposes both "Memory Junction" and "GPU
+        Hot Spot" on the same device (we prefer the first pattern match,
+        hence the ordered tuple above).
         """
         results: list[_SensorPath] = []
         gpu_idx = 0
@@ -191,6 +270,10 @@ class LhmCollector:
         # junction or package sensor.
         matched_gpu_devices: set[str] = set()
         matched_cpu_devices: set[str] = set()
+        # Voltages: only emit each rail name once even if multiple sensors
+        # claim the same label (LHM can expose +12V from both the SuperIO
+        # and an EC, with different accuracy).
+        emitted_voltage_signals: set[str] = set()
 
         def walk(node: dict[str, Any], path_text: list[str], indices: list[int]) -> None:
             nonlocal gpu_idx, cpu_idx
@@ -198,13 +281,14 @@ class LhmCollector:
             new_path = [*path_text, text]
             full_text = " / ".join(new_path)
 
-            # Is this leaf a temperature sensor with a numeric value?
+            # Is this leaf a sensor with a numeric value?
             if "Value" in node and isinstance(node.get("Value"), str):
                 value_str = node["Value"]
+                # Temperature sensors carry a degree symbol or trailing C.
                 if "°C" in value_str or "C" in value_str:
                     # GPU junction match?
                     device_key = " / ".join(new_path[:-1])  # parent path
-                    if "gpu" in device_key.lower() and device_key not in matched_gpu_devices:
+                    if _looks_like_gpu_device(device_key) and device_key not in matched_gpu_devices:
                         for pat in _VRAM_JUNCTION_PATTERNS:
                             if pat.search(full_text):
                                 results.append(
@@ -212,12 +296,13 @@ class LhmCollector:
                                         signal_name=f"gpu.{gpu_idx}.mem_junction_temp_c",
                                         full_path=full_text,
                                         indices=tuple(indices),
+                                        unit="celsius",
                                     )
                                 )
                                 matched_gpu_devices.add(device_key)
                                 gpu_idx += 1
                                 break
-                    if "cpu" in device_key.lower() and device_key not in matched_cpu_devices:
+                    if _looks_like_cpu_device(device_key) and device_key not in matched_cpu_devices:
                         for pat in _CPU_PACKAGE_PATTERNS:
                             if pat.search(full_text):
                                 results.append(
@@ -229,11 +314,39 @@ class LhmCollector:
                                         ),
                                         full_path=full_text,
                                         indices=tuple(indices),
+                                        unit="celsius",
                                     )
                                 )
                                 matched_cpu_devices.add(device_key)
                                 cpu_idx += 1
                                 break
+
+                # Voltage sensors carry a "V" suffix -- but we have to
+                # avoid false-positives ("Voltage" in path text is fine,
+                # "10.0 W" power readings end in W). Match strictly on
+                # the value string suffix.
+                stripped = value_str.strip()
+                if stripped.endswith("V") or stripped.endswith("v"):
+                    # Match against the leaf text (the sensor's own name)
+                    # rather than full_text -- otherwise the parent path
+                    # containing "+12V VRM" could spuriously match a child
+                    # voltage sensor.
+                    leaf_text = text
+                    for pat, suffix in _RAIL_VOLTAGE_PATTERNS:
+                        if pat.search(leaf_text):
+                            sig = f"system.{suffix}"
+                            if sig in emitted_voltage_signals:
+                                break
+                            results.append(
+                                _SensorPath(
+                                    signal_name=sig,
+                                    full_path=full_text,
+                                    indices=tuple(indices),
+                                    unit="volts",
+                                )
+                            )
+                            emitted_voltage_signals.add(sig)
+                            break
 
             for i, child in enumerate(node.get("Children", []) or []):
                 walk(child, new_path, [*indices, i])
