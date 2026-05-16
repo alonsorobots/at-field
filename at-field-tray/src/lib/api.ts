@@ -84,6 +84,36 @@ export interface LastAction {
   script?: string | null;
 }
 
+/**
+ * Snapshot of the LhmSupervisor's per-spawn state, surfaced through
+ * /health when the service is supervising LHM. ``null`` when no
+ * supervisor is bound (e.g. LHM not on disk; user runs HWiNFO instead).
+ *
+ * The ``state`` field is a single token meant for switch-on-string in
+ * the UI; the rest of the fields are the raw status for callers (e.g.
+ * a future debug tab) that want the matrix.
+ */
+export interface LhmSupervisorView {
+  /**
+   * - "ready"               process up + HTTP server bound + responding
+   * - "process_up_no_http"  process is alive but its HTTP server didn't bind
+   *                         (config wrong, port stolen, single-instance LHM)
+   * - "backoff"             process down, supervisor scheduling next retry
+   * - "stopping"            shutdown in progress
+   * - "down"                process never came up and we're not in backoff
+   */
+  state: "ready" | "process_up_no_http" | "backoff" | "stopping" | "down";
+  running: boolean;
+  http_ready: boolean;
+  pid: number | null;
+  started_at: number | null;
+  restart_count: number;
+  last_exit_code: number | null;
+  last_exit_at: number | null;
+  next_retry_at: number | null;
+  last_error: string | null;
+}
+
 export interface HealthSnapshot {
   version: string;
   mode: Mode;
@@ -95,6 +125,8 @@ export interface HealthSnapshot {
   last_tick_at: number | null;
   heartbeat_age_s: number | null;
   collectors: CollectorView[];
+  /** Null when AT-Field is not supervising LHM (e.g. HWiNFO-only setup). */
+  lhm_supervisor: LhmSupervisorView | null;
   rules_active: number;
   rules_disabled: number;
   last_action: LastAction | null;

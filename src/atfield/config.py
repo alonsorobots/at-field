@@ -204,6 +204,42 @@ class AtFieldConfig:
 
 
 def _default_rules() -> tuple[RuleConfig, ...]:
+    """The Conservative profile from PLANNING.md §3 / §8 plus the
+    GPU-VRAM-pressure default added in v0.3.
+
+    Every rule shipped here is wildcard-matched across enumerated
+    devices (``gpu.*.x`` expands to one rule instance per GPU). Rules
+    whose signal isn't currently emitted by any collector are
+    automatically disabled with a clear reason on /health, so e.g.
+    ``vram-junction-hot`` quietly stays off on rigs without LHM.
+
+    Threshold rationale (per docs/tuning.md):
+
+    * ``vram-junction-hot`` 90°C — RTX 4090/5090 GDDR7 spec is 95°C
+      continuous, 105°C thermal-shutdown. 90°C with a 20s sustained
+      window kills a job ~5°C before the card starts throttling itself
+      and well before the 105°C trip. Sourced from NVIDIA Studio
+      driver telemetry + community datapoints; conservative for
+      bench rigs, can be raised via the slider for users who run
+      undervolted cards.
+    * ``vram-pressure`` 92% — CUDA OOM is the single most common
+      training crash. allocator fragmentation typically triggers
+      OOM around 93-95% of the visible VRAM. 92% with a 30s window
+      catches sustained VRAM exhaustion (which precedes OOM) without
+      firing on the brief spike at the start of a forward pass.
+      30s avoids fighting the per-step jitter of large model
+      training. NVML's ``vram_used_percent`` is the same number
+      ``nvidia-smi --query-gpu=memory.used`` reports.
+    * ``gpu-core-hot`` 83°C — the rated junction-temp limit for
+      Ada/Blackwell silicon is 90°C; we kill at 83°C to leave headroom
+      for ambient swings + PSU sag amplifying load temps.
+    * ``ram-pressure`` / ``pagefile-pressure`` 85% / 90% — system
+      RAM/pagefile exhaustion produces a sluggish, half-killed
+      system that's worse than just killing the offender.
+    * ``cpu-pkg-hot`` 90°C — most desktop CPUs trip thermal
+      protection at 95-100°C and degrade silicon above ~85°C
+      sustained.
+    """
     return (
         RuleConfig(
             name="vram-junction-hot",
@@ -211,6 +247,14 @@ def _default_rules() -> tuple[RuleConfig, ...]:
             threshold=90.0,
             window_s=20,
             min_fraction_over=0.67,
+            action="kill",
+        ),
+        RuleConfig(
+            name="vram-pressure",
+            signal="gpu.*.vram_used_percent",
+            threshold=92.0,
+            window_s=30,
+            min_fraction_over=0.75,
             action="kill",
         ),
         RuleConfig(

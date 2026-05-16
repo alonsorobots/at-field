@@ -181,6 +181,67 @@ class TestHealth:
         assert data["rules_disabled"] == 1  # missing-signal
         assert data["last_action"] is None
 
+    def test_health_omits_lhm_supervisor_when_unbound(self, server):
+        """No supervisor wired => /health.lhm_supervisor is null. Important
+        because the dashboard treats that as 'we are not managing LHM,
+        fall back to the collector probe' rather than 'LHM is broken'."""
+        _, host, port = server
+        _, data = _get(host, port, "/health")
+        assert data["lhm_supervisor"] is None
+
+    def test_health_surfaces_lhm_supervisor_state(self, tmp_path):
+        """When the supervisor is bound, /health surfaces its full
+        snapshot under .lhm_supervisor with a derived ``state`` token
+        the dashboard can switch on without needing to interpret the
+        raw http_ready/running/last_error matrix."""
+        from atfield.lhm_supervisor import LhmStatus
+
+        class _FakeSup:
+            def __init__(self, status):
+                self._status = status
+
+            def snapshot_status(self):
+                return self._status
+
+        state = _make_state(tmp_path)
+        # Case 1: process up + HTTP ready => state="ready"
+        state.set_lhm_supervisor(_FakeSup(LhmStatus(
+            running=True, pid=1234, http_ready=True, started_at=time.time(),
+        )))
+        srv = ApiServer(state, host="127.0.0.1", port=0)
+        srv.start()
+        try:
+            _, host, port = (state, *srv.address)
+            _, data = _get(host, port, "/health")
+            ls = data["lhm_supervisor"]
+            assert ls is not None
+            assert ls["state"] == "ready"
+            assert ls["http_ready"] is True
+            assert ls["pid"] == 1234
+
+            # Case 2: process up but HTTP server didn't bind =>
+            # state="process_up_no_http" -- the new failure mode
+            # introduced by the LHM 0.9.6 robustness fix.
+            state.set_lhm_supervisor(_FakeSup(LhmStatus(
+                running=True, pid=999, http_ready=False, started_at=time.time(),
+                last_error="HTTP server did not come up on port 8085 within 15s.",
+            )))
+            _, data = _get(host, port, "/health")
+            ls = data["lhm_supervisor"]
+            assert ls["state"] == "process_up_no_http"
+            assert ls["http_ready"] is False
+            assert "did not come up" in ls["last_error"]
+
+            # Case 3: process down, awaiting backoff => state="backoff"
+            state.set_lhm_supervisor(_FakeSup(LhmStatus(
+                running=False, pid=None, next_retry_at=time.time() + 4.0,
+                last_error="exited with code 1",
+            )))
+            _, data = _get(host, port, "/health")
+            assert data["lhm_supervisor"]["state"] == "backoff"
+        finally:
+            srv.stop()
+
     def test_health_observe_only_mode_surfaces(self, tmp_path):
         state = _make_state(tmp_path)
         state._observe_only = True
