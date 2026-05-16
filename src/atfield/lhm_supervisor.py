@@ -112,11 +112,35 @@ class RealProcessSpawner:
         # No stdin; pipe stdout/stderr to DEVNULL so LHM's chattering
         # doesn't fill our parent log. LHM is silent on success and
         # writes startup banners we don't care about.
+        #
+        # ``__COMPAT_LAYER=RUNASINVOKER`` is critical when AT-Field runs
+        # as a Windows Service. LHM's manifest declares
+        # ``requestedExecutionLevel="requireAdministrator"``; CreateProcess
+        # treats this as "trigger UAC elevation" -- but Session 0 (where
+        # Windows services live) has no UAC prompt host. The result is
+        # CreateProcess failing with WinError 740 even when the caller
+        # is LocalSystem (which IS administrator). RUNASINVOKER tells
+        # the loader to ignore the manifest's elevation request and
+        # honor the caller's token, which is exactly what we want --
+        # LocalSystem is already at SYSTEM integrity so LHM gets the
+        # privileges it needs to load WinRing0 and read MSRs.
+        #
+        # In interactive (non-service) contexts this flag is a no-op
+        # when the caller is already admin, so it's safe to always set.
+        # When the caller is unprivileged, CreateProcess succeeds but
+        # LHM itself fails to load its kernel driver -- which surfaces
+        # cleanly via the supervisor's HTTP probe ("process started but
+        # port did not open in 15s") rather than the obscure WinError 740.
+        env = os.environ.copy()
+        env["__COMPAT_LAYER"] = (
+            (env.get("__COMPAT_LAYER", "") + " RUNASINVOKER").strip()
+        )
         return subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=env,
             # CREATE_NO_WINDOW so a console doesn't flash on Windows.
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
