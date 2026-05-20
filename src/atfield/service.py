@@ -27,6 +27,7 @@ the pytest integration tests. ``main()`` is the NSSM entry point.
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
 import threading
@@ -546,19 +547,49 @@ def _maybe_start_lhm_supervisor():
         return None
 
     # Search next to the AT-Field binaries first (the bundled installer
-    # drops LHM there), then fall back to standard paths.
+    # drops LHM there). For dev/venv installs, sys.executable is the
+    # venv's python.exe -- bundled_root then points at .venv\Scripts\
+    # which has no LHM. In that case walk up looking for a sibling
+    # `dist/atfield/` tree (where `scripts/fetch_lhm.ps1` lands LHM in
+    # a checked-out repo) and also probe %PROGRAMDATA%\ATField\lhm\
+    # (where a future installer could drop a per-machine copy without
+    # touching the bundled tree). Anything still missing means the
+    # user really hasn't fetched LHM; the LHM collector's probe will
+    # surface that on /health.
     bundled_root: Path | None = None
     try:
         bundled_root = Path(sys.executable).parent
     except Exception:
         bundled_root = None
 
-    exe = find_lhm_executable(bundled_root=bundled_root)
+    extra_paths: list[Path] = []
+    try:
+        here = Path(sys.executable).resolve().parent
+        # Walk up to 4 levels (.venv\Scripts\ → .venv\ → <repo>\ is 2
+        # levels; allow 4 for unusual layouts) looking for a sibling
+        # dist/atfield/ tree.
+        cur = here
+        for _ in range(4):
+            cur = cur.parent
+            candidate = cur / "dist" / "atfield"
+            if candidate.is_dir():
+                extra_paths.append(candidate)
+                break
+    except Exception:
+        _log.debug("dev-install LHM probe failed", exc_info=True)
+
+    program_data = os.environ.get("PROGRAMDATA", r"C:\ProgramData")
+    extra_paths.append(Path(program_data) / "ATField" / "lhm")
+
+    exe = find_lhm_executable(
+        bundled_root=bundled_root,
+        extra_search_paths=tuple(extra_paths),
+    )
     if exe is None:
         _log.info(
             "LHM not found on disk; skipping auto-spawn. "
-            "Install LibreHardwareMonitor or set ATFIELD_LHM_EXE for VRAM-junction "
-            "and CPU-package temps."
+            "Run `atf install-lhm` or set ATFIELD_LHM_EXE to enable "
+            "CPU-package and VRAM-junction temperature signals."
         )
         return None
 
