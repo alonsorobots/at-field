@@ -13,7 +13,7 @@ export default function StatusScreen({ health, reachable }: Props) {
   const upHours = (health.uptime_s / 3600).toFixed(1);
 
   return (
-    <div className="p-5 space-y-5 overflow-y-auto h-full">
+    <div className="status-no-glow p-5 space-y-5 overflow-y-auto h-full">
       {/* Mode + counts row */}
       <section className="grid grid-cols-3 gap-3">
         <Stat label="Mode" value={health.mode === "observe-only" ? "Observe-only" : "Armed"} />
@@ -188,7 +188,7 @@ function Stat({ label, value, muted }: { label: string; value: string; muted?: b
 
 function ServiceUnreachable() {
   return (
-    <div className="p-6 space-y-5 overflow-y-auto h-full">
+    <div className="status-no-glow p-6 space-y-5 overflow-y-auto h-full">
       <div>
         <div className="flex items-center gap-2.5 mb-2">
           <span className="dot" data-status="down" />

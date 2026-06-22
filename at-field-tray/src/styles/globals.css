@@ -402,6 +402,15 @@ input[type="checkbox"]:focus { outline: none; box-shadow: 0 0 0 2px rgba(167, 13
     0 0 4px color-mix(in srgb, currentColor 40%, transparent);
 }
 
+/* Status page: headers (and stat labels) keep the HUD font + layout but
+   drop the phosphor halo. The Status tab is a dense, glanceable diagnostic
+   panel; the bloom on its many small section/stat labels added visual noise
+   without communicating state, so it's removed here regardless of theme. */
+.status-no-glow .hud,
+.status-no-glow .hud-glow {
+  text-shadow: none;
+}
+
 /* Status dot used in tray menu, status bar, collector cards. Color
    driven by the `data-status` attribute so a single CSS rule covers all
    four states the tray icon can be in. The phosphor glow halo (matching
