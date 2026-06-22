@@ -44,6 +44,7 @@ from atfield.audit import (
     configure_service_logging,
 )
 from atfield.collectors import HealthState, ProbeResult
+from atfield.collectors.hwinfo import HwinfoCollector
 from atfield.collectors.lhm import LhmCollector
 from atfield.collectors.nvml import PER_PROCESS_VRAM_KEY, NvmlCollector
 from atfield.collectors.system import SystemCollector
@@ -182,7 +183,19 @@ def _probe_all_collectors(audit: AuditWriter) -> tuple[list[object], dict[str, P
     and a per-collector probe result dict (so the audit log records why
     any unavailable collector was rejected).
     """
-    collectors_to_try = [SystemCollector(), NvmlCollector(), LhmCollector()]
+    # Order matters: the tick loop merges samples with dict.update() in this
+    # order, so a later collector wins on signal-key collisions. HWiNFO is
+    # placed AFTER LHM deliberately -- when the user has HWiNFO running it is
+    # the preferred source for the signals both expose (CPU package temp, VRAM
+    # junction temp, rail voltages), per docs/sensors.md. When HWiNFO is absent
+    # its probe reports unavailable and LHM remains the source. This gives
+    # per-signal "prefer HWiNFO, fall back to LHM" with no special-casing.
+    collectors_to_try = [
+        SystemCollector(),
+        NvmlCollector(),
+        LhmCollector(),
+        HwinfoCollector(),
+    ]
     healthy: list[object] = []
     results: dict[str, ProbeResult] = {}
     for c in collectors_to_try:
@@ -322,9 +335,16 @@ def run_service(
         config_path=Path(config_path) if config_path else None,
     )
     api_state.attach_engine(engine)
+    # HWiNFO is an opportunistic, never-bundled source. When it isn't running
+    # it would otherwise show up in the dashboard as a permanent red "FAILED"
+    # collector card, which reads as "something is broken" rather than "an
+    # optional extra isn't active". So we omit it from the collector list when
+    # unavailable (it still appears, healthy, the moment HWiNFO is running).
+    # NVML/LHM/system stay listed even when unavailable -- they're expected.
     api_state.set_collectors([
         collector_view_from_probe(name, result, "HEALTHY" if result.available else "FAILED")
         for name, result in probe_results.items()
+        if result.available or name != HwinfoCollector.name
     ])
     # Hand the LHM supervisor (if we managed to start one) to the API
     # state so /health can surface its per-spawn status -- in particular

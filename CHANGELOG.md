@@ -7,6 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- **HWiNFO Shared Memory collector** (`src/atfield/collectors/hwinfo.py`).
+  Detects a running HWiNFO64 instance via the `Global\HWiNFO_SENS_SM2`
+  named shared-memory section, decodes the documented header / sensor /
+  reading layout, and surfaces GPU memory-junction temp, CPU package
+  temp, and PSU rail voltages when HWiNFO is running. The collector is
+  ordered *after* the bundled LHM collector in the sample merge, so on a
+  per-signal basis HWiNFO is preferred when present and LHM remains the
+  silent fallback — fulfilling the v0.3 sensor-roadmap item without
+  bundling HWiNFO (its license forbids redistribution). The probe reports
+  cleanly unavailable when HWiNFO isn't running or "Shared Memory Support"
+  is disabled, and `atf doctor` / `atf inputs` surface it as optional
+  (informational) rather than as an error. Pure-Python parsers are fully
+  unit-tested against a synthetic SHM buffer (`tests/test_hwinfo.py`).
+
 ## [0.3.0] — 2026-05-15 — Robustness, forensics, and sensor coverage
 
 This release is the response to a hard system reboot the user

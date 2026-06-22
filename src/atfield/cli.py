@@ -165,11 +165,12 @@ def status(
 def inputs() -> None:
     """One-shot probe + sample dump for every collector. Useful for setup verification."""
     # Imported lazily so `atf --help` doesn't pay the NVML/psutil cost.
+    from atfield.collectors.hwinfo import HwinfoCollector
     from atfield.collectors.lhm import LhmCollector
     from atfield.collectors.nvml import NvmlCollector
     from atfield.collectors.system import SystemCollector
 
-    collectors = [SystemCollector(), NvmlCollector(), LhmCollector()]
+    collectors = [SystemCollector(), NvmlCollector(), LhmCollector(), HwinfoCollector()]
     for c in collectors:
         result = c.probe()
         color = "green" if result.available else "red"
@@ -612,14 +613,25 @@ def doctor(
 
     # 5. Live collector probes (we don't need a running service for this)
     try:
+        from atfield.collectors.hwinfo import HwinfoCollector
         from atfield.collectors.lhm import LhmCollector
         from atfield.collectors.nvml import NvmlCollector
         from atfield.collectors.system import SystemCollector
 
-        for c in (SystemCollector(), NvmlCollector(), LhmCollector()):
+        for c in (SystemCollector(), NvmlCollector(), LhmCollector(), HwinfoCollector()):
             r = c.probe()
             if r.available:
                 successes.append(f"collector {c.name}: OK ({r.reason})")
+            elif c.name == "hwinfo":
+                # HWiNFO is purely opportunistic -- never bundled (its license
+                # forbids redistribution) and LHM already covers its signals.
+                # Absence is the common case, so report it as info, not an
+                # issue, to avoid tripping doctor's non-zero exit on every
+                # machine that doesn't happen to run HWiNFO.
+                successes.append(
+                    "collector hwinfo: not active (optional) -- enable HWiNFO64 "
+                    "Shared Memory Support for extra sensor coverage; LHM remains the default"
+                )
             else:
                 fix = ""
                 if c.name == "lhm":

@@ -55,11 +55,11 @@ honest reporting of what's available on this specific host.
   surface (see footnote 3 in the matrix above).
 - **HWiNFO** is *never* bundled. The HWiNFO license explicitly forbids
   redistribution. Users who already have it installed (a popular choice for
-  hardware enthusiasts) will get the extra sensor coverage automatically once
-  the HWiNFO Shared Memory collector lands (planned for v0.3 -- see roadmap
-  below). The community `pywhinfo` reference implementation exists and is
-  what we'll model the Shared Memory reader on. Users who don't have HWiNFO
-  installed get LHM via the bundle transparently.
+  hardware enthusiasts) get the extra sensor coverage automatically via the
+  HWiNFO Shared Memory collector (landed in v0.3.1 --
+  `src/atfield/collectors/hwinfo.py`), modeled on the community `pywhinfo`
+  reference implementation. Users who don't have HWiNFO installed get LHM via
+  the bundle transparently.
 
 ### Why not bundle HWiNFO instead?
 
@@ -235,12 +235,15 @@ Footprint: ~4 MB / hour at 1 Hz with 14 signals. Auto-rotates at 50 MB.
 
 ### v0.3 (next minor)
 
-- **HWiNFO Shared Memory collector**: detect a running HWiNFO64 instance via
-  the `Global\HWiNFO_SENS_SM2` named shared-memory section, parse the
-  documented sensor layout, and surface anything LHM missed (NVMe SMART
-  critical warnings, GPU hot-spot deltas, EC-only voltages). Falls back to
-  LHM silently when HWiNFO isn't running. No bundling -- license compliance
-  by avoidance.
+- **HWiNFO Shared Memory collector** — *landed in v0.3.1*. Detects a running
+  HWiNFO64 instance via the `Global\HWiNFO_SENS_SM2` named shared-memory
+  section, parses the documented header / sensor / reading layout, and
+  surfaces GPU memory-junction temp, CPU package temp, and PSU rail voltages.
+  Ordered after LHM in the sample merge so HWiNFO is preferred per-signal
+  when present and LHM stays the silent fallback. No bundling -- license
+  compliance by avoidance. *(Future work: surface the HWiNFO-only signals
+  LHM doesn't know about -- NVMe SMART critical warnings, GPU hot-spot
+  deltas, EC-only voltages.)*
 - **`atf install-hwinfo` hint**: a CLI command that *doesn't* download
   HWiNFO (we can't redistribute it), but opens the user's browser to the
   official download page and prints a one-line setup instruction. Strictly
