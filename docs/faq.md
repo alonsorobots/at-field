@@ -7,6 +7,31 @@ If your question isn't here, please [open an issue](https://github.com/alonsorob
 or peek at `events.jsonl` (canonical record of every signal sample,
 rule verdict, and action AT-Field took).
 
+## "What does it cost to leave this running 24/7?"
+
+Almost nothing — and a lot less than the hardware it's protecting.
+Measured on a 2× RTX 5090 box:
+
+- **CPU:** ~0.1–0.3% of a *single* core (≈0.01% of a 32-thread machine).
+  The whole per-tick workload is ~0.135 ms once per second.
+- **RAM:** ~55–85 MB resident, and it's **bounded** — history lives in
+  fixed-size ring buffers, so it doesn't creep over days/weeks.
+- **Disk:** ~40–90 MB/day of append-only forensic history that
+  auto-rotates and is hard-capped around 250 MB. That's ~0.003%/year of
+  a typical NVMe's write endurance.
+- **GPU:** it reads the same NVML counters `nvidia-smi` reads. No CUDA
+  kernels, no VRAM, no measurable hit to your training throughput.
+- **Electricity:** on the order of **$1–4/year**, even counting
+  LibreHardwareMonitor.
+
+Don't need CPU-package / VRAM-junction temps? Skip LHM and reclaim its
+~150–330 MB — the NVML thermal/VRAM/power protection is unaffected.
+
+The full data-backed breakdown (with reproducible benchmark scripts) is
+in [`docs/footprint.md`](footprint.md).
+
+---
+
 ## Can I scrape AT-Field with Prometheus?
 
 Yes. The watchdog service exposes a Prometheus exposition-format

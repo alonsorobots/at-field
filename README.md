@@ -59,6 +59,7 @@ Existing tools either monitor without acting ([System-Resource-Monitor](https://
 - **Capability-negotiated:** at startup, every collector probes its source. Anything missing (no LHM? AMD GPU? CPU sensor doesn't expose package temp?) downgrades to "rule disabled, with a clear log line" — never to "watchdog crashed" or "rule silently never fires".
 - **Audit trail:** every action lands in `%ProgramData%\ATField\events.jsonl` with full process tree, signal values that triggered the rule, and rule name.
 - **Safe by default:** malformed config → observe-only mode (kills demoted to log entries), never kills the service's own PID, `never_kill_names` filter for `explorer.exe`, `services.exe`, etc.
+- **Cheap to leave running:** measured **~0.1–0.3% of one CPU core**, **~55–85 MB RAM** (bounded — fixed-size history rings), and ~40–90 MB/day of auto-rotating forensic log (hard-capped ~250 MB). GPU telemetry is read-only NVML — the same counters `nvidia-smi` reads, so it doesn't slow your training. Electricity works out to **~$1–4/year**. Full data-backed breakdown with reproducible benchmarks in [docs/footprint.md](docs/footprint.md).
 
 ## Install
 
