@@ -222,7 +222,7 @@ function SortableSignalTile({
           <div
             className="hud-glow text-sm font-semibold tabular-nums whitespace-nowrap"
             style={{
-              color: overTrigger ? "var(--color-danger)" : "var(--color-accent)",
+              color: overTrigger ? "var(--color-danger)" : "var(--color-detail)",
             }}
           >
             {fmt(latest.value)}

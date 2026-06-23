@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { AuditEvent } from "../lib/api";
-import { extractScriptName } from "../lib/format";
+import { extractScriptName, formatTimeAgo, formatTimeOfDay, signalDisplayName } from "../lib/format";
 import { usePolling } from "../lib/hooks";
 import { getPollIntervalMs } from "../lib/preferences";
 
@@ -10,20 +10,15 @@ interface Props {
   refreshGen?: number;
 }
 
-const EVENT_COLORS: Record<string, string> = {
-  startup: "var(--color-success)",
-  shutdown: "var(--color-text-secondary)",
-  action: "var(--color-warning)",
-  kill_report: "var(--color-danger)",
-  collector_health: "var(--color-warning)",
-  pause: "var(--color-text-secondary)",
-};
-
 /**
- * Recent events stream from the audit log. Each row collapses interesting
- * detail (e.g. kill_report's process tree) behind a click-to-expand
- * disclosure -- the goal is "I can answer 'why was my job killed?' from
- * here without grep-ing events.jsonl by hand".
+ * Recent events stream from the audit log, designed for triage.
+ *
+ * The scan order is: severity first (a kill jumps out in red), then
+ * "what + which process" (the bold headline), then "when" (relative time
+ * up front, wall-clock under it). Everything else is demoted to a muted
+ * info row so the eye skips it. Click any row to expand the raw JSON --
+ * the goal is "answer 'did something get killed, when, and what?' at a
+ * glance, drill in only when you want the gory detail".
  */
 export default function EventsScreen({ refreshGen }: Props) {
   // Events refresh at half the dashboard's general poll rate (audit lines
@@ -53,13 +48,15 @@ export default function EventsScreen({ refreshGen }: Props) {
 
   // Newest first (the file is append-only so we reverse the tail).
   const events = [...data.events].reverse();
+  const now = Date.now() / 1000;
 
   return (
-    <div className="overflow-y-auto h-full p-3 space-y-1.5">
+    <div className="overflow-y-auto h-full p-3 space-y-1">
       {events.map((e, idx) => (
         <EventRow
           key={`${e.ts}-${idx}`}
           event={e}
+          now={now}
           expanded={expanded.has(idx)}
           onToggle={() =>
             setExpanded((cur) => {
@@ -75,41 +72,86 @@ export default function EventsScreen({ refreshGen }: Props) {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Severity triage
+// ─────────────────────────────────────────────────────────────────────
+
+type Severity = "critical" | "warning" | "info";
+
+const SEVERITY_COLOR: Record<Severity, string> = {
+  critical: "var(--color-danger)",
+  warning: "var(--color-warning)",
+  info: "var(--color-text-tertiary)",
+};
+
+interface Triage {
+  severity: Severity;
+  /** Short fixed-width category tag shown at the left of every row. */
+  tag: string;
+  /** Bold one-liner: what happened + (for kills) which process. */
+  headline: string;
+  /** Muted second line: the "why" / supporting detail. Empty = no line. */
+  detail: string;
+}
+
 function EventRow({
   event,
+  now,
   expanded,
   onToggle,
 }: {
   event: AuditEvent;
+  now: number;
   expanded: boolean;
   onToggle: () => void;
 }) {
-  const color = EVENT_COLORS[event.type] ?? "var(--color-text-tertiary)";
-  const summary = summarize(event);
-  const hasDetail = expanded && event.type !== "shutdown";
+  const { severity, tag, headline, detail } = triage(event);
+  const color = SEVERITY_COLOR[severity];
+  const ts = event.ts as number;
 
   return (
     <div
       className="rounded-md border border-[var(--color-border)] hover:border-[var(--color-border-strong)]
-                 transition cursor-pointer"
+                 transition cursor-pointer overflow-hidden"
+      style={{
+        borderLeft: `3px solid ${color}`,
+        // Critical events get a faint danger wash so a kill is unmistakable
+        // while scrolling; everything else stays on the plain surface.
+        background:
+          severity === "critical"
+            ? "color-mix(in srgb, var(--color-danger) 8%, transparent)"
+            : undefined,
+      }}
       onClick={onToggle}
     >
-      <div className="flex items-center gap-3 px-3 py-2 text-xs">
+      <div className="flex items-start gap-3 px-3 py-2">
         <span
-          className="inline-block w-1.5 h-1.5 rounded-full flex-shrink-0"
-          style={{ background: color }}
-        />
-        <span className="font-mono text-[10px] text-[var(--color-text-tertiary)] w-16 flex-shrink-0">
-          {formatTime(event.ts as number)}
+          className="font-mono text-[10px] font-semibold uppercase tracking-wider w-12 flex-shrink-0 pt-0.5"
+          style={{ color }}
+        >
+          {tag}
         </span>
-        <span className="font-medium text-[var(--color-text-primary)] w-28 flex-shrink-0">
-          {event.type}
-        </span>
-        <span className="text-[var(--color-text-secondary)] truncate flex-1">{summary}</span>
+        <div className="flex-1 min-w-0">
+          <div
+            className={`text-xs truncate ${severity === "critical" ? "font-semibold" : "font-medium"}`}
+            style={{ color: severity === "critical" ? color : "var(--color-text-primary)" }}
+          >
+            {headline}
+          </div>
+          {detail && (
+            <div className="text-[11px] text-[var(--color-text-secondary)] truncate mt-0.5 leading-relaxed">
+              {detail}
+            </div>
+          )}
+        </div>
+        <div className="text-right flex-shrink-0 leading-tight">
+          <div className="text-[11px] text-[var(--color-text-secondary)]">{formatTimeAgo(ts, now)}</div>
+          <div className="text-[10px] text-[var(--color-text-tertiary)] font-mono">{formatTimeOfDay(ts)}</div>
+        </div>
       </div>
-      {hasDetail && (
+      {expanded && (
         <pre
-          className="px-3 pb-2 pt-0 text-[10px] font-mono text-[var(--color-text-secondary)] whitespace-pre-wrap overflow-x-auto"
+          className="px-3 pb-2 pt-1 text-[10px] font-mono text-[var(--color-text-secondary)] whitespace-pre-wrap overflow-x-auto border-t border-[var(--color-border)] mt-1"
           onClick={(e) => e.stopPropagation()}
         >
           {JSON.stringify(event, null, 2)}
@@ -119,48 +161,124 @@ function EventRow({
   );
 }
 
-function summarize(e: AuditEvent): string {
+// ─────────────────────────────────────────────────────────────────────
+// Event → triage mapping
+// ─────────────────────────────────────────────────────────────────────
+
+function triage(e: AuditEvent): Triage {
   switch (e.type) {
+    case "kill_report":
+      return triageKill(e);
+    case "action":
+      return triageAction(e);
+    case "collector_health": {
+      const state = String(e.state ?? "");
+      const healthy = state === "HEALTHY";
+      return {
+        severity: healthy ? "info" : "warning",
+        tag: healthy ? "INFO" : "WARN",
+        headline: `Collector ${e.collector} → ${state.toLowerCase() || "changed"}`,
+        detail: e.reason ? String(e.reason) : "",
+      };
+    }
     case "startup": {
       const sigs = (e.available_signals as string[] | undefined)?.length ?? 0;
       const dis = (e.disabled_rules as unknown[] | undefined)?.length ?? 0;
-      return `service v${e.version} started — ${sigs} signals, ${dis} disabled rules`;
+      return {
+        severity: "info",
+        tag: "UP",
+        headline: `Service started${e.version ? ` (v${e.version})` : ""}`,
+        detail: `${sigs} signals active · ${dis} rule${dis === 1 ? "" : "s"} disabled`,
+      };
     }
     case "shutdown":
-      return `service stopped (${e.reason})`;
-    case "action":
-      return `${e.kind} — rule ${e.rule}, signal ${e.signal} = ${e.latest_value} (over ${e.threshold}, ${(((e.fraction_over as number) ?? 0) * 100).toFixed(0)}% of window)`;
-    case "kill_report": {
-      const killed = (e.killed as Array<{ pid: number; name: string; cmdline?: string[] }> | undefined) ?? [];
-      const root = e.kill_root as
-        | { pid: number; name: string; script?: string | null; cmdline?: string[] }
-        | null
-        | undefined;
-      if (e.skipped_reason) return `kill skipped: ${e.skipped_reason}`;
-      // Prefer the server-provided `script` (canonical, computed at kill
-      // time when cmdline is freshest). Fall back to client-side extraction
-      // so events.jsonl entries written before the server helper landed
-      // still get a friendly headline. The launcher exe + pid live in the
-      // expanded JSON detail; keeping the headline focused on "what was
-      // running" puts the answer to "why was my job killed?" up front.
-      const script =
-        (e.script as string | null | undefined) ??
-        root?.script ??
-        extractScriptName(root?.cmdline);
-      const headline = script ?? root?.name ?? "process";
-      const procCount = killed.length > 1 ? ` (${killed.length} processes)` : "";
-      return `killed ${headline}${procCount}`;
-    }
-    case "collector_health":
-      return `collector ${e.collector} → ${e.state}${e.reason ? ` (${e.reason})` : ""}`;
+      return {
+        severity: "info",
+        tag: "DOWN",
+        headline: "Service stopped",
+        detail: e.reason ? String(e.reason) : "",
+      };
     case "pause":
-      return e.until ? `paused until ${e.until}` : "unpaused";
+      return e.until
+        ? { severity: "info", tag: "PAUSE", headline: `Paused until ${e.until}`, detail: "kill actions suspended" }
+        : { severity: "info", tag: "RESUME", headline: "Resumed", detail: "kill actions re-armed" };
     default:
-      return JSON.stringify(e).slice(0, 120);
+      return { severity: "info", tag: "INFO", headline: e.type, detail: JSON.stringify(e).slice(0, 120) };
   }
 }
 
-function formatTime(unixTs: number): string {
-  const d = new Date(unixTs * 1000);
-  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+function triageKill(e: AuditEvent): Triage {
+  const killed = (e.killed as Array<{ pid: number; name: string; cmdline?: string[] }> | undefined) ?? [];
+  const root = e.kill_root as
+    | { pid: number; name: string; script?: string | null; cmdline?: string[] }
+    | null
+    | undefined;
+
+  if (e.skipped_reason) {
+    return {
+      severity: "warning",
+      tag: "KILL?",
+      headline: "Kill skipped",
+      detail: String(e.skipped_reason),
+    };
+  }
+
+  // Prefer the server-provided `script` (canonical, computed at kill time
+  // when cmdline is freshest); fall back to client extraction so old log
+  // lines still get a friendly headline.
+  const script =
+    (e.script as string | null | undefined) ?? root?.script ?? extractScriptName(root?.cmdline);
+  const what = script ?? root?.name ?? "process";
+  const extra = killed.length > 1 ? ` +${killed.length - 1} more` : "";
+
+  const detailBits: string[] = [];
+  if (root) detailBits.push(`${root.name} · pid ${root.pid}`);
+  detailBits.push(`${killed.length} process${killed.length === 1 ? "" : "es"} terminated`);
+
+  return {
+    severity: "critical",
+    tag: "KILL",
+    headline: `Killed ${what}${extra}`,
+    detail: detailBits.join(" · "),
+  };
+}
+
+function triageAction(e: AuditEvent): Triage {
+  const kind = String(e.kind ?? "action");
+  const kindVerb: Record<string, string> = {
+    kill: "kill triggered",
+    throttle: "throttled",
+    log: "logged",
+  };
+  const sigLabel = e.signal ? signalDisplayName(String(e.signal)) : (e.rule ? String(e.rule) : "rule");
+  const value = e.latest_value as number | undefined;
+  const threshold = e.threshold as number | undefined;
+  const pct = ((e.fraction_over as number | undefined) ?? 0) * 100;
+
+  const detailBits: string[] = [];
+  if (value != null && threshold != null) {
+    detailBits.push(`${fmtSignalValue(String(e.signal ?? ""), value)} ≥ ${fmtSignalValue(String(e.signal ?? ""), threshold)}`);
+  }
+  detailBits.push(`${pct.toFixed(0)}% of window over`);
+  if (e.rule) detailBits.push(`rule ${e.rule}`);
+
+  return {
+    // A "kill" action verdict is the moment a rule decided to pull the
+    // trigger -- it precedes the kill_report and is worth flagging hot.
+    severity: kind === "kill" ? "critical" : "warning",
+    tag: kind === "kill" ? "TRIP" : "ALERT",
+    headline: `${sigLabel} — ${kindVerb[kind] ?? kind}`,
+    detail: detailBits.join(" · "),
+  };
+}
+
+/** Infer a unit from the signal-name suffix and format the value. The
+    audit `action` event carries raw numbers without a unit, mirroring
+    format.ts's formatThresholdValue (which isn't exported). */
+function fmtSignalValue(signal: string, v: number): string {
+  if (/_c$/.test(signal)) return `${v.toFixed(0)}°C`;
+  if (/_percent$/.test(signal)) return `${v.toFixed(0)}%`;
+  if (/_w$/.test(signal)) return `${v.toFixed(0)} W`;
+  if (/_volts$/.test(signal)) return `${v.toFixed(2)} V`;
+  return v.toFixed(0);
 }

@@ -138,7 +138,11 @@ export default function App() {
                 />
               )}
               {!showSetup && tab === "rules" && (
-                <RulesScreen rules={rulesQ.data} onMutated={rulesQ.refresh} />
+                <RulesScreen
+                  rules={rulesQ.data}
+                  onMutated={rulesQ.refresh}
+                  onNavigate={(t) => setTab(t)}
+                />
               )}
               {!showSetup && tab === "events" && <EventsScreen refreshGen={refreshGen} />}
               {!showSetup && tab === "status" && (

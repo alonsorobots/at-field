@@ -144,7 +144,7 @@ export default function SignalDetailScreen({ signal, rules, onBack, refreshGen }
       {/* Stats strip */}
       {stats && (
         <div className="px-4 py-2 border-b border-[var(--color-border)] flex flex-wrap gap-x-6 gap-y-1 text-xs">
-          <Stat label="Now" value={fmt(stats.latest)} highlight={threshold != null && stats.latest > threshold} />
+          <Stat label="Now" value={fmt(stats.latest)} live highlight={threshold != null && stats.latest > threshold} />
           <Stat label="Min" value={fmt(stats.min)} />
           <Stat label="Mean" value={fmt(stats.mean)} />
           <Stat label="Max" value={fmt(stats.max)} highlight={threshold != null && stats.max > threshold} />
@@ -513,16 +513,22 @@ function Stat({
   value,
   highlight,
   muted,
+  live,
 }: {
   label: string;
   value: string;
   highlight?: boolean;
   muted?: boolean;
+  /** The live "Now" value -- painted in the theme's data color so it
+      reads as the signature 3rd color, matching the Signals tiles. */
+  live?: boolean;
 }) {
   const color = highlight
     ? "var(--color-danger)"
     : muted
     ? "var(--color-text-tertiary)"
+    : live
+    ? "var(--color-detail)"
     : "var(--color-text-primary)";
   return (
     <div>

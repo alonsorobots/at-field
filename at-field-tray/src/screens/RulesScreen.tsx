@@ -1,6 +1,11 @@
 import { useState } from "react";
 import type { EffectiveRuleView, RulesSnapshot } from "../lib/api";
-import { humanizeRule, humanizeRuleStatus, signalDisplayName } from "../lib/format";
+import {
+  humanizeRule,
+  humanizeRuleStatus,
+  sensorSourceForSignal,
+  signalDisplayName,
+} from "../lib/format";
 import RuleThresholdSlider from "../components/RuleThresholdSlider";
 import ProfilePresetRow from "../components/ProfilePresetRow";
 import AdvancedRuleControls from "../components/AdvancedRuleControls";
@@ -10,6 +15,9 @@ interface Props {
   /** Called after a slider PATCH or profile preset application persists.
       Lets the parent refetch /rules so the UI converges to server truth. */
   onMutated?: () => void;
+  /** Jump to another tab -- used by disabled rules to send the operator to
+      the Status tab, where the missing collector's live health + error live. */
+  onNavigate?: (tab: "status") => void;
 }
 
 const RULE_TITLE: Record<string, string> = {
@@ -38,7 +46,7 @@ const RULE_DESCRIPTION: Record<string, string> = {
  * bar. Disabled rules are listed below in a muted style with the reason
  * the operator should never have to guess "why didn't this fire?".
  */
-export default function RulesScreen({ rules, onMutated }: Props) {
+export default function RulesScreen({ rules, onMutated, onNavigate }: Props) {
   if (!rules) {
     return <div className="p-6 text-sm text-[var(--color-text-secondary)]">Loading rules…</div>;
   }
@@ -72,12 +80,13 @@ export default function RulesScreen({ rules, onMutated }: Props) {
             Disabled rules
           </h2>
           <p className="text-[11px] text-[var(--color-text-tertiary)] mb-2">
-            These rules can't run on this machine -- usually because the sensor they need isn't
-            installed (e.g. no LibreHardwareMonitor for CPU temperatures).
+            These rules can't run on this machine -- the sensor they need isn't available. Each one
+            below names the collector that supplies it and how to turn it on.
           </p>
           <div className="space-y-2">
             {rules.disabled.map((d) => {
               const title = RULE_TITLE[d.rule] ?? d.rule;
+              const source = sensorSourceForSignal(d.signal);
               return (
                 <div
                   key={`${d.rule}::${d.signal}`}
@@ -87,9 +96,24 @@ export default function RulesScreen({ rules, onMutated }: Props) {
                     {title}
                   </div>
                   <div className="text-[11px] text-[var(--color-text-tertiary)] mt-0.5">
-                    Needed signal: {signalDisplayName(d.signal)} (<span className="font-mono">{d.signal}</span>)
+                    Needs signal: {signalDisplayName(d.signal)} (<span className="font-mono">{d.signal}</span>)
                   </div>
-                  <div className="text-xs text-[var(--color-text-secondary)] mt-1">{d.reason}</div>
+                  <div className="text-xs text-[var(--color-text-secondary)] mt-1.5">
+                    Missing collector:{" "}
+                    <span className="font-semibold text-[var(--color-detail)]">{source.collector}</span>
+                  </div>
+                  <div className="text-[11px] text-[var(--color-text-tertiary)] mt-1 leading-relaxed">
+                    {source.fix}
+                  </div>
+                  {onNavigate && (
+                    <button
+                      type="button"
+                      onClick={() => onNavigate("status")}
+                      className="mt-2 text-[11px] font-medium text-[var(--color-accent)] hover:underline"
+                    >
+                      Check sensor health on Status →
+                    </button>
+                  )}
                 </div>
               );
             })}

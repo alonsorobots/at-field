@@ -20,9 +20,10 @@
      and no bloom -- it's the calm out-of-box look that ships first
      run. The Eva themes pile on the HUD font + phosphor halos on top
      of these defaults. */
-  --color-accent: #a78bfa;          /* lavender — live values, focus, links */
+  --color-accent: #a78bfa;          /* lavender — active chrome (tabs, focus, sliders) */
   --color-accent-hover: #8b5cf6;
   --color-accent-light: #271e36;
+  --color-detail: #a78bfa;          /* 3rd "data" color — live signal values */
   --color-surface: #1f1c24;         /* card backgrounds */
   --color-surface-hover: #272530;
   --color-surface-raised: #292431;  /* elevated controls */
@@ -73,6 +74,7 @@
   --color-accent: #a78bfa;
   --color-accent-hover: #8b5cf6;
   --color-accent-light: #271e36;
+  --color-detail: #a78bfa;
   --color-surface: #1f1c24;
   --color-surface-hover: #272530;
   --color-surface-raised: #292431;
@@ -108,7 +110,7 @@
 :root[data-theme="civvie"] .hud-glow.hud-dim,
 :root[data-theme="civvie"] .verdict-pill,
 :root[data-theme="civvie"] .preset-pill[data-active="true"],
-:root[data-theme="civvie"] .tab-rail-button[data-active="true"] {
+:root[data-theme="civvie"] .tab-rail-button {
   text-shadow: none;
 }
 /* Status dots: keep the colored circle, drop the halo (the inset
@@ -147,9 +149,27 @@
  * sparkline threshold anchor (where the eye lands when something is
  * about to fire). Other Base is the deepest neutral (typically near-
  * black) used by --color-bg-neutral and mode separators -- it gives
- * the UI its structural framing. Other Detail is the 10% spice color
- * applied to over-threshold pills, danger indicators, and the SVG
- * threshold line drop-shadow -- the "this just fired" beat.
+ * the UI its structural framing.
+ *
+ * Color ROLES (consistent across every theme so the same hue always
+ * means the same thing):
+ *   --color-accent  (2nd) → active chrome: selected tab, focus ring,
+ *                           slider thumb, hover borders.
+ *   --color-detail  (3rd) → the DATA color: every live signal value
+ *                           (Signals tile number, detail "Now" stat).
+ *                           This is the unit's vivid "spice" hue, so the
+ *                           number you read most reads as the unit's
+ *                           signature color.
+ *   --color-danger  (4th) → the over-threshold alarm beat: the value/
+ *                           name flip to this when a signal crosses its
+ *                           trigger, plus kill reports and alerting dots.
+ *                           Chosen to POP against --color-detail while
+ *                           staying inside the unit's palette.
+ *
+ * For single-spice units (EVA-00/03/04, monochrome by design) accent,
+ * detail, and danger collapse onto the one vivid hue. The two-spice
+ * units (EVA-01 green+orange, EVA-02 orange+magenta) get a genuine
+ * accent≠detail≠danger split.
  *
  * Note: --color-surface and friends derive from the Base hue at
  * progressively higher lightness; the saturated Base lives at
@@ -159,7 +179,8 @@
  * ───────────────────────────────────────────────────────────────────── */
 
 /* EVA-00 (Prototype, Rei).
-   Base=Blue #345ac9, Accent=White, Other Base=Black, Other Detail=Green #1e8562 */
+   Base=Blue #345ac9, Accent=Green #1e8562 (the vivid color drives active
+   states so it actually shows up), Other Base=Black, secondary highlight=White */
 :root[data-theme="eva-00"] {
   --color-bg: #0c1330;
   --color-bg-secondary: #060a1f;
@@ -169,19 +190,21 @@
   --color-surface-raised: #243380;
   --color-border: #1a2456;
   --color-border-strong: #345ac9;
-  --color-accent: #ffffff;
-  --color-accent-hover: #ededf2;
-  --color-accent-light: rgba(255, 255, 255, 0.16);
+  --color-accent: #19d18d;
+  --color-accent-hover: #3ee0a3;
+  --color-accent-light: rgba(25, 209, 141, 0.20);
+  --color-detail: #19d18d;
   --color-text-primary: #f0eff2;
   --color-text-secondary: #b8c0d4;
   --color-text-tertiary: #7884a3;
-  --color-danger: #1e8562;
-  --color-success: #1e8562;
-  --color-warning: #1e8562;
+  --color-danger: #19d18d;
+  --color-success: #19d18d;
+  --color-warning: #19d18d;
 }
 
 /* EVA-01 (Test Type, Shinji).
-   Base=Purple, Accent=Green, Other Base=Black, Other Detail=Burnt Orange */
+   Base=Purple, Accent=Green #41bb42 (active chrome), Detail=Burnt Orange
+   #e8790c (live values), Danger=red-orange #ff3b1a (over-threshold pop). */
 :root[data-theme="eva-01"] {
   --color-bg: #1a0f24;
   --color-bg-secondary: #110718;
@@ -194,19 +217,21 @@
   --color-accent: #41bb42;
   --color-accent-hover: #57d058;
   --color-accent-light: rgba(65, 187, 66, 0.18);
+  --color-detail: #e8790c;
   --color-text-primary: #f0eff2;
   --color-text-secondary: #c5b6dc;
   --color-text-tertiary: #8a7ba0;
-  --color-danger: #e8790c;
+  --color-danger: #ff3b1a;
   --color-success: #41bb42;
   --color-warning: #e8790c;
 }
 
 /* EVA-02 (Production Model, Asuka).
-   Base=Bright Red #e41d18, Accent=Burnt Orange #e45e15, Other Base=Black,
-   Other Detail=Magenta #8a2d75.
-   The unit IS red, so "danger" can't be plain red without disappearing
-   into the background -- magenta carries the over-threshold beat. */
+   Base=Bright Red #e41d18, Accent=Burnt Orange #e45e15 (active chrome),
+   Detail=Orchid Magenta #c44d9e (live values), Danger=hot pink #ff3da0
+   (over-threshold pop). The unit IS red, so the alarm beat can't be plain
+   red without disappearing into the bg -- it lives in the magenta family,
+   with detail a touch calmer than the danger pop. */
 :root[data-theme="eva-02"] {
   --color-bg: #2a0808;
   --color-bg-secondary: #1a0404;
@@ -216,20 +241,24 @@
   --color-surface-raised: #631818;
   --color-border: #3a0c0c;
   --color-border-strong: #e41d18;
-  --color-accent: #e45e15;
-  --color-accent-hover: #f37428;
-  --color-accent-light: rgba(228, 94, 21, 0.18);
+  --color-accent: #ff6e14;
+  --color-accent-hover: #ff8a3d;
+  --color-accent-light: rgba(255, 110, 20, 0.20);
+  --color-detail: #c44d9e;
   --color-text-primary: #fae9e7;
   --color-text-secondary: #e8b8b3;
   --color-text-tertiary: #a07978;
-  --color-danger: #8a2d75;
+  --color-danger: #ff3da0;
   --color-success: #41bb42;
-  --color-warning: #8a2d75;
+  --color-warning: #c44d9e;
 }
 
 /* EVA-03 (Production, Toji -- Bardiel-possessed).
-   Base=Muted Purple #1a1e3f, Accent=White, Other Base=Black,
-   Other Detail=Brighter Purple #83365e */
+   Base=Deep Navy #1a1e3f, Accent/Detail=Luminous Lavender-Violet #b07cd6.
+   The old plum #83365e was nearly invisible against the navy base; this
+   brighter violet keeps the purple identity but actually reads. Danger
+   pushes hotter (#d264c0 magenta-violet) so the over-threshold beat pops
+   while staying in the violet family. */
 :root[data-theme="eva-03"] {
   --color-bg: #1a1e3f;
   --color-bg-secondary: #11142c;
@@ -239,19 +268,20 @@
   --color-surface-raised: #3a4178;
   --color-border: #262b54;
   --color-border-strong: #4a527d;
-  --color-accent: #ffffff;
-  --color-accent-hover: #ededf2;
-  --color-accent-light: rgba(255, 255, 255, 0.16);
+  --color-accent: #b36ae7;
+  --color-accent-hover: #c182f0;
+  --color-accent-light: rgba(179, 106, 231, 0.22);
+  --color-detail: #b36ae7;
   --color-text-primary: #f0eff2;
   --color-text-secondary: #b8b8c8;
   --color-text-tertiary: #777a90;
-  --color-danger: #83365e;
+  --color-danger: #d264c0;
   --color-success: #4ade80;
-  --color-warning: #83365e;
+  --color-warning: #b07cd6;
 }
 
 /* EVA-04 (lost). LIGHT THEME.
-   Base=White, Accent=Gray, Other Base=Black, Other Detail=BRIGHT RED.
+   Base=White, Accent=BRIGHT RED #e8202d (drives active states), Other Base=Black, secondary highlight=Gray.
    Text colors flip to dark since the page is light; .dot halos and
    .hud bloom still work because they use currentColor + color-mix(). */
 :root[data-theme="eva-04"] {
@@ -263,9 +293,10 @@
   --color-surface-raised: #e0e0e6;
   --color-border: #d0d0d8;
   --color-border-strong: #888890;
-  --color-accent: #4a4a4f;
-  --color-accent-hover: #2a2a2f;
-  --color-accent-light: rgba(74, 74, 79, 0.12);
+  --color-accent: #e8202d;
+  --color-accent-hover: #c4121d;
+  --color-accent-light: rgba(232, 32, 45, 0.12);
+  --color-detail: #e8202d;
   --color-text-primary: #1a1a1d;
   --color-text-secondary: #4a4a52;
   --color-text-tertiary: #8a8a92;
@@ -380,17 +411,15 @@ input[type="checkbox"]:focus { outline: none; box-shadow: 0 0 0 2px rgba(167, 13
   font-weight: 700;
   letter-spacing: 0.045em;
   text-shadow:
-    0 0 1px currentColor,
-    0 0 3px currentColor,
-    0 0 8px color-mix(in srgb, currentColor 55%, transparent),
-    0 0 18px color-mix(in srgb, currentColor 28%, transparent);
+    0 0 1px color-mix(in srgb, currentColor 60%, transparent),
+    0 0 4px color-mix(in srgb, currentColor 28%, transparent),
+    0 0 10px color-mix(in srgb, currentColor 14%, transparent);
 }
 .hud-glow {
   text-shadow:
-    0 0 1px currentColor,
-    0 0 3px currentColor,
-    0 0 8px color-mix(in srgb, currentColor 55%, transparent),
-    0 0 18px color-mix(in srgb, currentColor 28%, transparent);
+    0 0 1px color-mix(in srgb, currentColor 60%, transparent),
+    0 0 4px color-mix(in srgb, currentColor 28%, transparent),
+    0 0 10px color-mix(in srgb, currentColor 14%, transparent);
 }
 /* Tighter bloom variant for the dim/muted HUD labels (section headers
    in --color-text-tertiary) -- keeps them readable without making every
@@ -685,6 +714,12 @@ select.atfield-input {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   transition: background 0.15s ease, color 0.15s ease, text-shadow 0.15s ease;
+  /* Every tab carries a soft phosphor halo (matching its own text color)
+     so the inactive items glow too, not just the selected one. The active
+     tab below swaps to the accent color and a slightly wider bloom. */
+  text-shadow:
+    0 0 1px color-mix(in srgb, currentColor 50%, transparent),
+    0 0 6px color-mix(in srgb, currentColor 20%, transparent);
 }
 .tab-rail-button:hover {
   background: var(--color-surface-hover);
@@ -694,8 +729,7 @@ select.atfield-input {
   background: var(--color-accent-light);
   color: var(--color-accent);
   text-shadow:
-    0 0 1px currentColor,
-    0 0 4px currentColor,
-    0 0 12px color-mix(in srgb, currentColor 50%, transparent),
-    0 0 24px color-mix(in srgb, currentColor 25%, transparent);
+    0 0 1px color-mix(in srgb, currentColor 60%, transparent),
+    0 0 5px color-mix(in srgb, currentColor 38%, transparent),
+    0 0 12px color-mix(in srgb, currentColor 18%, transparent);
 }

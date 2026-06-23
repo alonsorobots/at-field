@@ -28,8 +28,10 @@ export interface ThemeMeta {
   id: ThemeId;
   /** Human-readable name shown in the picker. */
   label: string;
-  /** Three swatch hexes (bg, accent, secondary-accent) for the picker
-      preview chip. Pulled by hand from the matching CSS block so the
+  /** Three swatch hexes (bg, accent, detail) for the picker preview
+      chip -- the same three roles the live UI uses: surface, active
+      chrome (--color-accent), and the "data" value color
+      (--color-detail). Pulled by hand from the matching CSS block so the
       picker tile reads honestly even when the theme isn't active. */
   swatches: [string, string, string];
   /** 8-stop sparkline color ramp, sampled by rampColor() in format.ts.
@@ -64,19 +66,22 @@ export const THEMES: ThemeMeta[] = [
       [225, 32, 56],
     ],
   },
-  // Each Eva theme's swatch tuple is [Base-surface, Accent, Other Detail]
-  // and each ramp climbs from "blends with bg" → Accent at the threshold
-  // anchor (index 6, t=0.85) → Other Detail at over-threshold (index 7,
-  // t=1.0). Matches the design spec: Accent at 25% drives the sparkline
-  // mid-to-high attention, Other Detail at 10% punctuates the moment a
-  // value crosses the trigger.
+  // Each Eva theme's swatch tuple is [Base-surface, Accent, Detail].
+  // Accent (2nd) drives active chrome; Detail (3rd) is the "data" color
+  // every live signal value is painted in. EVA-01/02 are two-spice units
+  // so accent≠detail (green+orange, orange+magenta); EVA-00/03/04 are
+  // monochrome by design, so their single vivid hue fills both slots.
+  // Ramp index 7 is the over-threshold beat and is kept byte-matched to
+  // each theme's --color-danger so the sparkline tip and the value/name
+  // flip to the same alarm color on a trigger.
   {
     id: "eva-00",
     label: "EVA-00",
-    swatches: ["#1a2456", "#ffffff", "#1e8562"],
-    // Base=Blue #345ac9, Accent=White, Other Detail=Green #1e8562.
-    // Climbs from deep navy up to pure white (Rei's pale highlights)
-    // then hard-cuts to the green eye over-threshold.
+    swatches: ["#1a2456", "#19d18d", "#ffffff"],
+    // Base=Blue #345ac9, Accent=Green #1e8562 (promoted so the vivid color
+    // drives active states), secondary highlight=White. Ramp climbs from
+    // deep navy up to pure white (Rei's pale highlights) then hard-cuts to
+    // the green eye over-threshold.
     ramp: [
       [20, 30, 70],
       [40, 60, 110],
@@ -85,16 +90,17 @@ export const THEMES: ThemeMeta[] = [
       [160, 175, 220],
       [210, 220, 240],
       [255, 255, 255],
-      [30, 133, 98],
+      [25, 209, 141],
     ],
   },
   {
     id: "eva-01",
     label: "EVA-01",
     swatches: ["#1a0f24", "#41bb42", "#e8790c"],
-    // Base=Purple, Accent=Green #41bb42, Other Detail=Burnt Orange #e8790c.
-    // Cool purple recess → green at threshold → shoulder orange over-
-    // threshold (the classic EVA-01 alarm color).
+    // Base=Purple, Accent=Green #41bb42 (active chrome), Detail=Burnt
+    // Orange #e8790c (live values). Cool purple recess → green at the
+    // threshold anchor → red-orange #ff3b1a over-threshold so index 7
+    // matches --color-danger (the value/name flip to it on a trigger).
     ramp: [
       [40, 30, 60],
       [60, 45, 80],
@@ -103,17 +109,18 @@ export const THEMES: ThemeMeta[] = [
       [70, 175, 80],
       [60, 200, 70],
       [65, 187, 66],
-      [232, 121, 12],
+      [255, 59, 26],
     ],
   },
   {
     id: "eva-02",
     label: "EVA-02",
-    swatches: ["#2a0808", "#e45e15", "#8a2d75"],
-    // Base=Bright Red #e41d18, Accent=Burnt Orange #e45e15,
-    // Other Detail=Magenta #8a2d75. Dark red recess → burnt orange at
-    // threshold → magenta over-threshold (the unit IS red, so magenta
-    // carries the over-threshold beat without disappearing into the bg).
+    swatches: ["#2a0808", "#ff6e14", "#c44d9e"],
+    // Base=Bright Red #e41d18, Accent=Burnt Orange #e45e15 (active chrome),
+    // Detail=Orchid Magenta #c44d9e (live values). Dark red recess → burnt
+    // orange at the threshold anchor → hot pink #ff3da0 over-threshold so
+    // index 7 matches --color-danger (the unit IS red, so the alarm beat
+    // lives in the magenta family to stay visible against the bg).
     ramp: [
       [50, 20, 20],
       [80, 30, 25],
@@ -122,17 +129,18 @@ export const THEMES: ThemeMeta[] = [
       [210, 85, 20],
       [225, 90, 18],
       [228, 94, 21],
-      [138, 45, 117],
+      [255, 61, 160],
     ],
   },
   {
     id: "eva-03",
     label: "EVA-03",
-    swatches: ["#1a1e3f", "#ffffff", "#83365e"],
-    // Base=Muted Purple #1a1e3f, Accent=White, Other Detail=Brighter
-    // Purple #83365e. Recess through deeper purples up to white at
-    // threshold, dropping to the brighter purple over-threshold so the
-    // theme stays "all purple" even when alarms fire.
+    swatches: ["#1a1e3f", "#b36ae7", "#ffffff"],
+    // Base=Deep Navy #1a1e3f, Accent/Detail=Luminous Lavender-Violet
+    // #b07cd6 (the old plum vanished against the navy). Ramp recesses
+    // through deeper navy-purples up to white at the threshold anchor,
+    // dropping to magenta-violet #d264c0 over-threshold so index 7 matches
+    // --color-danger and the alarm beat stays in the violet family.
     ramp: [
       [35, 40, 70],
       [55, 60, 95],
@@ -141,15 +149,16 @@ export const THEMES: ThemeMeta[] = [
       [180, 185, 215],
       [220, 220, 235],
       [255, 255, 255],
-      [131, 54, 94],
+      [210, 100, 192],
     ],
   },
   {
     id: "eva-04",
     label: "EVA-04",
-    swatches: ["#f4f4f6", "#4a4a4f", "#e8202d"],
-    // LIGHT theme. Base=White, Accent=Gray #4a4a4f, Other Base=Black,
-    // Other Detail=BRIGHT RED. On a white page, the ramp starts NEAR
+    swatches: ["#f4f4f6", "#e8202d", "#4a4a4f"],
+    // LIGHT theme. Base=White, Accent=BRIGHT RED #e8202d (promoted to drive
+    // active states), secondary highlight=Gray #4a4a4f, Other Base=Black.
+    // On a white page, the ramp starts NEAR
     // the bg color (very light gray) and climbs DOWN in lightness to
     // dark gray at threshold, then bright red over-threshold. Same
     // semantic shape as the dark themes (low value = recede, high

@@ -144,6 +144,71 @@ export function isDefaultDisplaySignal(wire: string): boolean {
   return true;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Signal → collector provenance (for disabled-rule remediation)
+// ─────────────────────────────────────────────────────────────────────
+
+export interface SensorSource {
+  /** Human label of the collector that *would* provide this signal. */
+  collector: string;
+  /** One-line, plain-English "how do I get this sensor working?" hint. */
+  fix: string;
+}
+
+// Metrics NVML reads straight from the NVIDIA driver.
+const NVML_GPU_METRICS = new Set([
+  "core_temp_c",
+  "util_percent",
+  "power_w",
+  "vram_used_percent",
+  "vram_used_bytes",
+  "processes",
+]);
+
+// Metrics the always-available system collector provides (psutil + Win32).
+const SYSTEM_CORE_METRICS = new Set([
+  "ram_used_percent",
+  "ram_used_bytes",
+  "commit_percent",
+  "commit_bytes",
+  "swap_used_percent",
+  "swap_used_bytes",
+]);
+
+/**
+ * Map a wire signal to the collector that supplies it, so a disabled rule
+ * can tell the operator exactly WHICH sensor to fix instead of just "some
+ * collector is missing". Mirrors the provenance of the Python collectors:
+ *   - NVML            → GPU core temp / util / power / VRAM use / proc count
+ *   - System          → RAM / commit / pagefile (built-in, cross-platform)
+ *   - LHM or HWiNFO   → everything board-level: VRAM junction & hot-spot
+ *                       temps, rail/core voltages, fan speeds, CPU pkg temp
+ *
+ * The last bucket is the catch-all because those are the signals that
+ * actually go missing in practice (NVML and the system collector are
+ * almost always present).
+ */
+export function sensorSourceForSignal(signal: string): SensorSource {
+  const gpu = signal.match(/^gpu\.\d+\.(.+)$/);
+  if (gpu && NVML_GPU_METRICS.has(gpu[1])) {
+    return {
+      collector: "NVIDIA driver (NVML)",
+      fix: "Install an NVIDIA driver (≥ 535) plus nvidia-ml-py, then restart the service.",
+    };
+  }
+  const sys = signal.match(/^system\.(.+)$/);
+  if (sys && SYSTEM_CORE_METRICS.has(sys[1])) {
+    return {
+      collector: "System collector",
+      fix: "This one is built in and should always be available -- the Status tab will show why it failed.",
+    };
+  }
+  return {
+    collector: "LibreHardwareMonitor or HWiNFO",
+    fix: "Board & VRAM sensors come from the bundled LibreHardwareMonitor (confirm its supervisor is running on the Status tab) or from HWiNFO with Shared Memory enabled.",
+  };
+}
+
 function metricLabel(metric: string): string {
   // gpu.0.core_temp_c -> "Core temp (°C)"
   // gpu.0.power_w -> "Power (W)"
