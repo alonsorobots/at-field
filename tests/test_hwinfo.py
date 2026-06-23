@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import struct
+import sys
 
 import pytest
 
@@ -285,3 +286,74 @@ class TestCollectorContract:
         c.shutdown()
         c.shutdown()  # second call must not raise
         assert c.health() is HealthState.FAILED
+
+
+# ---------------------------------------------------------------------------
+# Live shared-memory integration (Windows only)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="HWiNFO SHM binding is Windows-only")
+class TestLiveSharedMemory:
+    """End-to-end proof that the collector reads real shared-memory bytes.
+
+    The pure-parser tests above feed bytes straight to the parsers. This
+    test instead creates an actual named shared-memory section, writes the
+    synthetic HWiNFO buffer into it via the Win32 API, and points the
+    collector at that name -- so the real OpenFileMappingW / MapViewOfFile /
+    ctypes.string_at path is exercised. If this passes, "are we actually
+    consuming the live data?" is answered yes, without needing HWiNFO
+    installed. Uses the session-local ``Local\\`` namespace so it needs no
+    elevation (the real ``Global\\HWiNFO_SENS_SM2`` is created by HWiNFO,
+    which runs elevated).
+    """
+
+    def test_collector_reads_live_section(self, monkeypatch, sample_buffer):
+        import ctypes
+        from ctypes import wintypes
+
+        from atfield.collectors import hwinfo
+
+        name = "Local\\HWiNFO_SENS_SM2_attest"
+        PAGE_READWRITE = 0x04
+        FILE_MAP_ALL_ACCESS = 0x000F001F
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateFileMappingW.restype = wintypes.HANDLE
+        kernel32.CreateFileMappingW.argtypes = [
+            wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+            wintypes.DWORD, wintypes.DWORD, wintypes.LPCWSTR,
+        ]
+        kernel32.MapViewOfFile.restype = ctypes.c_void_p
+        kernel32.MapViewOfFile.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.c_size_t,
+        ]
+
+        size = len(sample_buffer)
+        # hFile = INVALID_HANDLE_VALUE -> pagefile-backed (named) section.
+        handle = kernel32.CreateFileMappingW(
+            ctypes.c_void_p(-1), None, PAGE_READWRITE, 0, size, name
+        )
+        assert handle, f"CreateFileMappingW failed: WinError {ctypes.GetLastError()}"
+        try:
+            addr = kernel32.MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0)
+            assert addr, f"MapViewOfFile failed: WinError {ctypes.GetLastError()}"
+            try:
+                ctypes.memmove(addr, sample_buffer, size)
+
+                # Aim the collector at our test section instead of HWiNFO's.
+                monkeypatch.setattr(hwinfo, "_SECTION_NAME", name)
+                c = hwinfo.HwinfoCollector()
+                result = c.probe()
+                assert result.available, result.reason
+                assert "gpu.0.mem_junction_temp_c" in result.signals
+
+                samples = c.sample()
+                assert samples["gpu.0.mem_junction_temp_c"].value == pytest.approx(64.0)
+                assert samples["system.cpu_package_temp_c"].value == pytest.approx(55.5)
+                assert samples["system.psu_12v_volts"].value == pytest.approx(12.1)
+                c.shutdown()
+            finally:
+                kernel32.UnmapViewOfFile(ctypes.c_void_p(addr))
+        finally:
+            kernel32.CloseHandle(handle)

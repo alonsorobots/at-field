@@ -35,6 +35,9 @@ What this module does
 
 * Reads any existing ``LibreHardwareMonitor.config``, preserving every
   ``<add key=... value=.../>`` setting that isn't one of ours.
+* Prunes LHM's runaway per-sensor graph-history blobs (see
+  ``_MAX_PRESERVED_VALUE_LEN``) so the file can't grow into the megabytes
+  and stall LHM's HTTP server on startup.
 * Overwrites only the keys AT-Field requires (above) with our values.
 * Writes atomically (temp file + ``os.replace``) so a power loss
   mid-write can't leave LHM with a half-written XML file.
@@ -78,6 +81,21 @@ __all__ = [
 _log = logging.getLogger("atfield.lhm_config")
 
 LHM_CONFIG_FILENAME: Final = "LibreHardwareMonitor.config"
+
+# LHM persists each sensor's *plotted graph history* straight into
+# appSettings -- one key per sensor like
+# ``/gpu-nvidia/0/temperature/0/values`` whose value is a serialized
+# time-series that grows without bound on a long-lived instance. Observed
+# in the wild: a single 24 MB config after ~2 weeks of continuous
+# supervised running, at which point LHM's HTTP server stopped coming up
+# within the supervisor's readiness window (the watchdog then sat in
+# `process_up_no_http` and silently disabled the LHM-backed rules).
+#
+# None of these are settings AT-Field (or a headless LHM) needs, and every
+# *real* setting LHM writes is short (booleans, ports, window geometry), so
+# we drop any preserved value longer than this cap. Our own required keys
+# are applied afterwards and are never affected.
+_MAX_PRESERVED_VALUE_LEN: Final = 512
 
 
 def _required_keys(port: int) -> dict[str, str]:
@@ -151,6 +169,18 @@ def ensure_lhm_config(lhm_dir: Path, *, port: int = 8085) -> Path:
                 cfg_path, exc,
             )
             existing = {}
+
+    # Drop LHM's runaway per-sensor graph history before merging so the
+    # written config stays small and LHM's web server comes up promptly.
+    oversized = {k: v for k, v in existing.items() if len(v) > _MAX_PRESERVED_VALUE_LEN}
+    if oversized:
+        pruned_bytes = sum(len(v) for v in oversized.values())
+        _log.warning(
+            "pruning %d oversized LHM config value(s) (~%.1f MB of graph history) from %s",
+            len(oversized), pruned_bytes / 1e6, cfg_path,
+        )
+        for k in oversized:
+            existing.pop(k, None)
 
     merged = dict(existing)
     merged.update(required)  # our keys win

@@ -85,9 +85,17 @@ class NvmlCollector:
         self._signals: tuple[str, ...] = ()
         self._consecutive_failures = 0
         self._max_consecutive = 3
-        # Live per-GPU process map; updated each sample(). Keyed by gpu_idx.
-        # Value is a list of (pid, used_vram_bytes) tuples.
+        # Live per-GPU process map. Keyed by gpu_idx; value is a list of
+        # (pid, used_vram_bytes) tuples. Refreshed on a slow cadence from
+        # sample() (cheap dashboard count) and force-refreshed at kill time.
         self._gpu_processes: dict[int, list[tuple[int, int]]] = {}
+        # Compute-process enumeration is by far the most expensive NVML call
+        # (~0.9 ms vs ~0.006 ms for ALL the metric reads combined on a 2-GPU
+        # box). It's only *consumed* when a kill fires, so we don't pay for it
+        # every tick -- we refresh at most this often on the hot path, and
+        # force a fresh enumeration at kill time via refresh_process_map().
+        self._proc_map_interval_ns = 5_000_000_000  # 5 s
+        self._last_proc_map_ns = 0
 
     # -- Probe -------------------------------------------------------------
 
@@ -193,7 +201,6 @@ class NvmlCollector:
         out: dict[str, Sample] = {}
         now = monotonic_ns()
         any_failure = False
-        new_proc_map: dict[int, list[tuple[int, int]]] = {}
 
         for i, handle in enumerate(self._handles):
             try:
@@ -235,34 +242,16 @@ class NvmlCollector:
                 # Power query is unsupported on some cards; not a failure.
                 pass
 
-            # Per-process VRAM map (best-effort -- consumer cards sometimes lie)
-            try:
-                procs = pynvml.nvmlDeviceGetComputeRunningProcesses_v3(handle)
-                pairs: list[tuple[int, int]] = []
-                for p in procs:
-                    used = getattr(p, "usedGpuMemory", None)
-                    # NVML returns ULLONG_MAX (0xFFFFFFFFFFFFFFFF) when not measurable.
-                    used_int = 0 if used is None or used == (1 << 64) - 1 else int(used)
-                    pairs.append((int(p.pid), used_int))
-                new_proc_map[i] = pairs
-            except Exception:
-                # Older driver: fall back to v2; older still: skip silently.
-                try:
-                    procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-                    pairs = []
-                    for p in procs:
-                        used = getattr(p, "usedGpuMemory", None)
-                        used_int = 0 if used is None or used == (1 << 64) - 1 else int(used)
-                        pairs.append((int(p.pid), used_int))
-                    new_proc_map[i] = pairs
-                except Exception:
-                    new_proc_map[i] = []
+        # Refresh the (expensive) per-process map only on a slow cadence so
+        # the hot path stays cheap. Kill targeting force-refreshes separately.
+        if now - self._last_proc_map_ns >= self._proc_map_interval_ns:
+            self._gpu_processes = self._enumerate_process_map()
+            self._last_proc_map_ns = now
 
-        self._gpu_processes = new_proc_map
         # Sample carrying the GPU-proc count; the actual map is read via
-        # process_map() by the service/actuator.
+        # process_map() / refresh_process_map() by the service/actuator.
         out[PER_PROCESS_VRAM_KEY] = Sample(
-            value=float(sum(len(v) for v in new_proc_map.values())),
+            value=float(sum(len(v) for v in self._gpu_processes.values())),
             taken_at_ns=now,
             source_id=_NAME,
             unit="count",
@@ -280,13 +269,55 @@ class NvmlCollector:
 
     # -- Per-process VRAM accessor -----------------------------------------
 
+    def _enumerate_process_map(self) -> dict[int, list[tuple[int, int]]]:
+        """Enumerate compute processes on every GPU (the expensive call).
+
+        Tries the modern ``_v3`` entry point first and falls back to the
+        legacy one for older drivers; a GPU that refuses both contributes an
+        empty list rather than failing the whole sweep.
+        """
+        pynvml = self._pynvml
+        proc_map: dict[int, list[tuple[int, int]]] = {}
+        for i, handle in enumerate(self._handles):
+            try:
+                procs = pynvml.nvmlDeviceGetComputeRunningProcesses_v3(handle)
+            except Exception:
+                try:
+                    procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+                except Exception:
+                    proc_map[i] = []
+                    continue
+            pairs: list[tuple[int, int]] = []
+            for p in procs:
+                used = getattr(p, "usedGpuMemory", None)
+                # NVML returns ULLONG_MAX (0xFFFFFFFFFFFFFFFF) when not measurable.
+                used_int = 0 if used is None or used == (1 << 64) - 1 else int(used)
+                pairs.append((int(p.pid), used_int))
+            proc_map[i] = pairs
+        return proc_map
+
     def process_map(self) -> dict[int, list[tuple[int, int]]]:
-        """Live per-GPU process map: ``{gpu_idx -> [(pid, used_bytes), ...]}``.
+        """Last-known per-GPU process map: ``{gpu_idx -> [(pid, bytes), ...]}``.
 
         Returned dict is a shallow copy so callers can't mutate the
-        collector's state. The actuator uses this when a kill action fires
-        to identify which python procs are touching which GPUs.
+        collector's state. This is the cadence-cached view (refreshed at most
+        every few seconds by sample()); for kill targeting use
+        :meth:`refresh_process_map` so the PIDs are current.
         """
+        return {gpu: list(pairs) for gpu, pairs in self._gpu_processes.items()}
+
+    def refresh_process_map(self) -> dict[int, list[tuple[int, int]]]:
+        """Force a fresh compute-process enumeration and return a copy.
+
+        Called by the service immediately before a GPU kill so targeting uses
+        up-to-the-moment PIDs rather than the cadence-cached map. Also resets
+        the cadence clock so sample() won't redundantly re-enumerate right
+        after a kill.
+        """
+        if not self._health.is_pollable or not self._handles:
+            return {}
+        self._gpu_processes = self._enumerate_process_map()
+        self._last_proc_map_ns = monotonic_ns()
         return {gpu: list(pairs) for gpu, pairs in self._gpu_processes.items()}
 
     # -- Health / lifecycle -------------------------------------------------

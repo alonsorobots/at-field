@@ -336,15 +336,21 @@ def run_service(
     )
     api_state.attach_engine(engine)
     # HWiNFO is an opportunistic, never-bundled source. When it isn't running
-    # it would otherwise show up in the dashboard as a permanent red "FAILED"
-    # collector card, which reads as "something is broken" rather than "an
-    # optional extra isn't active". So we omit it from the collector list when
-    # unavailable (it still appears, healthy, the moment HWiNFO is running).
-    # NVML/LHM/system stay listed even when unavailable -- they're expected.
+    # we still LIST it (so the dashboard -- and operators debugging why a rule
+    # is disabled -- can see at a glance whether it's feeding data), but with
+    # an "INACTIVE" health rather than "FAILED" so it reads as "an optional
+    # extra isn't active" instead of "something is broken". NVML/LHM/system are
+    # expected sources, so their absence stays a real "FAILED".
+    optional_collectors = {HwinfoCollector.name}
+
+    def _health_for(name: str, available: bool) -> str:
+        if available:
+            return "HEALTHY"
+        return "INACTIVE" if name in optional_collectors else "FAILED"
+
     api_state.set_collectors([
-        collector_view_from_probe(name, result, "HEALTHY" if result.available else "FAILED")
+        collector_view_from_probe(name, result, _health_for(name, result.available))
         for name, result in probe_results.items()
-        if result.available or name != HwinfoCollector.name
     ])
     # Hand the LHM supervisor (if we managed to start one) to the API
     # state so /health can surface its per-spawn status -- in particular
@@ -460,7 +466,10 @@ def run_service(
                 # Pick candidate PIDs for GPU rules from the NVML proc map.
                 candidate_pids = None
                 if nvml is not None and effective.signal.startswith("gpu."):
-                    proc_map = nvml.process_map()
+                    # Force a fresh enumeration so kill targeting uses
+                    # up-to-the-moment PIDs (the hot-path map is only
+                    # cadence-refreshed to keep the per-tick cost low).
+                    proc_map = nvml.refresh_process_map()
                     # Extract gpu index from signal name: gpu.<idx>.<metric>
                     try:
                         idx = int(effective.signal.split(".")[1])
