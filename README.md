@@ -70,6 +70,8 @@ Existing tools either monitor without acting ([System-Resource-Monitor](https://
 3. Done. The installer registers the `AT-Field Watchdog` service (auto-start, `LocalSystem`), bundles the sensor helper + LibreHardwareMonitor DLLs, and drops a starter `config.toml`. A tray icon appears; click it for the dashboard.
 
 That's the whole setup — no Python, no PATH, no elevated PowerShell.
+Step-by-step install, verification, and troubleshooting for a fresh machine
+live in [docs/install.md](docs/install.md).
 
 ### Power users — pip
 

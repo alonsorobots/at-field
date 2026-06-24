@@ -18,9 +18,15 @@ single bundled installer. The Tauri/NSIS build is documented in
 dist/atfield/
   atfield-service.exe   <- NSSM target; runs as LocalSystem
   atf.exe               <- CLI for the user (status, pause, doctor, etc.)
+  atfield-sensors.exe   <- headless LHM sensor helper (built by build_helper.ps1)
+  LibreHardwareMonitor.exe + *.dll  <- vendored by fetch_lhm.ps1
   _internal/            <- shared Python runtime + dependencies
-  scripts/              <- install/uninstall PowerShell + config example
+    scripts/            <- install/uninstall/grant PowerShell + config example
 ```
+
+The install scripts are PyInstaller `datas`, so in the onedir layout they
+land under `_internal/scripts/` (not a top-level `scripts/`). The tray's
+`service_installer.rs` and `install_service.ps1` both account for this.
 
 Both exes share `_internal/` (deduplicated via PyInstaller's `MERGE`), so the
 total bundle is ~36 MB rather than ~70 MB it would be if each was built
@@ -79,10 +85,18 @@ not a runtime dependency.
 
 ## CI
 
-`.github/workflows/release.yml` builds this bundle on every `v*` tag push,
-and uploads `atfield-bundle-windows.zip` as a release artifact. The single
-NSIS installer downloads that zip during its build step and stages it inside
-the Tauri resource directory.
+`.github/workflows/release.yml` builds this bundle on every `v*` tag push
+(and via `workflow_dispatch`). The `standalone` job runs, in order:
+
+1. `pyinstaller --noconfirm --clean packaging/pyinstaller/atfield.spec`
+2. `scripts/fetch_lhm.ps1` — vendors LibreHardwareMonitor + its DLLs
+3. `scripts/build_helper.ps1` — compiles `atfield-sensors.exe` (in-box csc)
+
+It then zips `dist/atfield/*` as the `standalone-bundle` artifact
+(`atfield-<version>-windows-x64.zip`). The `tray-installer` job downloads
+that zip, re-stages it at `dist/atfield/`, and runs the Tauri/NSIS build —
+so the single installer ships both the tray app and a complete, sensor-ready
+watchdog. End-user install/verification lives in [`docs/install.md`](install.md).
 
 ## Known caveats
 
