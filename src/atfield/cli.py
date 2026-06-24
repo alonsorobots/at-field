@@ -166,11 +166,11 @@ def inputs() -> None:
     """One-shot probe + sample dump for every collector. Useful for setup verification."""
     # Imported lazily so `atf --help` doesn't pay the NVML/psutil cost.
     from atfield.collectors.hwinfo import HwinfoCollector
-    from atfield.collectors.lhm import LhmCollector
+    from atfield.collectors.lhmlib import LhmLibCollector
     from atfield.collectors.nvml import NvmlCollector
     from atfield.collectors.system import SystemCollector
 
-    collectors = [SystemCollector(), NvmlCollector(), LhmCollector(), HwinfoCollector()]
+    collectors = [SystemCollector(), NvmlCollector(), LhmLibCollector(), HwinfoCollector()]
     for c in collectors:
         result = c.probe()
         color = "green" if result.available else "red"
@@ -614,11 +614,11 @@ def doctor(
     # 5. Live collector probes (we don't need a running service for this)
     try:
         from atfield.collectors.hwinfo import HwinfoCollector
-        from atfield.collectors.lhm import LhmCollector
+        from atfield.collectors.lhmlib import LhmLibCollector
         from atfield.collectors.nvml import NvmlCollector
         from atfield.collectors.system import SystemCollector
 
-        for c in (SystemCollector(), NvmlCollector(), LhmCollector(), HwinfoCollector()):
+        for c in (SystemCollector(), NvmlCollector(), LhmLibCollector(), HwinfoCollector()):
             r = c.probe()
             if r.available:
                 successes.append(f"collector {c.name}: OK ({r.reason})")
@@ -646,39 +646,25 @@ def doctor(
     except ImportError as exc:
         problems.append(f"could not import collectors: {exc}")
 
-    # 5b. LHM supervisor reachability (service-mode footgun catch).
-    # When the watchdog is running as a Windows Service, the LHM
-    # supervisor needs ATFIELD_LHM_EXE pointing at a real binary --
-    # find_lhm_executable()'s defaults look next to sys.executable
-    # which under NSSM is the .venv\Scripts\python.exe, not where
-    # LHM actually lives. install_service.ps1 now auto-detects nearby
-    # LHM and bakes the env var into the service, but pre-v0.3.1
-    # installs (or unusual paths) can still hit this. We surface it
-    # here with a concrete `nssm set ... AppEnvironmentExtra ...`
-    # command the user can paste.
+    # 5c. Headless sensor helper (the LHM-library transport).
+    # AT-Field reads CPU package / GPU memory-junction / PSU voltage
+    # sensors via the bundled atfield-sensors.exe (-> LibreHardwareMonitorLib),
+    # NOT LHM's GUI web server. Surface whether the helper binary is
+    # discoverable, since that's the new precondition for those signals.
     try:
-        import os as _os
+        from atfield.collectors.lhmlib import find_sensor_helper
 
-        from atfield.lhm_supervisor import find_lhm_executable
-
-        env_path = _os.environ.get("ATFIELD_LHM_EXE")
-        found = find_lhm_executable()
-        if found is not None:
-            note = " (via ATFIELD_LHM_EXE)" if env_path else " (via default search)"
-            successes.append(f"LHM binary discoverable at {found}{note}")
+        helper = find_sensor_helper()
+        if helper is not None:
+            successes.append(f"sensor helper discoverable at {helper}")
         else:
             problems.append(
-                "LHM binary not discoverable\n"
-                "  This is fine if you don't want VRAM-junction / CPU-temp / "
-                "PSU voltage signals. Otherwise:\n"
-                "    elevated PowerShell:\n"
-                '      atf install-lhm    # downloads to %USERPROFILE%\\.atfield\\lhm\\\n'
-                "    then either:\n"
-                '      setx ATFIELD_LHM_EXE "<path>\\LibreHardwareMonitor.exe"   # user-shell sessions\n'
-                "    or for the running Windows Service:\n"
-                '      C:\\ProgramData\\ATField\\nssm.exe set ATFieldWatchdog '
-                'AppEnvironmentExtra "ATFIELD_LHM_EXE=<path>\\LibreHardwareMonitor.exe"\n'
-                "      Restart-Service ATFieldWatchdog"
+                "sensor helper (atfield-sensors.exe) not found\n"
+                "  This is fine if you don't want CPU-package / VRAM-junction "
+                "temps or PSU voltages. Otherwise build it next to the bundled "
+                "LibreHardwareMonitorLib.dll:\n"
+                "      powershell -ExecutionPolicy Bypass -File scripts\\build_helper.ps1\n"
+                "  or set ATFIELD_SENSOR_EXE to its full path, then restart the service."
             )
     except ImportError:
         pass

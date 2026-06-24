@@ -45,7 +45,7 @@ from atfield.audit import (
 )
 from atfield.collectors import HealthState, ProbeResult
 from atfield.collectors.hwinfo import HwinfoCollector
-from atfield.collectors.lhm import LhmCollector
+from atfield.collectors.lhmlib import LhmLibCollector
 from atfield.collectors.nvml import PER_PROCESS_VRAM_KEY, NvmlCollector
 from atfield.collectors.system import SystemCollector
 from atfield.config import AtFieldConfig, ConfigError, default_config, load_config
@@ -193,7 +193,7 @@ def _probe_all_collectors(audit: AuditWriter) -> tuple[list[object], dict[str, P
     collectors_to_try = [
         SystemCollector(),
         NvmlCollector(),
-        LhmCollector(),
+        LhmLibCollector(),
         HwinfoCollector(),
     ]
     healthy: list[object] = []
@@ -557,12 +557,23 @@ def run_service(
 
 
 def _maybe_start_lhm_supervisor():
-    """Locate LHM on disk and start a supervisor for it. Returns None if
-    no LHM binary is found -- AT-Field still runs without VRAM-junction
-    or CPU-package temps; the LHM collector's probe just reports
-    'unavailable' and any rules that need those signals get disabled
-    with a clear reason.
+    """Optionally launch the LHM *GUI* and supervise it. Returns None
+    unless explicitly opted in.
+
+    As of the library-based sensor transport, AT-Field reads sensors via
+    the bundled headless helper (``atfield-sensors.exe`` ->
+    LibreHardwareMonitorLib), NOT LHM's GUI web server. Running the GUI is
+    now redundant and would have two processes contend for the WinRing0
+    kernel driver, so we no longer auto-start it. Set
+    ``ATFIELD_RUN_LHM_GUI=1`` to restore the old behavior (e.g. if you want
+    LHM's own UI open alongside).
     """
+    if not os.environ.get("ATFIELD_RUN_LHM_GUI"):
+        _log.debug(
+            "LHM GUI auto-start disabled; sensors come from the headless "
+            "library helper. Set ATFIELD_RUN_LHM_GUI=1 to launch the GUI."
+        )
+        return None
     try:
         from atfield.lhm_supervisor import (
             LhmSupervisor,

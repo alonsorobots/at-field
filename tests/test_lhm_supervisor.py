@@ -18,6 +18,7 @@ from atfield.lhm_config import LHM_CONFIG_FILENAME, REQUIRED_KEYS
 from atfield.lhm_supervisor import (
     LhmSupervisor,
     LhmSupervisorConfig,
+    ensure_url_reservation,
     find_lhm_executable,
     probe_lhm_http,
 )
@@ -485,3 +486,132 @@ class TestProbeLhmHttp:
             poll_interval_s=0.05,
         )
         assert ok is False
+
+
+class TestRestartOnNoHttp:
+    """LHM tries StartHttpListener() exactly once and swallows failures,
+    so 'process alive' != 'web server up'. The supervisor must kill and
+    respawn when the HTTP probe never succeeds, up to a cap, then give
+    up to avoid churning forever."""
+
+    def _cfg(self, tmp_path, *, limit):
+        return LhmSupervisorConfig(
+            executable=tmp_path / "FakeLHM.exe",
+            port=8085,
+            backoff_initial_s=0.01,
+            backoff_max_s=0.05,
+            backoff_factor=2.0,
+            shutdown_grace_s=0.1,
+            http_ready_timeout_s=0.5,  # probe is stubbed; value just enables the path
+            manage_config=False,
+            http_failure_restart_limit=limit,
+        )
+
+    def test_respawns_then_gives_up_when_http_never_binds(self, tmp_path, monkeypatch):
+        import atfield.lhm_supervisor as mod
+
+        # Probe always reports "never came up", instantly.
+        monkeypatch.setattr(mod, "probe_lhm_http", lambda **kw: False)
+
+        spawner = _ScriptedSpawner()
+        for _ in range(5):
+            spawner.script.append(_FakeProc(exit_code=None, linger_until_terminated=True))
+
+        sup = LhmSupervisor(self._cfg(tmp_path, limit=2), spawner=spawner)
+        sup.start()
+        try:
+            # limit=2 -> failures 1 and 2 respawn, failure 3 gives up:
+            # exactly 3 spawns, then no more.
+            assert _wait_until(lambda: len(spawner.spawn_calls) >= 3, timeout=3.0)
+            time.sleep(0.25)
+            assert len(spawner.spawn_calls) == 3
+        finally:
+            sup.stop()
+
+    def test_no_respawn_when_http_becomes_ready(self, tmp_path, monkeypatch):
+        import atfield.lhm_supervisor as mod
+
+        monkeypatch.setattr(mod, "probe_lhm_http", lambda **kw: True)
+
+        spawner = _ScriptedSpawner()
+        spawner.script.append(_FakeProc(exit_code=None, linger_until_terminated=True))
+        spawner.script.append(_FakeProc(exit_code=None, linger_until_terminated=True))
+
+        sup = LhmSupervisor(self._cfg(tmp_path, limit=2), spawner=spawner)
+        sup.start()
+        try:
+            assert spawner.wait_for_spawn(2.0)
+            time.sleep(0.25)
+            assert len(spawner.spawn_calls) == 1  # healthy -> no respawn
+            with sup.status_lock:
+                assert sup._status.http_ready is True
+        finally:
+            sup.stop()
+
+
+class TestEnsureUrlReservation:
+    """The URL-ACL provisioning that lets LHM's HttpListener bind the
+    wildcard prefix without being elevated. We stub ``subprocess.run`` so
+    the suite never touches real http.sys state."""
+
+    def _patch_run(self, monkeypatch, handler):
+        import atfield.lhm_supervisor as mod
+
+        monkeypatch.setattr(mod.sys, "platform", "win32", raising=False)
+        monkeypatch.setattr(mod.subprocess, "run", handler)
+
+    def test_skipped_off_windows(self, monkeypatch):
+        import atfield.lhm_supervisor as mod
+
+        monkeypatch.setattr(mod.sys, "platform", "linux", raising=False)
+        assert ensure_url_reservation(8085) == "skipped:not-windows"
+
+    def test_present_when_show_lists_url(self, monkeypatch):
+        def handler(cmd, **kw):
+            assert "show" in cmd
+            return _completed(stdout="    Reserved URL : http://+:8085/\n")
+
+        self._patch_run(monkeypatch, handler)
+        assert ensure_url_reservation(8085) == "present"
+
+    def test_added_when_absent_then_add_succeeds(self, monkeypatch):
+        calls = []
+
+        def handler(cmd, **kw):
+            calls.append(cmd)
+            if "show" in cmd:
+                return _completed(stdout="", returncode=1)
+            assert "add" in cmd and any(a.startswith("sddl=") for a in cmd)
+            return _completed(returncode=0)
+
+        self._patch_run(monkeypatch, handler)
+        assert ensure_url_reservation(8085) == "added"
+        assert any("add" in c for c in calls)
+
+    def test_failed_when_add_returns_nonzero(self, monkeypatch):
+        def handler(cmd, **kw):
+            if "show" in cmd:
+                return _completed(stdout="", returncode=1)
+            return _completed(stdout="The requested operation requires elevation.", returncode=1)
+
+        self._patch_run(monkeypatch, handler)
+        result = ensure_url_reservation(8085)
+        assert result.startswith("failed:")
+
+    def test_never_raises_when_subprocess_explodes(self, monkeypatch):
+        def handler(cmd, **kw):
+            raise OSError("netsh not found")
+
+        self._patch_run(monkeypatch, handler)
+        # Must swallow and report, never propagate -- spawning LHM is more
+        # important than the reservation.
+        assert ensure_url_reservation(8085).startswith("failed:")
+
+
+def _completed(*, stdout: str = "", stderr: str = "", returncode: int = 0):
+    """Minimal stand-in for subprocess.CompletedProcess."""
+    import subprocess
+
+    return subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout=stdout, stderr=stderr
+    )

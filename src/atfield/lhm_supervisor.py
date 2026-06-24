@@ -48,12 +48,13 @@ import logging
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Final, Protocol
 
 from atfield.lhm_config import ensure_lhm_config
 
@@ -193,6 +194,18 @@ class LhmSupervisorConfig:
     a previous AT-Field version, and we want the HTTP server reliably
     enabled. Disabled in tests where there's no real exe."""
 
+    http_failure_restart_limit: int = 4
+    """How many times to kill+respawn LHM when the process comes up but
+    its HTTP server never binds. LHM attempts ``StartHttpListener()``
+    exactly once at launch and swallows any failure, so a *transient*
+    first-start fault -- the URL reservation landing a beat late, a
+    Session-0 hiccup, a port held momentarily by a dying prior instance
+    -- would otherwise wedge every LHM-backed rule until the next service
+    restart. We give it a few fresh starts (each a brand-new process that
+    re-runs StartHttpListener) before giving up and leaving the process
+    alone, so we don't churn forever on a genuinely unfixable box. Set to
+    0 to disable restart-on-no-HTTP entirely."""
+
 
 @dataclass
 class LhmStatus:
@@ -261,6 +274,12 @@ class LhmSupervisor:
         self._thread: threading.Thread | None = None
         self._proc: ProcessHandle | None = None
         self._proc_lock = threading.Lock()
+
+        # Count of consecutive "process up but HTTP never bound" faults.
+        # Reset on a healthy spawn; capped by
+        # ``config.http_failure_restart_limit`` so we stop churning on a
+        # box where LHM can genuinely never bind.
+        self._http_failures = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -335,8 +354,51 @@ class LhmSupervisor:
                               self._config.backoff_max_s)
                 continue
 
-            # Spawn succeeded; reset backoff. Wait for the child to exit.
-            backoff = self._config.backoff_initial_s
+            # The OS-level launch succeeded. But LHM tries
+            # StartHttpListener() exactly once and swallows failures, so a
+            # live process is NOT proof of a working web server. If the
+            # probe in _spawn_once never saw the port open, treat it as a
+            # restartable fault: kill LHM and respawn (a fresh process
+            # re-runs StartHttpListener), with growing backoff, up to a
+            # cap. This self-heals transient first-start failures -- the
+            # URL reservation committing a beat late, a Session-0 hiccup,
+            # a port briefly held by a dying prior instance -- which would
+            # otherwise leave every LHM-backed rule dead until a manual
+            # service restart.
+            if self._config.http_ready_timeout_s > 0 and self._config.http_failure_restart_limit > 0:
+                with self.status_lock:
+                    http_ok = self._status.http_ready
+                if http_ok:
+                    self._http_failures = 0
+                    backoff = self._config.backoff_initial_s
+                else:
+                    self._http_failures += 1
+                    if self._http_failures <= self._config.http_failure_restart_limit:
+                        _log.warning(
+                            "LHM is up but its HTTP server never bound "
+                            "(attempt %d/%d); killing and respawning in %.1fs",
+                            self._http_failures,
+                            self._config.http_failure_restart_limit,
+                            backoff,
+                        )
+                        self._terminate_proc()
+                        if self._stop_event.is_set():
+                            break
+                        self._wait_with_backoff(backoff)
+                        backoff = min(backoff * self._config.backoff_factor,
+                                      self._config.backoff_max_s)
+                        continue
+                    _log.error(
+                        "LHM is up but its HTTP server still never bound after "
+                        "%d respawns; leaving the process running and giving up "
+                        "retries to avoid churn. Run `atf doctor` for the fix.",
+                        self._http_failures,
+                    )
+                    backoff = self._config.backoff_initial_s
+            else:
+                backoff = self._config.backoff_initial_s
+
+            # Wait for the child to exit.
             exit_code = self._wait_for_proc()
 
             if self._stop_event.is_set():
@@ -400,6 +462,9 @@ class LhmSupervisor:
                     "spawning anyway with whatever is on disk",
                     lhm_dir, exc,
                 )
+            # Reserve the wildcard URL so LHM's HttpListener can bind it
+            # without being elevated. Best-effort; never fatal (logs status).
+            ensure_url_reservation(self._config.port)
 
         args = [
             str(self._config.executable),
@@ -510,6 +575,80 @@ class LhmSupervisor:
 # ---------------------------------------------------------------------------
 # Bundled-LHM resolution
 # ---------------------------------------------------------------------------
+
+
+# SDDL granting the well-known *Everyone* (World, ``WD``) principal
+# GENERIC_EXECUTE (``GX``) -- the http.sys access right that lets a token
+# register/listen on a reserved URL. Using the SID keeps this correct on
+# non-English Windows (the literal name "Everyone" is localized).
+_URLACL_SDDL: Final = "D:(A;;GX;;;WD)"
+
+
+def ensure_url_reservation(port: int, *, host: str = "+") -> str:
+    """Ensure http.sys lets LHM bind ``http://<host>:<port>/`` unelevated.
+
+    Why this is needed
+    ------------------
+    LHM 0.9.6 (the latest stable) always binds the *strong-wildcard*
+    prefix ``http://+:<port>/`` for its remote web server -- binding a
+    specific IP such as ``127.0.0.1`` only landed in post-0.9.6 builds.
+    http.sys refuses a wildcard prefix for any token that lacks an
+    explicit URL reservation *or* administrator rights, so on a hardened
+    box (and on recent Windows builds even for some service tokens) LHM's
+    ``HttpListener.Start()`` throws ``Access is denied``, the exception is
+    swallowed, and the process sits up with no HTTP server -- the
+    ``process_up_no_http`` state that disables every LHM-backed rule.
+
+    The fix is the documented one: reserve the URL for *Everyone*. The
+    watchdog runs as LocalSystem, so it can create the reservation here on
+    every spawn (self-healing if someone clears it). Once present, LHM
+    binds regardless of its own privilege level.
+
+    Best-effort and never fatal: if we're not elevated (dev ``atf run``),
+    ``netsh`` is missing, or the box forbids it, we log and return a status
+    string -- LHM is spawned anyway and the collector probe surfaces the
+    result. Returns one of: ``"present"``, ``"added"``,
+    ``"failed:<reason>"``, ``"skipped:<reason>"``.
+    """
+    if sys.platform != "win32":
+        return "skipped:not-windows"
+
+    url = f"http://{host}:{port}/"
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    # 1. Already reserved? `show urlacl url=` is read-only and cheap, and
+    #    avoids a redundant (admin-only) `add` on every single spawn.
+    try:
+        shown = subprocess.run(
+            ["netsh", "http", "show", "urlacl", f"url={url}"],
+            capture_output=True, text=True, timeout=10, creationflags=flags,
+        )
+        if url.lower() in (shown.stdout or "").lower():
+            return "present"
+    except Exception as exc:  # noqa: BLE001 -- diagnostics only, never fatal
+        _log.debug("netsh show urlacl %s raised %r", url, exc)
+
+    # 2. Add the reservation for Everyone (World SID, locale-independent).
+    try:
+        added = subprocess.run(
+            ["netsh", "http", "add", "urlacl", f"url={url}", f"sddl={_URLACL_SDDL}"],
+            capture_output=True, text=True, timeout=10, creationflags=flags,
+        )
+        if added.returncode == 0:
+            _log.info("reserved URL ACL %s so LHM's web server can bind unelevated", url)
+            return "added"
+        detail = ((added.stdout or "") + (added.stderr or "")).strip().splitlines()
+        reason = detail[-1].strip() if detail else f"rc={added.returncode}"
+        _log.warning(
+            "could not reserve URL ACL %s (%s); LHM's web server may fail to "
+            "bind unless LHM runs elevated. Run elevated: "
+            "netsh http add urlacl url=%s user=Everyone listen=yes",
+            url, reason, url,
+        )
+        return f"failed:{reason}"
+    except Exception as exc:  # noqa: BLE001 -- never let this break startup
+        _log.warning("netsh add urlacl %s raised %r; spawning LHM anyway", url, exc)
+        return f"failed:{exc!r}"
 
 
 def find_lhm_executable(

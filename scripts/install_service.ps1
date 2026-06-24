@@ -203,9 +203,10 @@ if ($bundledMode) {
 #      (dev workflow: PyInstaller-built bundle).
 #   3. %ProgramFiles%\LibreHardwareMonitor\LibreHardwareMonitor.exe
 #      (upstream installer path).
+$scriptDir = Split-Path -Parent $MyInvocation.ScriptName
+$repoRoot = Split-Path -Parent $scriptDir
 $lhmExe = $env:ATFIELD_LHM_EXE
 if (-not $lhmExe) {
-    $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.ScriptName)
     $bundledLhm = Join-Path $repoRoot 'dist\atfield\LibreHardwareMonitor.exe'
     if (Test-Path $bundledLhm) {
         $lhmExe = (Resolve-Path $bundledLhm).Path
@@ -214,11 +215,49 @@ if (-not $lhmExe) {
         if (Test-Path $pfLhm) { $lhmExe = $pfLhm }
     }
 }
+
+# Locate -- and if necessary build -- the headless sensor helper. AT-Field
+# reads CPU package / GPU memory-junction / PSU voltage sensors through this
+# (atfield-sensors.exe -> LibreHardwareMonitorLib), NOT LHM's fragile GUI
+# web server. The exe lives next to the bundled LibreHardwareMonitorLib.dll.
+$sensorExe = $env:ATFIELD_SENSOR_EXE
+if (-not $sensorExe) {
+    $helperDir = if ($lhmExe) { Split-Path -Parent $lhmExe } else { Join-Path $repoRoot 'dist\atfield' }
+    $candidate = Join-Path $helperDir 'atfield-sensors.exe'
+    if (-not (Test-Path $candidate)) {
+        $buildScript = Join-Path $scriptDir 'build_helper.ps1'
+        $libDll = Join-Path $helperDir 'LibreHardwareMonitorLib.dll'
+        if ((Test-Path $buildScript) -and (Test-Path $libDll)) {
+            try {
+                Write-Host "Building sensor helper into $helperDir ..."
+                & powershell -NoProfile -ExecutionPolicy Bypass -File $buildScript -OutDir $helperDir | Out-Null
+            } catch {
+                Write-Host "sensor helper build failed (continuing): $_"
+            }
+        }
+    }
+    if (Test-Path $candidate) { $sensorExe = (Resolve-Path $candidate).Path }
+}
+
+# Bake discovered paths into the service environment so the SYSTEM account
+# finds them without the user exporting anything. ATFIELD_LHM_EXE still
+# helps the helper locate its sibling DLLs (and powers the optional LHM GUI
+# under ATFIELD_RUN_LHM_GUI=1).
+$envExtra = @()
 if ($lhmExe) {
-    Write-Host "LHM:       $lhmExe"
-    & $nssm set $ServiceName AppEnvironmentExtra "ATFIELD_LHM_EXE=$lhmExe" | Out-Null
+    Write-Host "LHM DLLs:  $lhmExe"
+    $envExtra += "ATFIELD_LHM_EXE=$lhmExe"
 } else {
-    Write-Host "LHM:       not found nearby; run 'atf install-lhm' from elevated PowerShell or set ATFIELD_LHM_EXE on the service to enable VRAM-junction/CPU temp signals."
+    Write-Host "LHM DLLs:  not found nearby; run 'atf install-lhm' or set ATFIELD_LHM_EXE."
+}
+if ($sensorExe) {
+    Write-Host "Sensors:   $sensorExe"
+    $envExtra += "ATFIELD_SENSOR_EXE=$sensorExe"
+} else {
+    Write-Host "Sensors:   helper not found; CPU/GPU-junction/PSU signals stay disabled until you build it (scripts\build_helper.ps1) or set ATFIELD_SENSOR_EXE."
+}
+if ($envExtra.Count -gt 0) {
+    & $nssm set $ServiceName AppEnvironmentExtra @envExtra | Out-Null
 }
 
 # Stdout/stderr -> rotating log under StateDir (NSSM handles rotation)
