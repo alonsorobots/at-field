@@ -10,8 +10,8 @@
     Framework 4.7.2 and is written to C# 5 so this compiler can build it.
 
 .PARAMETER OutDir
-    Directory containing LibreHardwareMonitorLib.dll / Newtonsoft.Json.dll
-    and where the exe is written. Defaults to <repo>\dist\atfield.
+    Directory containing LibreHardwareMonitorLib.dll and where the exe is
+    written. Defaults to <repo>\dist\atfield.
 #>
 param(
     [string]$OutDir
@@ -24,9 +24,8 @@ if (-not $OutDir) { $OutDir = Join-Path $repo 'dist\atfield' }
 $src = Join-Path $repo 'helper\AtfieldSensors.cs'
 $exe = Join-Path $OutDir 'atfield-sensors.exe'
 $lhm = Join-Path $OutDir 'LibreHardwareMonitorLib.dll'
-$json = Join-Path $OutDir 'Newtonsoft.Json.dll'
 
-foreach ($p in @($src, $lhm, $json)) {
+foreach ($p in @($src, $lhm)) {
     if (-not (Test-Path $p)) { throw "required input not found: $p" }
 }
 
@@ -36,7 +35,7 @@ if (-not (Test-Path $csc)) {
 }
 
 Write-Host "Compiling $src -> $exe" -ForegroundColor Cyan
-& $csc /nologo /target:exe /platform:x64 "/out:$exe" "/reference:$lhm" "/reference:$json" $src
+& $csc /nologo /target:exe /platform:x64 "/out:$exe" "/reference:$lhm" $src
 if ($LASTEXITCODE -ne 0) { throw "csc.exe failed with exit code $LASTEXITCODE" }
 
 Write-Host ("Built {0} ({1:N0} bytes)" -f $exe, (Get-Item $exe).Length) -ForegroundColor Green

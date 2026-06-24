@@ -29,9 +29,9 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Security.Principal;
+using System.Text;
 using System.Threading;
 using LibreHardwareMonitor.Hardware;
-using Newtonsoft.Json;
 
 namespace AtField
 {
@@ -189,8 +189,114 @@ namespace AtField
 
         private static void Emit(object obj)
         {
-            Console.Out.WriteLine(JsonConvert.SerializeObject(obj));
+            StringBuilder sb = new StringBuilder(256);
+            WriteJson(sb, obj);
+            Console.Out.WriteLine(sb.ToString());
             Console.Out.Flush();
+        }
+
+        // Minimal JSON writer. The payload is only ever the small, fixed set
+        // of types Obj()/EmitSample() build: Dictionary<string,object>,
+        // List<object>, string, double, bool, and null. Hand-rolling this
+        // keeps the helper dependency-free -- LibreHardwareMonitor stopped
+        // shipping Newtonsoft.Json.dll in its v0.9.x zips, and we don't want
+        // to vend a JSON library just to print a few key/value lines.
+        private static void WriteJson(StringBuilder sb, object value)
+        {
+            if (value == null) { sb.Append("null"); return; }
+
+            Dictionary<string, object> dict = value as Dictionary<string, object>;
+            if (dict != null)
+            {
+                sb.Append('{');
+                bool first = true;
+                foreach (KeyValuePair<string, object> kv in dict)
+                {
+                    if (!first) sb.Append(',');
+                    first = false;
+                    WriteString(sb, kv.Key);
+                    sb.Append(':');
+                    WriteJson(sb, kv.Value);
+                }
+                sb.Append('}');
+                return;
+            }
+
+            string str = value as string;
+            if (str != null) { WriteString(sb, str); return; }
+
+            if (value is bool) { sb.Append(((bool)value) ? "true" : "false"); return; }
+
+            if (value is double)
+            {
+                double d = (double)value;
+                if (double.IsNaN(d) || double.IsInfinity(d)) { sb.Append("null"); return; }
+                sb.Append(d.ToString("R", CultureInfo.InvariantCulture));
+                return;
+            }
+
+            if (value is float)
+            {
+                float f = (float)value;
+                if (float.IsNaN(f) || float.IsInfinity(f)) { sb.Append("null"); return; }
+                sb.Append(f.ToString("R", CultureInfo.InvariantCulture));
+                return;
+            }
+
+            if (value is int || value is long || value is short || value is byte)
+            {
+                sb.Append(Convert.ToInt64(value).ToString(CultureInfo.InvariantCulture));
+                return;
+            }
+
+            System.Collections.IEnumerable seq = value as System.Collections.IEnumerable;
+            if (seq != null)
+            {
+                sb.Append('[');
+                bool first = true;
+                foreach (object item in seq)
+                {
+                    if (!first) sb.Append(',');
+                    first = false;
+                    WriteJson(sb, item);
+                }
+                sb.Append(']');
+                return;
+            }
+
+            // Fallback: anything unexpected is emitted as a string.
+            WriteString(sb, Convert.ToString(value, CultureInfo.InvariantCulture));
+        }
+
+        private static void WriteString(StringBuilder sb, string s)
+        {
+            sb.Append('"');
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                switch (c)
+                {
+                    case '"': sb.Append("\\\""); break;
+                    case '\\': sb.Append("\\\\"); break;
+                    case '\b': sb.Append("\\b"); break;
+                    case '\f': sb.Append("\\f"); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default:
+                        if (c < ' ')
+                        {
+                            sb.Append("\\u");
+                            sb.Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+                        }
+                        else
+                        {
+                            sb.Append(c);
+                        }
+                        break;
+                }
+            }
+            sb.Append('"');
         }
 
         private static void EmitError(string message)

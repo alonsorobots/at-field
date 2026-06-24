@@ -55,7 +55,6 @@
       "../../dist/atfield/Microsoft.Bcl.AsyncInterfaces.dll": "atfield/Microsoft.Bcl.AsyncInterfaces.dll",
       "../../dist/atfield/Microsoft.Bcl.HashCode.dll": "atfield/Microsoft.Bcl.HashCode.dll",
       "../../dist/atfield/Microsoft.Win32.TaskScheduler.dll": "atfield/Microsoft.Win32.TaskScheduler.dll",
-      "../../dist/atfield/Newtonsoft.Json.dll": "atfield/Newtonsoft.Json.dll",
       "../../dist/atfield/OxyPlot.dll": "atfield/OxyPlot.dll",
       "../../dist/atfield/OxyPlot.WindowsForms.dll": "atfield/OxyPlot.WindowsForms.dll",
       "../../dist/atfield/RAMSPDToolkit-NDD.dll": "atfield/RAMSPDToolkit-NDD.dll",
