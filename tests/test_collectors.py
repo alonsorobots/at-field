@@ -23,8 +23,8 @@ import sys
 import pytest
 
 from atfield.collectors import Collector, HealthState, ProbeResult
-from atfield.collectors.hwinfo import HwinfoCollector
 from atfield.collectors.lhm import LhmCollector
+from atfield.collectors.lhmlib import LhmLibCollector
 from atfield.collectors.nvml import PER_PROCESS_VRAM_KEY, NvmlCollector
 from atfield.collectors.system import SystemCollector
 
@@ -36,8 +36,8 @@ from atfield.collectors.system import SystemCollector
 class TestProtocolCompliance:
     @pytest.mark.parametrize(
         "factory",
-        [SystemCollector, NvmlCollector, lambda: LhmCollector(), HwinfoCollector],
-        ids=["system", "nvml", "lhm", "hwinfo"],
+        [SystemCollector, NvmlCollector, lambda: LhmCollector(), lambda: LhmLibCollector()],
+        ids=["system", "nvml", "lhm", "lhmlib"],
     )
     def test_satisfies_collector_protocol(self, factory):
         c = factory()

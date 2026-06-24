@@ -86,8 +86,9 @@ export interface LastAction {
 
 /**
  * Snapshot of the LhmSupervisor's per-spawn state, surfaced through
- * /health when the service is supervising LHM. ``null`` when no
- * supervisor is bound (e.g. LHM not on disk; user runs HWiNFO instead).
+ * /health when the service is supervising the optional LHM GUI. ``null``
+ * in the normal case -- sensors come from the headless library helper, so
+ * the GUI supervisor is only bound when ATFIELD_RUN_LHM_GUI is set.
  *
  * The ``state`` field is a single token meant for switch-on-string in
  * the UI; the rest of the fields are the raw status for callers (e.g.
@@ -125,7 +126,7 @@ export interface HealthSnapshot {
   last_tick_at: number | null;
   heartbeat_age_s: number | null;
   collectors: CollectorView[];
-  /** Null when AT-Field is not supervising LHM (e.g. HWiNFO-only setup). */
+  /** Null in the normal case; only set when the optional LHM GUI is supervised (ATFIELD_RUN_LHM_GUI). */
   lhm_supervisor: LhmSupervisorView | null;
   rules_active: number;
   rules_disabled: number;

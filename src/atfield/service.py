@@ -44,7 +44,6 @@ from atfield.audit import (
     configure_service_logging,
 )
 from atfield.collectors import HealthState, ProbeResult
-from atfield.collectors.hwinfo import HwinfoCollector
 from atfield.collectors.lhmlib import LhmLibCollector
 from atfield.collectors.nvml import PER_PROCESS_VRAM_KEY, NvmlCollector
 from atfield.collectors.system import SystemCollector
@@ -184,17 +183,14 @@ def _probe_all_collectors(audit: AuditWriter) -> tuple[list[object], dict[str, P
     any unavailable collector was rejected).
     """
     # Order matters: the tick loop merges samples with dict.update() in this
-    # order, so a later collector wins on signal-key collisions. HWiNFO is
-    # placed AFTER LHM deliberately -- when the user has HWiNFO running it is
-    # the preferred source for the signals both expose (CPU package temp, VRAM
-    # junction temp, rail voltages), per docs/sensors.md. When HWiNFO is absent
-    # its probe reports unavailable and LHM remains the source. This gives
-    # per-signal "prefer HWiNFO, fall back to LHM" with no special-casing.
+    # order, so a later collector wins on signal-key collisions. The LHM
+    # library helper provides the thermal/voltage signals NVML and psutil
+    # can't (CPU package temp, GPU memory-junction temp, PSU rail voltages),
+    # zero-config and bundled.
     collectors_to_try = [
         SystemCollector(),
         NvmlCollector(),
         LhmLibCollector(),
-        HwinfoCollector(),
     ]
     healthy: list[object] = []
     results: dict[str, ProbeResult] = {}
@@ -335,13 +331,12 @@ def run_service(
         config_path=Path(config_path) if config_path else None,
     )
     api_state.attach_engine(engine)
-    # HWiNFO is an opportunistic, never-bundled source. When it isn't running
-    # we still LIST it (so the dashboard -- and operators debugging why a rule
-    # is disabled -- can see at a glance whether it's feeding data), but with
-    # an "INACTIVE" health rather than "FAILED" so it reads as "an optional
-    # extra isn't active" instead of "something is broken". NVML/LHM/system are
-    # expected sources, so their absence stays a real "FAILED".
-    optional_collectors = {HwinfoCollector.name}
+    # Optional collectors (e.g. third-party plugins) report "INACTIVE" rather
+    # than "FAILED" when unavailable, so the dashboard reads them as "an
+    # optional extra isn't active" instead of "something is broken". The
+    # built-in sources (system/nvml/lhm) are all expected, so their absence
+    # stays a real "FAILED". No optional collectors ship in core today.
+    optional_collectors: set[str] = set()
 
     def _health_for(name: str, available: bool) -> str:
         if available:

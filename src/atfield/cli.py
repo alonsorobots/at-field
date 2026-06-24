@@ -165,12 +165,11 @@ def status(
 def inputs() -> None:
     """One-shot probe + sample dump for every collector. Useful for setup verification."""
     # Imported lazily so `atf --help` doesn't pay the NVML/psutil cost.
-    from atfield.collectors.hwinfo import HwinfoCollector
     from atfield.collectors.lhmlib import LhmLibCollector
     from atfield.collectors.nvml import NvmlCollector
     from atfield.collectors.system import SystemCollector
 
-    collectors = [SystemCollector(), NvmlCollector(), LhmLibCollector(), HwinfoCollector()]
+    collectors = [SystemCollector(), NvmlCollector(), LhmLibCollector()]
     for c in collectors:
         result = c.probe()
         color = "green" if result.available else "red"
@@ -613,29 +612,21 @@ def doctor(
 
     # 5. Live collector probes (we don't need a running service for this)
     try:
-        from atfield.collectors.hwinfo import HwinfoCollector
         from atfield.collectors.lhmlib import LhmLibCollector
         from atfield.collectors.nvml import NvmlCollector
         from atfield.collectors.system import SystemCollector
 
-        for c in (SystemCollector(), NvmlCollector(), LhmLibCollector(), HwinfoCollector()):
+        for c in (SystemCollector(), NvmlCollector(), LhmLibCollector()):
             r = c.probe()
             if r.available:
                 successes.append(f"collector {c.name}: OK ({r.reason})")
-            elif c.name == "hwinfo":
-                # HWiNFO is purely opportunistic -- never bundled (its license
-                # forbids redistribution) and LHM already covers its signals.
-                # Absence is the common case, so report it as info, not an
-                # issue, to avoid tripping doctor's non-zero exit on every
-                # machine that doesn't happen to run HWiNFO.
-                successes.append(
-                    "collector hwinfo: not active (optional) -- enable HWiNFO64 "
-                    "Shared Memory Support for extra sensor coverage; LHM remains the default"
-                )
             else:
                 fix = ""
                 if c.name == "lhm":
-                    fix = "\n  fix: install + run LibreHardwareMonitor (see docs/faq.md)"
+                    fix = (
+                        "\n  fix: ensure the bundled sensor helper is present "
+                        "(scripts\\build_helper.ps1) or set ATFIELD_SENSOR_EXE; see docs/faq.md"
+                    )
                 elif c.name == "nvml":
                     fix = "\n  fix: install NVIDIA driver + reboot, or ignore if you have no NVIDIA GPU"
                 problems.append(f"collector {c.name}: UNAVAILABLE -- {r.reason}{fix}")

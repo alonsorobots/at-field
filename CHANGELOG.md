@@ -7,21 +7,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- **HWiNFO Shared Memory collector** (`src/atfield/collectors/hwinfo.py`).
-  Detects a running HWiNFO64 instance via the `Global\HWiNFO_SENS_SM2`
-  named shared-memory section, decodes the documented header / sensor /
-  reading layout, and surfaces GPU memory-junction temp, CPU package
-  temp, and PSU rail voltages when HWiNFO is running. The collector is
-  ordered *after* the bundled LHM collector in the sample merge, so on a
-  per-signal basis HWiNFO is preferred when present and LHM remains the
-  silent fallback — fulfilling the v0.3 sensor-roadmap item without
-  bundling HWiNFO (its license forbids redistribution). The probe reports
-  cleanly unavailable when HWiNFO isn't running or "Shared Memory Support"
-  is disabled, and `atf doctor` / `atf inputs` surface it as optional
-  (informational) rather than as an error. Pure-Python parsers are fully
-  unit-tested against a synthetic SHM buffer (`tests/test_hwinfo.py`).
+- **LHM sensor transport rebuilt: library helper instead of the web
+  server.** AT-Field now reads `LibreHardwareMonitorLib.dll` directly via a
+  small bundled .NET helper (`atfield-sensors.exe`, from
+  `helper/AtfieldSensors.cs`, built with the in-box C# compiler) that streams
+  sensors as JSON lines — see `src/atfield/collectors/lhmlib.py`. This
+  replaces the fragile LHM GUI/HTTP web-server path (which depended on a
+  `http://+:<port>/` URL ACL, a Session-0 WinForms GUI, and silently
+  swallowed listener failures). Verified delivering CPU package temp and
+  per-GPU memory-junction temp as `LocalSystem`. The legacy LHM GUI is no
+  longer auto-started (opt-in via `ATFIELD_RUN_LHM_GUI=1`).
+
+### Removed
+
+- **HWiNFO Shared Memory collector** (added earlier in this unreleased
+  cycle, never shipped in a tagged release). The free version's 12-hour
+  Shared-Memory cap (auto-deactivates and requires manual re-enabling) and
+  the inability to enable it programmatically made it unreliable for an
+  always-on watchdog. The bundled LHM library helper already provides the
+  same watchdog-relevant signals (CPU package temp, GPU memory-junction
+  temp, PSU rail voltages) for free, forever, with zero configuration. May
+  return later as an optional third-party plugin.
 
 ## [0.3.0] — 2026-05-15 — Robustness, forensics, and sensor coverage
 

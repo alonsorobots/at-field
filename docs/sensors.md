@@ -1,6 +1,6 @@
 # Sensor coverage strategy
 
-> **TL;DR.** AT-Field reads the most reliable sensor source available on each system, in this order: NVML (NVIDIA), ROCm-SMI (AMD), psutil (always), LibreHardwareMonitor (bundled, MPL-2.0), HWiNFO64 (auto-detected if the user installed it; not bundled because the license forbids redistribution). We never ship HWiNFO. We always ship LHM.
+> **TL;DR.** AT-Field reads the most reliable sensor source available on each system, in this order: NVML (NVIDIA), ROCm-SMI (AMD), psutil (always), LibreHardwareMonitor (bundled, MPL-2.0). LHM is consumed **headlessly via its library** (a tiny bundled `atfield-sensors.exe` that loads `LibreHardwareMonitorLib.dll`), not via its GUI web server. We always ship LHM.
 
 This document explains why, what each tool gives us, and what's still on the
 roadmap.
@@ -37,8 +37,7 @@ honest reporting of what's available on this specific host.
 | **psutil** (Tier 1) | BSD-3 | YES (pip dep) | RAM %, swap %, per-process CPU/mem, disk I/O, NIC I/O. **No temperatures, no voltages.** |
 | **NVML** via `pynvml` | NVIDIA EULA (free for redist) | YES (pip dep) | NVIDIA GPU: core temp, util %, VRAM used, power draw, PCIe link state, per-process VRAM. **Not VRAM junction temp on consumer cards.** |
 | **ROCm-SMI** | MIT | NO (CLI shipped with AMD driver) | AMD GPU: core temp, util %, VRAM used, power draw, junction temp on cards that report it. |
-| **LibreHardwareMonitor** | MPL 2.0 | YES (vendored at install time) | CPU package temp, GPU memory junction temp, PSU rail voltages (+12V / +5V / +3.3V), VCore, fan RPM, motherboard temps, hard drive temps. |
-| **HWiNFO64** | Freeware (personal) / paid (commercial); **redistribution forbidden** | NO (auto-detect only) | Everything LHM has, plus: hundreds of vendor-specific sensors LHM doesn't know about (NVMe SMART critical warnings, GPU hot-spot deltas, motherboard EC voltages, NIC PHY temps, etc). |
+| **LibreHardwareMonitor** (via library helper) | MPL 2.0 | YES (vendored at install time) | CPU package temp, GPU memory junction temp, PSU rail voltages (+12V / +5V / +3.3V), VCore, fan RPM, motherboard temps, hard drive temps. |
 | **WMI** `MSAcpi_ThermalZoneTemperature` | Built into Windows | n/a | Last-resort thermal zone temp. Often broken. |
 
 ### What "bundled" actually means
@@ -53,32 +52,42 @@ honest reporting of what's available on this specific host.
   specifically matters because it added the NvAPI workaround for the RTX
   50-series memory-junction sensor that NVIDIA removed from the public NVML
   surface (see footnote 3 in the matrix above).
-- **HWiNFO** is *never* bundled. The HWiNFO license explicitly forbids
-  redistribution. Users who already have it installed (a popular choice for
-  hardware enthusiasts) get the extra sensor coverage automatically via the
-  HWiNFO Shared Memory collector (landed in v0.3.1 --
-  `src/atfield/collectors/hwinfo.py`), modeled on the community `pywhinfo`
-  reference implementation. Users who don't have HWiNFO installed get LHM via
-  the bundle transparently.
+### How LHM is read: the library helper, not the web server
 
-### Why not bundle HWiNFO instead?
+AT-Field does **not** drive LHM's GUI nor its optional HTTP "web server".
+That path was unreliable as a background service: it binds the wildcard
+prefix `http://+:<port>/` (which `http.sys` refuses without a URL ACL), runs
+a WinForms GUI under a Session-0 `LocalSystem` service, and silently swallows
+listener failures -- so the LHM-derived signals would go dark with no error.
 
-The author of HWiNFO has been clear since ~2018 that the freeware license
-disallows redistribution. Multiple OSS projects (NZXT CAM, MSI Afterburner
-plugins, custom dashboards) have asked over the years; the answer is always
-"no". So:
+Instead we read `LibreHardwareMonitorLib.dll` directly -- its documented
+headless use case -- through a tiny bundled .NET helper,
+[`helper/AtfieldSensors.cs`](../helper/AtfieldSensors.cs), compiled to
+`atfield-sensors.exe` with the in-box C# compiler (no .NET SDK required) and
+streaming readings to the service as JSON lines. No web server, no port, no
+URL ACL, no GUI, no Session-0 dependency. Driver-backed sensors (CPU package
+temp via MSR) need elevation; the watchdog runs as `LocalSystem`, so it gets
+them. See [`src/atfield/collectors/lhmlib.py`](../src/atfield/collectors/lhmlib.py).
 
-- Shipping HWiNFO in our installer would be a license violation.
-- Asking users to install it themselves works for advanced users but breaks
-  the "easy install, little to no config" goal (per project intent).
-- HWiNFO does have a **Shared Memory API** (documented in their SDK) that
-  any tool can read from once the user has launched HWiNFO with sensor
-  monitoring enabled. AT-Field will detect this and use it as a *better*
-  source when present (planned v0.4).
+### Why we don't support HWiNFO
 
-LHM is "good enough" for the watchdog purpose: catching the temps and
-voltages that correlate with thermal throttling, TDR, and PSU sag.
-HWiNFO is the cherry on top for power users who already run it.
+HWiNFO64 was evaluated (and a Shared Memory collector briefly shipped) but
+**removed**, for two decisive reasons:
+
+- **The free version caps Shared Memory at 12 hours.** After 12 h of runtime
+  it auto-deactivates and must be manually re-enabled -- a non-starter for an
+  always-on watchdog. Removing the cap requires the paid Pro license.
+- **It can't be set up programmatically.** Shared Memory is off by default
+  (since v7.00), there's no command-line switch to enable it (registry only,
+  and HWiNFO must be restarted), and its license forbids us bundling it.
+
+Since the bundled LHM library helper already provides the same watchdog-
+relevant signals (CPU package temp, GPU memory-junction temp, PSU rail
+voltages) for free, forever, with zero configuration, HWiNFO added fragility
+and a "half-lit, looks-broken" UI state for no net gain. If broader vendor
+coverage is ever needed, it can return as an optional third-party *plugin*
+(see the collector entry-point mechanism in
+[`src/atfield/collectors/__init__.py`](../src/atfield/collectors/__init__.py)).
 
 ---
 
@@ -235,19 +244,17 @@ Footprint: ~4 MB / hour at 1 Hz with 14 signals. Auto-rotates at 50 MB.
 
 ### v0.3 (next minor)
 
-- **HWiNFO Shared Memory collector** — *landed in v0.3.1*. Detects a running
-  HWiNFO64 instance via the `Global\HWiNFO_SENS_SM2` named shared-memory
-  section, parses the documented header / sensor / reading layout, and
-  surfaces GPU memory-junction temp, CPU package temp, and PSU rail voltages.
-  Ordered after LHM in the sample merge so HWiNFO is preferred per-signal
-  when present and LHM stays the silent fallback. No bundling -- license
-  compliance by avoidance. *(Future work: surface the HWiNFO-only signals
-  LHM doesn't know about -- NVMe SMART critical warnings, GPU hot-spot
-  deltas, EC-only voltages.)*
-- **`atf install-hwinfo` hint**: a CLI command that *doesn't* download
-  HWiNFO (we can't redistribute it), but opens the user's browser to the
-  official download page and prints a one-line setup instruction. Strictly
-  optional; LHM remains the default path.
+- **LHM library helper transport** — *landed in v0.3.x*. Replaced the
+  fragile LHM GUI/web-server path with a headless reader of
+  `LibreHardwareMonitorLib.dll` (`atfield-sensors.exe`, built from
+  `helper/AtfieldSensors.cs`). Surfaces GPU memory-junction temp, CPU
+  package temp, and PSU rail voltages with no web server, port, URL ACL, or
+  Session-0 dependency. See `src/atfield/collectors/lhmlib.py`.
+- **HWiNFO Shared Memory collector** — *briefly shipped in v0.3.1, then
+  removed.* The free version's 12-hour Shared-Memory cap and the inability
+  to enable it programmatically made it unreliable for an always-on
+  watchdog; the bundled LHM helper covers the same signals. May return as an
+  optional third-party plugin.
 - **Forensic CLI**: `atf forensics --since 1h` reads
   `forensics.jsonl[.prev]` and prints a CSV / pandas-friendly time-series
   for post-crash analysis.
@@ -264,8 +271,7 @@ Footprint: ~4 MB / hour at 1 Hz with 14 signals. Auto-rotates at 50 MB.
   -- realistic only if AT-Field gets enough adoption to justify the
   process.
 - **WMI fallback**: a last-resort `MSAcpi_ThermalZoneTemperature` reader
-  for systems where neither LHM nor HWiNFO finds a CPU sensor. Marked
-  unreliable in the UI.
+  for systems where LHM finds no CPU sensor. Marked unreliable in the UI.
 
 ---
 
@@ -350,7 +356,6 @@ posterior.
 | psutil | BSD-3 | Standard pip dep; license bundled in the Python wheel. |
 | pynvml | BSD-3 | Standard pip dep. |
 | nvidia-ml.dll | NVIDIA EULA | Distributed with the NVIDIA driver, not by us. |
-| HWiNFO | Freeware (no redistribution) | Never bundled; user installs separately if they want the extra sensor coverage. |
 | ROCm-SMI | MIT | Distributed with the AMD driver; we shell out to it. |
 
 If you spot a compliance issue, please open an issue on the repo -- the

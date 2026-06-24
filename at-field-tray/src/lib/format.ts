@@ -181,7 +181,7 @@ const SYSTEM_CORE_METRICS = new Set([
  * collector is missing". Mirrors the provenance of the Python collectors:
  *   - NVML            → GPU core temp / util / power / VRAM use / proc count
  *   - System          → RAM / commit / pagefile (built-in, cross-platform)
- *   - LHM or HWiNFO   → everything board-level: VRAM junction & hot-spot
+ *   - LHM             → everything board-level: VRAM junction & hot-spot
  *                       temps, rail/core voltages, fan speeds, CPU pkg temp
  *
  * The last bucket is the catch-all because those are the signals that
@@ -204,8 +204,8 @@ export function sensorSourceForSignal(signal: string): SensorSource {
     };
   }
   return {
-    collector: "LibreHardwareMonitor or HWiNFO",
-    fix: "Board & VRAM sensors come from the bundled LibreHardwareMonitor (confirm its supervisor is running on the Status tab) or from HWiNFO with Shared Memory enabled.",
+    collector: "LibreHardwareMonitor (bundled sensor helper)",
+    fix: "Board & VRAM sensors come from the bundled LibreHardwareMonitor library helper. Check the lhm collector on the Status tab; if it's down, the helper binary is missing or couldn't start.",
   };
 }
 

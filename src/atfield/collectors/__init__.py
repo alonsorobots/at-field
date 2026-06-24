@@ -36,7 +36,7 @@ The :class:`Collector` protocol is a public API surface from v0.1.0
 onward — third-party packages may register collectors via setuptools
 entry points (the ``atfield.collectors`` group) or by dropping a module
 under ``%PROGRAMDATA%\\ATField\\plugins\\``. This is how AMD GPU support,
-Intel Arc support, HWiNFO shared-memory adapters, etc. ship without
+Intel Arc support, third-party shared-memory adapters, etc. ship without
 forking core. Breaking changes here are SemVer-major.
 """
 

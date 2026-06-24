@@ -54,7 +54,7 @@ Existing tools either monitor without acting ([System-Resource-Monitor](https://
 - **Sustained-window logic, not instantaneous:** a 2-second spike during model warmup never triggers. An actual sustained problem triggers within ~15 seconds.
 - **Process-tree-aware kill:** when a runaway job is detected, walks the parent chain past known AI launchers (`torchrun`, `accelerate`, `deepspeed`, `mpiexec`, `ray`, `jupyter`) to find the *dispatcher*, then terminates the whole tree. Self-healing workers can't respawn.
 - **Rolling forensic buffer (v0.3):** every per-tick sample is flushed to `forensics.jsonl` every 5 seconds and rotated on service start, so the next BSOD / power loss / hard reboot doesn't take pre-crash signal history with it. `atf forensics --include-prev --since 10m` reads back the last few minutes regardless of whether the watchdog survived. Append-only JSONL — the only format guaranteed partially readable after a power loss.
-- **Layered sensor coverage (v0.3):** NVML for NVIDIA, ROCm-SMI for AMD, psutil for system signals, **bundled LibreHardwareMonitor** for VRAM-junction temp + CPU temp + voltages (the supervisor re-asserts LHM's config on every spawn so version bumps don't silently break the HTTP integration). An auto-detected **HWiNFO Shared Memory collector** (v0.3.1) reads HWiNFO64's sensor feed when the user has it running and is preferred over LHM per-signal. Full confidence matrix per signal × hardware × OS combo in [docs/sensors.md](docs/sensors.md).
+- **Layered sensor coverage (v0.3):** NVML for NVIDIA, ROCm-SMI for AMD, psutil for system signals, and **bundled LibreHardwareMonitor** for VRAM-junction temp + CPU temp + voltages. LHM is read **headlessly via its library** — a tiny bundled `atfield-sensors.exe` loads `LibreHardwareMonitorLib.dll` and streams readings to the service — so there's no web server, port, URL ACL, or GUI to break. Full confidence matrix per signal × hardware × OS combo in [docs/sensors.md](docs/sensors.md).
 - **Runs as a Windows Service** (via NSSM) under `LocalSystem` — works without an interactive login, survives reboots, no tray icon required.
 - **Capability-negotiated:** at startup, every collector probes its source. Anything missing (no LHM? AMD GPU? CPU sensor doesn't expose package temp?) downgrades to "rule disabled, with a clear log line" — never to "watchdog crashed" or "rule silently never fires".
 - **Audit trail:** every action lands in `%ProgramData%\ATField\events.jsonl` with full process tree, signal values that triggered the rule, and rule name.
@@ -79,7 +79,7 @@ The Tauri-bundled installer (single `.exe` from the GitHub release) includes Lib
 
 If you installed via `pip install atfield` instead of the bundled `.exe`, run `atf install-lhm` to fetch the same LHM build into `%ProgramData%\ATField\` — or set `ATFIELD_LHM_EXE` to point at an existing LibreHardwareMonitor.exe (v0.9.5+).
 
-For all the gory details — confidence matrix per signal × hardware combo, why we don't bundle HWiNFO, and the HWiNFO Shared Memory collector (v0.3.1) — see [docs/sensors.md](docs/sensors.md).
+For all the gory details — confidence matrix per signal × hardware combo, and why we read LibreHardwareMonitor through its library instead of its web server — see [docs/sensors.md](docs/sensors.md).
 
 ## Usage
 
