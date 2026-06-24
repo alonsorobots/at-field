@@ -20,9 +20,19 @@ import Sparkline from "../components/Sparkline";
 import { api } from "../lib/api";
 import type { RulesSnapshot, SignalLatest, SignalsSnapshot } from "../lib/api";
 import { usePolling } from "../lib/hooks";
-import { formatValue as fmtUnit, isDefaultDisplaySignal, signalDisplayName } from "../lib/format";
+import {
+  compareSignalPriority,
+  formatValue as fmtUnit,
+  isDefaultDisplaySignal,
+  signalDisplayName,
+} from "../lib/format";
 import { getPollIntervalMs } from "../lib/preferences";
-import { resolveOrder, saveSignalOrder } from "../lib/signal-order";
+import { clearSignalOrder, resolveOrder, saveSignalOrder } from "../lib/signal-order";
+import {
+  loadHiddenSignals,
+  reconcileDefaultVisibility,
+  saveHiddenSignals,
+} from "../lib/signal-visibility";
 
 interface Props {
   rules: RulesSnapshot | null;
@@ -68,7 +78,7 @@ export default function SignalsScreen({ rules, refreshGen, onSelectSignal }: Pro
     ? Object.keys(data.latest).filter(isDefaultDisplaySignal)
     : [];
   const [order, setOrder] = useState<string[]>(() =>
-    resolveOrder(liveSignals, signalSortOrder),
+    resolveOrder(liveSignals, compareSignalPriority),
   );
 
   // When the live signal set changes (collectors come/go, config reloads),
@@ -77,7 +87,7 @@ export default function SignalsScreen({ rules, refreshGen, onSelectSignal }: Pro
     setOrder((prev) => {
       const liveSet = new Set(liveSignals);
       const surviving = prev.filter((s) => liveSet.has(s));
-      const newcomers = liveSignals.filter((s) => !surviving.includes(s)).sort(signalSortOrder);
+      const newcomers = liveSignals.filter((s) => !surviving.includes(s)).sort(compareSignalPriority);
       const next = [...surviving, ...newcomers];
       // Avoid a render cycle if nothing changed.
       if (next.length === prev.length && next.every((s, i) => s === prev[i])) {
@@ -86,6 +96,50 @@ export default function SignalsScreen({ rules, refreshGen, onSelectSignal }: Pro
       return next;
     });
   }, [liveSignals.join("|")]);
+
+  // Hidden signals are a view preference: the watchdog still samples and
+  // acts on them, we just don't draw the tile. Persisted per-machine and
+  // always reversible from the Manage panel below.
+  const [hidden, setHidden] = useState<Set<string>>(() => loadHiddenSignals());
+  const [manageOpen, setManageOpen] = useState(false);
+
+  // Seed the default-hidden signals (voltages, page file) the first time
+  // each one is observed. Reconciliation tracks "seen" separately so a
+  // signal the user later un-hides stays visible across restarts.
+  useEffect(() => {
+    if (liveSignals.length === 0) return;
+    setHidden((prev) => {
+      const { hidden: next, changed } = reconcileDefaultVisibility(liveSignals, prev);
+      if (changed) saveHiddenSignals(next);
+      return changed ? next : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveSignals.join("|")]);
+
+  const persistHidden = (next: Set<string>) => {
+    setHidden(next);
+    saveHiddenSignals(next);
+  };
+  const toggleHidden = (sig: string) => {
+    const next = new Set(hidden);
+    if (next.has(sig)) next.delete(sig);
+    else next.add(sig);
+    persistHidden(next);
+  };
+  const showAll = () => persistHidden(new Set());
+  const hideAll = () => persistHidden(new Set(order));
+
+  // Forget the saved drag order and re-apply the default priority ranking.
+  const resetOrder = () => {
+    clearSignalOrder();
+    setOrder([...liveSignals].sort(compareSignalPriority));
+  };
+
+  // What actually renders: ordered, minus hidden, minus anything no longer
+  // reporting. `order` stays the full set so the Manage panel can reveal
+  // hidden tiles and drag-reorder still has stable indices.
+  const visibleOrder = order.filter((s) => !hidden.has(s) && data?.latest[s]);
+  const hiddenCount = order.filter((s) => hidden.has(s)).length;
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -116,28 +170,139 @@ export default function SignalsScreen({ rules, refreshGen, onSelectSignal }: Pro
 
   return (
     <div className="p-4 overflow-y-auto h-full">
-      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-        <SortableContext items={order} strategy={rectSortingStrategy}>
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <div className="text-[11px] text-[var(--color-text-tertiary)] tabular-nums">
+          {visibleOrder.length} shown
+          {hiddenCount > 0 && <span> · {hiddenCount} hidden</span>}
+        </div>
+        <button
+          type="button"
+          onClick={() => setManageOpen((o) => !o)}
+          aria-pressed={manageOpen}
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-xs transition-colors ${
+            manageOpen
+              ? "border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-surface-hover)]"
+              : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
+          }`}
+          title="Show or hide signals"
+        >
+          <SlidersIcon />
+          {manageOpen ? "Done" : "Manage"}
+        </button>
+      </div>
+
+      {manageOpen && (
+        <div className="frosted rounded-lg border border-[var(--color-border)] mb-3 p-3">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)]">
+              Show / hide signals
+            </div>
+            <div className="flex items-center gap-3 text-[11px]">
+              <button
+                type="button"
+                onClick={showAll}
+                disabled={hiddenCount === 0}
+                className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-default"
+              >
+                Show all
+              </button>
+              <button
+                type="button"
+                onClick={hideAll}
+                disabled={visibleOrder.length === 0}
+                className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-default"
+              >
+                Hide all
+              </button>
+              <button
+                type="button"
+                onClick={resetOrder}
+                className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
+                title="Forget manual drag order and restore the default priority order"
+              >
+                Reset order
+              </button>
+            </div>
+          </div>
+          <p className="text-[10px] text-[var(--color-text-tertiary)] mb-2 leading-relaxed">
+            Hidden signals are still sampled and rule-checked — this only changes what the dashboard draws.
+          </p>
+          <div className="space-y-0.5 max-h-64 overflow-y-auto">
             {order.map((sig) => {
-              const latest = data.latest[sig];
-              if (!latest) return null;
+              const isHidden = hidden.has(sig);
               return (
-                <SortableSignalTile
+                <button
                   key={sig}
-                  signal={sig}
-                  latest={latest}
-                  history={data.history[sig] ?? []}
-                  threshold={thresholdsBySignal.get(sig) ?? null}
-                  onSelect={onSelectSignal}
-                />
+                  type="button"
+                  onClick={() => toggleHidden(sig)}
+                  aria-pressed={!isHidden}
+                  className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded text-left
+                             hover:bg-[var(--color-surface-hover)] transition-colors"
+                  title={isHidden ? `Show ${signalDisplayName(sig)}` : `Hide ${signalDisplayName(sig)}`}
+                >
+                  <span
+                    className="flex-shrink-0"
+                    style={{
+                      color: isHidden
+                        ? "var(--color-text-tertiary)"
+                        : "var(--color-accent)",
+                    }}
+                  >
+                    {isHidden ? <EyeOffIcon /> : <EyeIcon />}
+                  </span>
+                  <span className={`min-w-0 flex-1 ${isHidden ? "opacity-50" : ""}`}>
+                    <span className="text-xs">{signalDisplayName(sig)}</span>
+                    <span className="ml-2 font-mono text-[10px] text-[var(--color-text-tertiary)]">
+                      {sig}
+                    </span>
+                  </span>
+                </button>
               );
             })}
           </div>
-        </SortableContext>
-      </DndContext>
+        </div>
+      )}
+
+      {visibleOrder.length === 0 ? (
+        <div className="frosted rounded-lg border border-[var(--color-border)] p-6 text-center">
+          <div className="text-sm text-[var(--color-text-secondary)] mb-3">
+            All signals are hidden.
+          </div>
+          <button
+            type="button"
+            onClick={showAll}
+            className="px-3 py-1.5 rounded-md border border-[var(--color-border-strong)]
+                       text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
+          >
+            Show all signals
+          </button>
+        </div>
+      ) : (
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext items={visibleOrder} strategy={rectSortingStrategy}>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              {visibleOrder.map((sig) => {
+                const latest = data.latest[sig];
+                if (!latest) return null;
+                return (
+                  <SortableSignalTile
+                    key={sig}
+                    signal={sig}
+                    latest={latest}
+                    history={data.history[sig] ?? []}
+                    threshold={thresholdsBySignal.get(sig) ?? null}
+                    onSelect={onSelectSignal}
+                    onHide={() => toggleHidden(sig)}
+                  />
+                );
+              })}
+            </div>
+          </SortableContext>
+        </DndContext>
+      )}
+
       <div className="mt-4 text-[10px] text-[var(--color-text-tertiary)] text-center">
-        Drag any tile to reorder · click to drill in · order saved per machine
+        Drag to reorder · click to drill in · hover a tile to hide · saved per machine
       </div>
     </div>
   );
@@ -153,12 +318,14 @@ function SortableSignalTile({
   history,
   threshold,
   onSelect,
+  onHide,
 }: {
   signal: string;
   latest: SignalLatest;
   history: [number, number][];
   threshold: number | null;
   onSelect?: (signal: string) => void;
+  onHide?: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: signal,
@@ -182,10 +349,31 @@ function SortableSignalTile({
     <div
       ref={setNodeRef}
       style={style}
-      className="frosted rounded-lg border border-[var(--color-border)]
+      className="group relative frosted rounded-lg border border-[var(--color-border)]
                  hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-hover)]
                  transition-colors flex"
     >
+      {/* Quick-hide: appears on hover/focus, stays out of the way otherwise.
+          The Manage panel is the canonical way to bring it back. */}
+      {onHide && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onHide();
+          }}
+          className="absolute top-1 right-1 z-10 p-1 rounded
+                     opacity-0 group-hover:opacity-100 focus-visible:opacity-100
+                     transition-opacity text-[var(--color-text-tertiary)]
+                     hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-raised)]
+                     focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--color-border-strong)]"
+          title={`Hide ${signalDisplayName(signal)}`}
+          aria-label={`Hide ${signalDisplayName(signal)}`}
+        >
+          <EyeOffIcon />
+        </button>
+      )}
+
       {/* Drag handle: just enough surface to grab without being intrusive. */}
       <div
         {...attributes}
@@ -212,7 +400,7 @@ function SortableSignalTile({
         className="flex-1 min-w-0 text-left px-3 py-2.5 cursor-pointer"
         title={`Open detail view for ${signal}`}
       >
-        <div className="flex items-baseline justify-between gap-2 mb-1">
+        <div className="flex items-baseline justify-between gap-2 mb-1 pr-5">
           <div
             className="text-xs font-medium truncate"
             style={{ color: overTrigger ? "var(--color-danger)" : "inherit" }}
@@ -246,6 +434,44 @@ function SortableSignalTile({
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Icons
+// ─────────────────────────────────────────────────────────────────────
+
+function EyeIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function EyeOffIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+      <line x1="1" y1="1" x2="23" y2="23" />
+    </svg>
+  );
+}
+
+function SlidersIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <line x1="4" y1="21" x2="4" y2="14" />
+      <line x1="4" y1="10" x2="4" y2="3" />
+      <line x1="12" y1="21" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12" y2="3" />
+      <line x1="20" y1="21" x2="20" y2="16" />
+      <line x1="20" y1="12" x2="20" y2="3" />
+      <line x1="1" y1="14" x2="7" y2="14" />
+      <line x1="9" y1="8" x2="15" y2="8" />
+      <line x1="17" y1="16" x2="23" y2="16" />
+    </svg>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────
 
@@ -255,21 +481,4 @@ function useReactiveRefresh(gen: number | undefined, refresh: () => void) {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gen]);
-}
-
-/**
- * Default rank for new signals (only used when the user hasn't dragged
- * yet, or for tiles new since the last save). Most safety-critical first.
- */
-function signalSortOrder(a: string, b: string): number {
-  return signalRank(a) - signalRank(b) || a.localeCompare(b);
-}
-function signalRank(s: string): number {
-  if (s.includes("temp_c")) return 0;
-  if (s.includes("vram_used")) return 1;
-  if (s.includes("util_percent")) return 2;
-  if (s.includes("power_w")) return 3;
-  if (s.startsWith("gpu.")) return 4;
-  if (s.startsWith("system.")) return 5;
-  return 9;
 }

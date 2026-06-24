@@ -89,17 +89,53 @@ export default function Sparkline({
     );
   }
 
-  // Domain spans from min to max of the values, but always includes the
-  // threshold so the threshold line never falls outside the rendered area.
-  let lo = Infinity;
-  let hi = -Infinity;
+  // ── Y domain ────────────────────────────────────────────────────────
+  // Fit to the DATA (so the signal's own shape is always legible) with
+  // padding, then treat the threshold as a *ceiling*. We only pull the
+  // threshold into the plotted range once the signal has climbed close
+  // enough that its exact position matters; when the limit sits far above
+  // a calm signal we park a faint dashed line at the top edge instead of
+  // squishing the signal into a flat line at the floor.
+  //
+  // This is the deliberate answer to "locked vs dynamic range": neither.
+  // A locked range buries low signals; a purely dynamic range hides the
+  // limit and makes idle jitter look alarming. Data-fit + a threshold that
+  // eases into frame keeps every tile reading the same way and stops a
+  // low, flat signal from being upstaged by (or mistaken for) the trigger.
+  let dataLo = Infinity;
+  let dataHi = -Infinity;
   for (const p of points) {
-    if (p.value < lo) lo = p.value;
-    if (p.value > hi) hi = p.value;
+    if (p.value < dataLo) dataLo = p.value;
+    if (p.value > dataHi) dataHi = p.value;
   }
+  const dataSpan = dataHi - dataLo;
+  // Amplitude floor so a dead-flat signal still shows a waveform with some
+  // height rather than collapsing to a 1px line glued to the baseline.
+  const floor = Math.max(Math.abs(dataHi) * 0.04, 0.5);
+  const pad = Math.max(dataSpan * 0.2, floor);
+  let lo = dataLo - pad;
+  let hi = dataHi + pad;
+
+  // Should the threshold be drawn at its true position, or parked at top?
+  let thresholdInFrame = false;
   if (threshold != null) {
-    lo = Math.min(lo, threshold);
-    hi = Math.max(hi, threshold);
+    if (threshold <= hi) {
+      // Already inside the data-fit window (signal at/near/over the limit):
+      // keep it where it truly is, and make sure it isn't clipped.
+      thresholdInFrame = true;
+      lo = Math.min(lo, threshold - pad * 0.25);
+    } else {
+      const headroom = threshold - dataHi;
+      const domainSpan = hi - lo;
+      if (headroom <= domainSpan * 1.5) {
+        // Close enough that the gap to the limit is on the same scale as
+        // the signal's own movement — show the real line position.
+        hi = threshold + pad * 0.4;
+        thresholdInFrame = true;
+      }
+      // else: limit is far above; leave the domain on the data and park
+      // the dashed line at the top edge as a "ceiling is above" cue.
+    }
   }
   if (hi - lo < 1e-6) {
     hi += 1;
@@ -113,7 +149,17 @@ export default function Sparkline({
     .map((p, i) => `${(i * xStep).toFixed(1)},${yFor(p.value).toFixed(1)}`)
     .join(" ");
 
-  const thresholdY = threshold != null ? yFor(threshold) : null;
+  // Close the line down to the baseline to fill the area underneath. The
+  // filled mass is the single biggest readability fix: a low signal reads
+  // as "the data sits down here" and is unmistakable from the thin, dashed,
+  // floating trigger line.
+  const lastX = (points.length - 1) * xStep;
+  const areaPoints = `${polyPoints} ${lastX.toFixed(1)},${height} 0,${height}`;
+
+  // Threshold line: true position when in-frame, otherwise parked just
+  // inside the top edge and drawn fainter so it reads as "limit above".
+  const thresholdParked = threshold != null && !thresholdInFrame;
+  const thresholdY = threshold == null ? null : thresholdInFrame ? yFor(threshold) : 1.5;
 
   const handleMove = (e: React.MouseEvent<SVGSVGElement>) => {
     const svg = svgRef.current;
@@ -182,6 +228,15 @@ export default function Sparkline({
             </feMerge>
           </filter>
         </defs>
+        {/* Area fill under the signal — gives the curve visual mass so it
+            can't be confused with the trigger line, and stays legible even
+            when the values sit low in the frame. */}
+        <polygon
+          points={areaPoints}
+          fill={useGradient ? `url(#${gradientId})` : color!}
+          fillOpacity={0.16}
+          stroke="none"
+        />
         {thresholdY != null && (
           <line
             x1={0}
@@ -191,7 +246,7 @@ export default function Sparkline({
             stroke={thresholdColor}
             strokeWidth={1}
             strokeDasharray="3 3"
-            opacity={0.6}
+            opacity={thresholdParked ? 0.3 : 0.6}
           />
         )}
         <polyline

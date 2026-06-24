@@ -145,6 +145,45 @@ export function isDefaultDisplaySignal(wire: string): boolean {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Signal priority ordering (shared by Signals grid + Rules list)
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Rank a signal by how much an operator should care about it, lowest =
+ * most important. The ordering follows "severity of what happens if this
+ * goes bad":
+ *
+ *   thermal (hardware damage / hard shutdown)
+ *     → memory exhaustion (a crashed run loses hours of work)
+ *       → load & power (informational; high is usually *expected*)
+ *         → forensic (page file, voltages — logged, rarely glance-acted-on)
+ *
+ * Used for the default Signals tile order AND the Rules list order so the
+ * two screens agree on what's at the top. Ties break on the wire name,
+ * which naturally keeps gpu.0 ahead of gpu.1 and groups voltage rails.
+ */
+export function signalPriorityRank(s: string): number {
+  if (s.includes("mem_junction_temp_c")) return 0; // VRAM hot-spot — the marquee
+  if (s.includes("core_temp_c")) return 1; // GPU core temp
+  if (s.includes("cpu") && s.includes("package_temp_c")) return 2; // CPU package temp
+  if (s.includes("temp_c")) return 3; // any other thermal sensor
+  if (s.includes("vram_used")) return 4; // GPU memory pressure (OOM)
+  if (s.includes("ram_used")) return 5; // system RAM pressure
+  if (s.includes("commit")) return 6; // commit charge — the real Windows OOM predictor
+  if (s.includes("power_w")) return 7; // GPU power draw
+  if (s.includes("util_percent")) return 8; // GPU utilization
+  if (s.endsWith(".processes") || s === "gpu.processes") return 9; // process count
+  if (s.includes("swap_used")) return 10; // page file (hidden by default)
+  if (s.endsWith("_volts")) return 11; // rail / Vcore voltages (hidden by default)
+  return 9.5; // unknown: just below the load tier
+}
+
+/** Comparator form of {@link signalPriorityRank}. */
+export function compareSignalPriority(a: string, b: string): number {
+  return signalPriorityRank(a) - signalPriorityRank(b) || a.localeCompare(b);
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Signal → collector provenance (for disabled-rule remediation)
 // ─────────────────────────────────────────────────────────────────────
 
@@ -215,9 +254,9 @@ function metricLabel(metric: string): string {
   // gpu.0.vram_used_percent -> "VRAM used (%)"
   // gpu.0.vram_used_bytes -> "VRAM used"
   // gpu.0.util_percent -> "Utilization (%)"
-  // gpu.0.mem_junction_temp_c -> "VRAM junction temp (°C)"
+  // gpu.0.mem_junction_temp_c -> "VRAM temp (°C)"
   if (metric === "core_temp_c") return "Core temp (°C)";
-  if (metric === "mem_junction_temp_c") return "VRAM junction temp (°C)";
+  if (metric === "mem_junction_temp_c") return "VRAM temp (°C)";
   if (metric === "power_w") return "Power (W)";
   if (metric === "util_percent") return "Utilization (%)";
   if (metric === "vram_used_percent") return "VRAM used (%)";

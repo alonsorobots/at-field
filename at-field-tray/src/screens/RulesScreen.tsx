@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { EffectiveRuleView, RulesSnapshot } from "../lib/api";
 import {
+  compareSignalPriority,
   humanizeRule,
   humanizeRuleStatus,
   sensorSourceForSignal,
@@ -32,7 +33,7 @@ const RULE_DESCRIPTION: Record<string, string> = {
   "gpu-core-hot":
     "Watches the GPU core temperature for sustained heat that can throttle or damage the card. Triggers a kill of the offending process tree.",
   "vram-junction-hot":
-    "Watches the VRAM junction temperature -- the canary that fires before the GPU core does on memory-bound jobs.",
+    "Watches the VRAM (video memory) temperature -- the canary that fires before the GPU core does on memory-bound jobs.",
   "ram-pressure":
     "Watches system RAM utilization. Triggers when memory stays pinned high enough that the OOM killer or paging would damage performance.",
   "pagefile-pressure":
@@ -51,30 +52,39 @@ export default function RulesScreen({ rules, onMutated, onNavigate }: Props) {
     return <div className="p-6 text-sm text-[var(--color-text-secondary)]">Loading rules…</div>;
   }
 
+  // Order both lists by the same severity ranking the Signals grid uses, so
+  // the two screens agree on what sits at the top.
+  const effective = [...rules.effective].sort((a, b) =>
+    compareSignalPriority(a.signal, b.signal),
+  );
+  const disabled = [...rules.disabled].sort((a, b) =>
+    compareSignalPriority(a.signal, b.signal),
+  );
+
   return (
     <div className="p-5 space-y-5 overflow-y-auto h-full">
-      {rules.effective.length > 0 && (
-        <ProfilePresetRow rules={rules.effective} onApplied={onMutated} />
+      {effective.length > 0 && (
+        <ProfilePresetRow rules={effective} onApplied={onMutated} />
       )}
 
       <section>
         <h2 className="hud hud-dim text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
           Active rules
         </h2>
-        {rules.effective.length === 0 ? (
+        {effective.length === 0 ? (
           <div className="text-sm text-[var(--color-text-secondary)] italic">
             No rules are currently active. Check the Status tab for collector health.
           </div>
         ) : (
           <div className="space-y-2">
-            {rules.effective.map((r) => (
+            {effective.map((r) => (
               <RuleCard key={r.name} r={r} onMutated={onMutated} />
             ))}
           </div>
         )}
       </section>
 
-      {rules.disabled.length > 0 && (
+      {disabled.length > 0 && (
         <section>
           <h2 className="hud hud-dim text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
             Disabled rules
@@ -84,7 +94,7 @@ export default function RulesScreen({ rules, onMutated, onNavigate }: Props) {
             below names the collector that supplies it and how to turn it on.
           </p>
           <div className="space-y-2">
-            {rules.disabled.map((d) => {
+            {disabled.map((d) => {
               const title = RULE_TITLE[d.rule] ?? d.rule;
               const source = sensorSourceForSignal(d.signal);
               return (

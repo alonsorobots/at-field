@@ -36,6 +36,17 @@ export function saveSignalOrder(order: string[]): void {
   }
 }
 
+/** Forget any saved drag order so the grid falls back to the default
+    priority ranking. Used by the "Reset order" action. */
+export function clearSignalOrder(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(KEY);
+  } catch {
+    // Best-effort.
+  }
+}
+
 /**
  * Resolve a final display order given the live signals and any saved
  * preference. Saved signals come first (in their saved order, but
