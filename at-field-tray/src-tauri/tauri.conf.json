@@ -48,7 +48,6 @@
       "../../dist/atfield/_internal/scripts": "atfield/scripts",
       "../../dist/atfield/LibreHardwareMonitor.exe": "atfield/LibreHardwareMonitor.exe",
       "../../dist/atfield/LibreHardwareMonitor.exe.config": "atfield/LibreHardwareMonitor.exe.config",
-      "../../dist/atfield/LibreHardwareMonitor.config": "atfield/LibreHardwareMonitor.config",
       "../../dist/atfield/LibreHardwareMonitorLib.dll": "atfield/LibreHardwareMonitorLib.dll",
       "../../dist/atfield/Aga.Controls.dll": "atfield/Aga.Controls.dll",
       "../../dist/atfield/BlackSharp.Core.dll": "atfield/BlackSharp.Core.dll",

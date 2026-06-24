@@ -89,13 +89,26 @@ jobs:
         shell: pwsh
         run: pwsh scripts/fetch_lhm.ps1
 
+      # Compile the headless sensor helper (atfield-sensors.exe) against the
+      # LibreHardwareMonitorLib.dll just vendored. Uses the in-box .NET
+      # Framework csc.exe (present on windows-latest), so no SDK install.
+      # The tray installer's resources manifest REQUIRES this exe, so the
+      # tray-installer job would fail without it.
+      - name: Build headless sensor helper
+        shell: pwsh
+        run: pwsh scripts/build_helper.ps1
+
       - name: Smoke-test bundled binaries
         # Make sure the frozen exes at least respond to --help before we
-        # ship them. Catches missing hidden imports / data files.
+        # ship them. Catches missing hidden imports / data files, and that
+        # the sensor helper actually built.
         shell: pwsh
         run: |
           dist/atfield/atf.exe version
           dist/atfield/atf.exe inputs
+          if (-not (Test-Path dist/atfield/atfield-sensors.exe)) {
+            throw "atfield-sensors.exe missing -- build_helper.ps1 did not produce the sensor helper."
+          }
 
       - name: Zip standalone bundle
         shell: pwsh
