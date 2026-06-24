@@ -8,9 +8,10 @@ There are three artifacts AT-Field ships, each built independently:
 | `dist/atfield/` (onedir, two console exes) | PyInstaller spec | Bundled into the NSIS installer     |
 | `AT-Field_X.Y.Z_x64-setup.exe`        | Tauri/NSIS            | The end user. Just double-click.    |
 
-This doc covers the **PyInstaller bundle**, which is the precondition for the
-single bundled installer. The Tauri/NSIS build is documented in
-`at-field-tray/README.md`.
+This doc covers the **PyInstaller bundle** and how it's assembled into the
+end-user installer. The Tauri app itself (frontend / Rust dev workflow) is
+documented in `at-field-tray/README.md`; end-user install/verification is in
+[`docs/install.md`](install.md).
 
 ## What the PyInstaller bundle contains
 
@@ -64,6 +65,53 @@ curl http://127.0.0.1:8765/health
 If `atf doctor` reports the NVML and system collectors as `OK`, the bundle
 contains the right native deps. The LHM check will be `UNAVAILABLE` unless
 LibreHardwareMonitor is also running -- that's expected.
+
+## Building the full installer locally
+
+The PyInstaller bundle above is only the watchdog half. To produce the
+end-user `AT-Field_X.Y.Z_x64-setup.exe`, stage the bundle (PyInstaller + LHM +
+sensor helper) and run the Tauri/NSIS build:
+
+```pwsh
+# 1. Frozen Python bundle (see "Building locally" above)
+pyinstaller --noconfirm --clean packaging/pyinstaller/atfield.spec
+
+# 2. Vendor LibreHardwareMonitor into dist/atfield  (needs internet)
+pwsh scripts/fetch_lhm.ps1
+
+# 3. Compile the headless sensor helper -> dist/atfield/atfield-sensors.exe
+pwsh scripts/build_helper.ps1
+
+# 4. If AT-Field is ALREADY installed on THIS machine, stop the service first
+#    (see the file-lock gotcha below):
+Stop-Service ATFieldWatchdog        # elevated
+
+# 5. Build the installer (frontend + Rust + NSIS)
+cd at-field-tray && npm ci && npm run tauri build
+
+# 6. Restart the watchdog if you stopped it in step 4
+Start-Service ATFieldWatchdog
+```
+
+Output:
+`at-field-tray/src-tauri/target/release/bundle/nsis/AT-Field_<ver>_x64-setup.exe`.
+
+> **File-lock gotcha (local builds only).** A running watchdog holds open
+> handles to `atfield-sensors.exe` / `LibreHardwareMonitorLib.dll`. Tauri's
+> resource copy silently *skips* locked files, producing an installer with
+> broken sensors. Always stop the service before a local installer build
+> (step 4). CI is immune -- the runner has no service installed, which is why
+> the GitHub Release artifact is the one to distribute.
+
+To sanity-check a built installer without a clean VM, extract it and confirm
+the sensor files staged:
+
+```pwsh
+& "C:\Program Files\7-Zip\7z.exe" x AT-Field_<ver>_x64-setup.exe "atfield/*" -oC:\temp\atf_check
+# expect: atf.exe, atfield-service.exe, atfield-sensors.exe,
+#         LibreHardwareMonitor.exe, LibreHardwareMonitorLib.dll,
+#         _internal\scripts\install_service.ps1
+```
 
 ## Hidden imports
 
