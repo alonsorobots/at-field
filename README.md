@@ -67,9 +67,10 @@ Existing tools either monitor without acting ([System-Resource-Monitor](https://
 
 1. Download **`AT-Field_x64-setup.exe`** from the [latest release](https://github.com/alonsorobots/at-field/releases/latest).
 2. Double-click it. Because the binary isn't code-signed yet, Windows SmartScreen may say *"Windows protected your PC"* — click **More info → Run anyway**. (Signing is on the v1.0 roadmap.)
-3. Done. The installer registers the `AT-Field Watchdog` service (auto-start, `LocalSystem`), bundles the sensor helper + LibreHardwareMonitor DLLs, and drops a starter `config.toml`. A tray icon appears; click it for the dashboard.
+3. **Accept the single UAC prompt.** The installer needs admin once to register the watchdog as a Windows service; that one consent covers the whole setup.
+4. Done. In its post-install step the installer registers the `AT-Field Watchdog` service (auto-start, `LocalSystem`), bundles the sensor helper + LibreHardwareMonitor DLLs, and drops a starter `config.toml`. A tray icon appears; click it for the dashboard.
 
-That's the whole setup — no Python, no PATH, no elevated PowerShell.
+That's the whole setup — no Python, no PATH, no separate elevated PowerShell.
 Step-by-step install, verification, and troubleshooting for a fresh machine
 live in [docs/install.md](docs/install.md).
 

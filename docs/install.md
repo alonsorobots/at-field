@@ -5,8 +5,9 @@ This guide is for getting AT-Field running on a **fresh Windows machine**
 actually works end-to-end.
 
 If you just want the short version: **download the installer, double-click
-it, then click "Install watchdog" once in the app.** Everything else below
-is verification and troubleshooting.
+it, accept the one UAC prompt, and you're done.** The installer registers
+the watchdog service for you — there's no separate in-app step. Everything
+else below is verification and troubleshooting.
 
 ---
 
@@ -43,31 +44,33 @@ Where to get it:
 3. **SmartScreen** will likely warn ("Windows protected your PC") because
    the binary isn't code-signed yet. Click **More info → Run anyway**.
    This is expected for unsigned installers and is on the v1.0 to-do list.
-4. The installer is a *current-user* install — it does **not** need admin
-   and drops the app under `%LOCALAPPDATA%`. It finishes in a few seconds.
+4. **Accept the UAC prompt.** This is a *per-machine* install: it needs admin
+   **once**, installs the app under `C:\Program Files\AT-Field`, and — in its
+   post-install step — registers the watchdog for you. That single consent
+   covers the whole setup.
 5. The tray app launches. On first launch you'll get a toast: *"AT-Field is
    watching."* Windows 11 hides new tray icons in the `^` overflow — click
    the chevron in the taskbar and drag the AT-Field icon out if you want it
    always visible.
 
-### Register the watchdog (one UAC prompt)
+### What the installer does for you (no extra steps)
 
-The tray app runs as you (no admin). The **watchdog service** needs to be
-registered as a Windows service, which requires admin **once**:
+Because the installer runs elevated, its post-install hook runs the bundled
+`install_service.ps1` automatically, which:
 
-1. Open the dashboard (click the tray icon).
-2. Go to the **Setup / Status** screen. If the service isn't installed yet
-   it offers an **Install watchdog** button.
-3. Click it and **accept the UAC prompt**. This runs the bundled
-   `install_service.ps1` elevated, which:
-   - downloads NSSM (the service wrapper) into `%ProgramData%\ATField`,
-   - registers the `ATFieldWatchdog` service (auto-start, LocalSystem),
-   - auto-detects the bundled `LibreHardwareMonitor.exe` + `atfield-sensors.exe`
-     and bakes their paths into the service environment, and
-   - starts the service.
+- downloads NSSM (the service wrapper) into `%ProgramData%\ATField`,
+- registers the `ATFieldWatchdog` service (auto-start, LocalSystem),
+- auto-detects the bundled `LibreHardwareMonitor.exe` + `atfield-sensors.exe`
+  and bakes their paths into the service environment, and
+- starts the service.
 
-That's the only elevation in the whole flow. After this, the watchdog
-auto-starts at every boot and the tray reconnects automatically.
+So by the time setup closes, the watchdog is already running and the tray is
+connected to it. It auto-starts at every boot from then on.
+
+> The dashboard's **Setup / Status** screen still has **Install / Uninstall
+> watchdog** buttons — those are now a *repair / fallback* path (each prompts
+> for UAC), useful if the post-install step was skipped or the service needs
+> re-registering after an update.
 
 ---
 
@@ -129,9 +132,10 @@ You don't need to wipe a machine to sanity-check the new-user path:
 
 ## 5. Updating / reinstalling
 
-Re-running the installer over an existing install is safe. To refresh the
-watchdog itself after an update, click **Install watchdog** again (it stops
-and re-registers the service cleanly — the script is idempotent).
+Re-running the installer over an existing install is safe — its post-install
+hook re-registers the watchdog cleanly (the script is idempotent: it stops,
+removes, and re-creates the service). You can also refresh the watchdog
+without reinstalling by clicking **Install watchdog** on the Status screen.
 
 If you want routine `Restart-Service ATFieldWatchdog` without a UAC prompt
 each time, run the bundled helper once (elevated):
@@ -191,13 +195,16 @@ Output:
 
 ## 7. Uninstalling
 
-- **App**: Windows *Settings → Apps → AT-Field → Uninstall* (or the Start-menu
-  uninstaller).
-- **Watchdog service**: use the tray's **Uninstall watchdog** (UAC), or run
+- **App + watchdog together**: Windows *Settings → Apps → AT-Field →
+  Uninstall* (or the Start-menu uninstaller). The uninstaller's pre-uninstall
+  hook removes the `ATFieldWatchdog` service and NSSM wrapper before deleting
+  files — one step, no leftovers.
+- **Watchdog only** (e.g. to re-register): the tray's **Uninstall watchdog**
+  (UAC), or run
   `<install>\resources\atfield\_internal\scripts\uninstall_service.ps1`
-  elevated. This removes the `ATFieldWatchdog` service and NSSM wrapper.
-  State under `%ProgramData%\ATField` (config, logs, `events.jsonl`) is left
-  in place; delete it manually if you want a truly clean slate.
+  elevated.
+- State under `%ProgramData%\ATField` (config, logs, `events.jsonl`) is left
+  in place either way; delete it manually if you want a truly clean slate.
 
 ---
 
