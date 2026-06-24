@@ -12,7 +12,7 @@
  */
 
 export type ThemeId =
-  | "civvie"
+  | "tokyo-3"
   | "eva-01"
   | "eva-00"
   | "eva-02"
@@ -45,16 +45,16 @@ export interface ThemeMeta {
 
 export const THEMES: ThemeMeta[] = [
   {
-    id: "civvie",
-    label: "Civvie",
+    id: "tokyo-3",
+    label: "Tokyo-3",
     swatches: ["#1b141f", "#a78bfa", "#fbbf24"],
     // The "civilian" theme -- the calm, no-frills look the dashboard
-    // shipped with before the Magi-terminal aesthetic pass. Same warm
-    // slate ramp that recedes into the dark purple bg, ramping up to
-    // brand orange at threshold and deep red for sustained over-
-    // threshold values. Pairs with the CSS override in globals.css
-    // that swaps the HUD font for sans and strips the phosphor bloom
-    // -- so picking Civvie genuinely reverts to the pre-bloom UI.
+    // shipped with before the Magi-terminal aesthetic pass, and the
+    // default first-run look. Same warm slate ramp that recedes into the
+    // dark purple bg, ramping up to brand orange at threshold and deep
+    // red for sustained over-threshold values. Pairs with the CSS
+    // override in globals.css that swaps the HUD font for sans and strips
+    // the phosphor bloom -- so picking Tokyo-3 reverts to the pre-bloom UI.
     ramp: [
       [58, 50, 64],
       [76, 64, 76],
@@ -203,7 +203,7 @@ export function getActiveRamp(): readonly RGB[] {
 }
 
 const STORAGE_KEY = "atfield.theme";
-const DEFAULT_THEME: ThemeId = "civvie";
+const DEFAULT_THEME: ThemeId = "tokyo-3";
 
 const VALID_IDS = new Set<string>(THEMES.map((t) => t.id));
 
@@ -214,16 +214,16 @@ function isThemeId(value: unknown): value is ThemeId {
 /** Read the persisted theme id, falling back to the default if anything
     is unset, corrupted, or no longer recognized.
  *
- * Migrates the pre-v0.3.1 "nerv" stored value to its new id ("civvie")
- * silently and rewrites the storage slot, so users who picked the
- * default theme before the rename don't get reset to default on first
- * launch after upgrade. */
+ * Migrates the default theme's earlier ids ("nerv", then "civvie") to its
+ * current id ("tokyo-3") silently and rewrites the storage slot, so users
+ * who picked the default theme before a rename don't get reset to default
+ * on first launch after upgrade. */
 export function getTheme(): ThemeId {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw === "nerv") {
-      window.localStorage.setItem(STORAGE_KEY, "civvie");
-      return "civvie";
+    if (raw === "nerv" || raw === "civvie") {
+      window.localStorage.setItem(STORAGE_KEY, "tokyo-3");
+      return "tokyo-3";
     }
     if (isThemeId(raw)) return raw;
   } catch {
