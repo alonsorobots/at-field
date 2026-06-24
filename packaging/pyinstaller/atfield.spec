@@ -69,9 +69,10 @@ EXCLUDES = [
 # beside ``sys.executable`` -- see _find_script() in cli.py.
 SCRIPTS = REPO_ROOT / "scripts"
 SHARED_DATAS = [
-    (str(SCRIPTS / "install_service.ps1"),   "scripts"),
-    (str(SCRIPTS / "uninstall_service.ps1"), "scripts"),
-    (str(SCRIPTS / "config.example.toml"),   "scripts"),
+    (str(SCRIPTS / "install_service.ps1"),       "scripts"),
+    (str(SCRIPTS / "uninstall_service.ps1"),     "scripts"),
+    (str(SCRIPTS / "grant_service_control.ps1"), "scripts"),
+    (str(SCRIPTS / "config.example.toml"),       "scripts"),
 ]
 
 a_service = Analysis(

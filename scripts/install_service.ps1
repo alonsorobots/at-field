@@ -197,22 +197,27 @@ if ($bundledMode) {
 # user setting ATFIELD_LHM_EXE manually after install. Without this the
 # service runs but the LHM supervisor never starts and the LHM-derived
 # signals (mem_junction_temp_c, cpu_package_temp_c, +12V rail) silently
-# stay disabled. Search order matches find_lhm_executable():
+# stay disabled. We probe several layouts so the SAME script works for
+# both the dev checkout and the shipped NSIS bundle:
 #   1. Existing ATFIELD_LHM_EXE in this elevated session (preserved).
-#   2. dist\atfield\LibreHardwareMonitor.exe relative to repo root
-#      (dev workflow: PyInstaller-built bundle).
-#   3. %ProgramFiles%\LibreHardwareMonitor\LibreHardwareMonitor.exe
+#   2. <repoRoot>\dist\atfield\LibreHardwareMonitor.exe
+#      (dev workflow: PyInstaller-built bundle in a source tree).
+#   3. <repoRoot>\LibreHardwareMonitor.exe  (installed NSSM bundle: this
+#      script lives in resources\atfield\scripts\, so repoRoot is
+#      resources\atfield\ where the vendored DLLs sit flat next to it).
+#   4. %ProgramFiles%\LibreHardwareMonitor\LibreHardwareMonitor.exe
 #      (upstream installer path).
 $scriptDir = Split-Path -Parent $MyInvocation.ScriptName
 $repoRoot = Split-Path -Parent $scriptDir
 $lhmExe = $env:ATFIELD_LHM_EXE
 if (-not $lhmExe) {
-    $bundledLhm = Join-Path $repoRoot 'dist\atfield\LibreHardwareMonitor.exe'
-    if (Test-Path $bundledLhm) {
-        $lhmExe = (Resolve-Path $bundledLhm).Path
-    } else {
-        $pfLhm = Join-Path $env:ProgramFiles 'LibreHardwareMonitor\LibreHardwareMonitor.exe'
-        if (Test-Path $pfLhm) { $lhmExe = $pfLhm }
+    $lhmCandidates = @(
+        (Join-Path $repoRoot 'dist\atfield\LibreHardwareMonitor.exe'),
+        (Join-Path $repoRoot 'LibreHardwareMonitor.exe'),
+        (Join-Path $env:ProgramFiles 'LibreHardwareMonitor\LibreHardwareMonitor.exe')
+    )
+    foreach ($cand in $lhmCandidates) {
+        if ($cand -and (Test-Path $cand)) { $lhmExe = (Resolve-Path $cand).Path; break }
     }
 }
 
