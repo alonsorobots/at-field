@@ -12,6 +12,7 @@
     "core:tray:default",
     "core:menu:default",
     "opener:default",
+    "opener:allow-open-url",
     "notification:default",
     "notification:allow-notify"
   ]

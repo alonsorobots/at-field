@@ -9,6 +9,7 @@ import RulesScreen from "./screens/RulesScreen";
 import EventsScreen from "./screens/EventsScreen";
 import SetupScreen from "./screens/SetupScreen";
 import PrefsScreen from "./screens/PrefsScreen";
+import AboutModal from "./components/AboutModal";
 import { api, deriveTrayStatus } from "./lib/api";
 import { usePolling, useTheme } from "./lib/hooks";
 import { getPollIntervalMs } from "./lib/preferences";
@@ -44,6 +45,8 @@ export default function App() {
   // polling hooks on each refresh.
   const [refreshGen, setRefreshGen] = useState(0);
   const triggerRefresh = () => setRefreshGen((g) => g + 1);
+
+  const [aboutOpen, setAboutOpen] = useState(false);
 
   // Poll cadence is user-tweakable in the Status screen; we read it
   // once on mount. Changing it requires reopening the dashboard, which
@@ -95,7 +98,16 @@ export default function App() {
             </button>
           ))}
           <div className="flex-1" />
-          <div className="text-[10px] text-[var(--color-text-tertiary)] px-3 py-2 leading-relaxed">
+          <div className="text-[10px] text-[var(--color-text-tertiary)] px-3 pb-2 leading-relaxed">
+            <button
+              type="button"
+              onClick={() => setAboutOpen(true)}
+              className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors cursor-pointer"
+              title="About AT-Field · support the project"
+            >
+              About
+            </button>
+            <br />
             v{healthQ.data?.version ?? "?"}
             <br />
             <span className="text-[var(--color-text-secondary)]">localhost:8765</span>
@@ -153,6 +165,12 @@ export default function App() {
           </AnimatePresence>
         </main>
       </div>
+
+      <AboutModal
+        open={aboutOpen}
+        onClose={() => setAboutOpen(false)}
+        version={healthQ.data?.version ?? null}
+      />
     </div>
   );
 }
