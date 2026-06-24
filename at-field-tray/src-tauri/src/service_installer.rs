@@ -77,6 +77,21 @@ fn resource_root(app: &AppHandle) -> Option<PathBuf> {
     resolver.resource_dir().ok().map(|root| root.join("atfield"))
 }
 
+/// Locate a bundled helper script by name.
+///
+/// PyInstaller's onedir layout puts our install/uninstall scripts under
+/// `_internal/scripts/` (they're spec `datas`). That location is
+/// deterministic. Some staging layouts ALSO expose a flat `scripts/`,
+/// so we check both -- `_internal/scripts/` first since it's the one
+/// Tauri reliably produces -- and return the first that exists.
+fn find_bundled_script(root: &Path, name: &str) -> Option<PathBuf> {
+    let candidates = [
+        root.join("_internal").join("scripts").join(name),
+        root.join("scripts").join(name),
+    ];
+    candidates.into_iter().find(|p| p.exists())
+}
+
 #[tauri::command]
 pub fn service_status(app: AppHandle) -> ServiceStatus {
     let root = resource_root(&app);
@@ -86,8 +101,7 @@ pub fn service_status(app: AppHandle) -> ServiceStatus {
         .filter(|p| p.exists());
     let install_script = root
         .as_ref()
-        .map(|r| r.join("scripts").join("install_service.ps1"))
-        .filter(|p| p.exists());
+        .and_then(|r| find_bundled_script(r, "install_service.ps1"));
 
     let bundled = service_exe.is_some() && install_script.is_some();
 

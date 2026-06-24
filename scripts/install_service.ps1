@@ -202,18 +202,23 @@ if ($bundledMode) {
 #   1. Existing ATFIELD_LHM_EXE in this elevated session (preserved).
 #   2. <repoRoot>\dist\atfield\LibreHardwareMonitor.exe
 #      (dev workflow: PyInstaller-built bundle in a source tree).
-#   3. <repoRoot>\LibreHardwareMonitor.exe  (installed NSSM bundle: this
-#      script lives in resources\atfield\scripts\, so repoRoot is
-#      resources\atfield\ where the vendored DLLs sit flat next to it).
-#   4. %ProgramFiles%\LibreHardwareMonitor\LibreHardwareMonitor.exe
+#   3. <repoRoot>\LibreHardwareMonitor.exe  (installed bundle, flat
+#      scripts\ layout: repoRoot is resources\atfield\ where the vendored
+#      DLLs sit flat next to it).
+#   4. <repoRoot>\..\LibreHardwareMonitor.exe  (installed bundle, scripts
+#      staged under _internal\scripts\: repoRoot is resources\atfield\
+#      _internal, so the DLLs are one level up in resources\atfield\).
+#   5. %ProgramFiles%\LibreHardwareMonitor\LibreHardwareMonitor.exe
 #      (upstream installer path).
 $scriptDir = Split-Path -Parent $MyInvocation.ScriptName
 $repoRoot = Split-Path -Parent $scriptDir
+$repoRootParent = if ($repoRoot) { Split-Path -Parent $repoRoot } else { $null }
 $lhmExe = $env:ATFIELD_LHM_EXE
 if (-not $lhmExe) {
     $lhmCandidates = @(
         (Join-Path $repoRoot 'dist\atfield\LibreHardwareMonitor.exe'),
         (Join-Path $repoRoot 'LibreHardwareMonitor.exe'),
+        $(if ($repoRootParent) { Join-Path $repoRootParent 'LibreHardwareMonitor.exe' }),
         (Join-Path $env:ProgramFiles 'LibreHardwareMonitor\LibreHardwareMonitor.exe')
     )
     foreach ($cand in $lhmCandidates) {

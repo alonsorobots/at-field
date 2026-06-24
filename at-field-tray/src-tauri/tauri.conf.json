@@ -45,7 +45,6 @@
       "../../dist/atfield/atfield-service.exe": "atfield/atfield-service.exe",
       "../../dist/atfield/atfield-sensors.exe": "atfield/atfield-sensors.exe",
       "../../dist/atfield/_internal": "atfield/_internal",
-      "../../dist/atfield/_internal/scripts": "atfield/scripts",
       "../../dist/atfield/LibreHardwareMonitor.exe": "atfield/LibreHardwareMonitor.exe",
       "../../dist/atfield/LibreHardwareMonitor.exe.config": "atfield/LibreHardwareMonitor.exe.config",
       "../../dist/atfield/LibreHardwareMonitorLib.dll": "atfield/LibreHardwareMonitorLib.dll",
