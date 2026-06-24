@@ -2,7 +2,7 @@
 
 > Always-on Windows hardware watchdog for AI workloads. Monitors NVIDIA GPU and VRAM temperatures, GPU memory usage, system RAM, pagefile, and CPU package temperature — and kills runaway Python / PyTorch processes **before** they damage your hardware. Runs as a Windows Service. Tolerates load-time spikes via sustained-window thresholds.
 
-> **Status:** v0.3.0 — robustness, forensics, and broader sensor coverage. Single Tauri-bundled installer ships the watchdog service + tray dashboard + LibreHardwareMonitor in one `.exe`. See [CHANGELOG.md](CHANGELOG.md) and [docs/sensors.md](docs/sensors.md) for the full layered sensor strategy.
+> **Status:** v0.4.0 — one-step install, dashboard polish, and hardened sensors. Single Tauri-bundled installer ships the watchdog service + tray dashboard + LibreHardwareMonitor in one `.exe`, and registers the watchdog for you in a single elevated step. See [CHANGELOG.md](CHANGELOG.md) and [docs/sensors.md](docs/sensors.md) for the full layered sensor strategy.
 
 In *Neon Genesis Evangelion*, an **AT Field** is an absolute defensive barrier that prevents catastrophic damage to a high-power system. Here it's recontextualized as a backronym — **A**bsolute **T**hermal-and-memory **Field** — a Python-aware Windows service that intercepts the AI jobs trying to melt your rig.
 
@@ -154,7 +154,7 @@ Rules referencing signals no probed collector provides are auto-disabled with a 
 
 ## Status
 
-Pre-release v0.3.0. End-to-end verified on the development rig (2× RTX 5090). CI runs the test suite on Windows + Linux × Python 3.10/3.11/3.12 plus a wheel install + CLI smoke test.
+Pre-release v0.4.0. End-to-end verified on the development rig (2× RTX 5090). CI runs the test suite on Windows + Linux × Python 3.10/3.11/3.12 plus a wheel install + CLI smoke test.
 
 Primary development rig:
 

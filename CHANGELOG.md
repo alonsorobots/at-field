@@ -7,8 +7,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-24 — One-step install, dashboard polish, hardened sensors
+
+### Added
+
+- **One-step elevated installer.** The Windows installer is now a per-machine
+  install whose NSIS post-install hook registers the `ATFieldWatchdog` service
+  automatically (and the pre-uninstall hook removes it on uninstall). The
+  single UAC consent at launch covers the whole setup — there's no separate
+  in-app "Install watchdog" step. The dashboard's Install/Uninstall watchdog
+  buttons remain as a repair/fallback path.
+- **About modal** with the app version, support links (GitHub star, Buy me a
+  coffee), open-source credits, and a nod to its namesake.
+- **Signal hide/show** with persisted per-signal visibility, plus
+  priority-based ordering of both signals and rules and a "Reset order"
+  control.
+- **`grant_service_control.ps1`** to grant a non-elevated user start/stop
+  control of the watchdog service (no UAC for routine restarts).
+
 ### Changed
 
+- **Default theme renamed to "Tokyo-3"** (the calm, no-bloom out-of-box look).
+  Saved values from the earlier ids (`nerv`, `civvie`) migrate forward so
+  existing users aren't reset to default after upgrade.
 - **LHM sensor transport rebuilt: library helper instead of the web
   server.** AT-Field now reads `LibreHardwareMonitorLib.dll` directly via a
   small bundled .NET helper (`atfield-sensors.exe`, from
@@ -19,6 +40,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   swallowed listener failures). Verified delivering CPU package temp and
   per-GPU memory-junction temp as `LocalSystem`. The legacy LHM GUI is no
   longer auto-started (opt-in via `ATFIELD_RUN_LHM_GUI=1`).
+- **Dashboard polish:** a 4-role color model across the EVA themes;
+  disabled-rule cards now name the missing collector and link to the fix; the
+  Events screen was redesigned for at-a-glance crash triage; sparklines
+  rescale with the threshold as a ceiling for consistent readability; and the
+  GPU "VRAM junction temp" signal was renamed "VRAM temp".
+- **Lower idle cost:** idle CPU usage cut ~7x and LHM startup hardened.
+- **Docs:** `install.md` is now a lean user guide; the installer-build steps
+  (and the service-must-be-stopped file-lock gotcha) moved to `packaging.md`.
 
 ### Removed
 
@@ -30,6 +59,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   same watchdog-relevant signals (CPU package temp, GPU memory-junction
   temp, PSU rail voltages) for free, forever, with zero configuration. May
   return later as an optional third-party plugin.
+
+### Fixed
+
+- **Installer packaging:** bundle the headless sensor helper and all
+  LibreHardwareMonitor DLLs, and resolve the install scripts deterministically
+  under `_internal/scripts`, so a clean-machine install has working sensors.
 
 ## [0.3.0] — 2026-05-15 — Robustness, forensics, and sensor coverage
 
@@ -263,6 +298,8 @@ audit trail in `events.jsonl`.
 - **Multi-OS CI** (Windows + Linux + macOS) running 129 tests with
   ruff lint.
 
-[Unreleased]: https://github.com/alonsorobots/at-field/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/alonsorobots/at-field/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/alonsorobots/at-field/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/alonsorobots/at-field/releases/tag/v0.3.0
 [0.2.0]: https://github.com/alonsorobots/at-field/releases/tag/v0.2.0
 [0.1.0]: https://github.com/alonsorobots/at-field/releases/tag/v0.1.0

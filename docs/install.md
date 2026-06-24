@@ -18,7 +18,7 @@ troubleshooting.
 You need one file:
 
 ```
-AT-Field_<version>_x64-setup.exe      e.g. AT-Field_0.3.0_x64-setup.exe
+AT-Field_<version>_x64-setup.exe      e.g. AT-Field_0.4.0_x64-setup.exe
 ```
 
 Get it from the **[latest GitHub Release](https://github.com/alonsorobots/at-field/releases/latest)**
