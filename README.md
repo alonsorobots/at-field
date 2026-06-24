@@ -63,21 +63,30 @@ Existing tools either monitor without acting ([System-Resource-Monitor](https://
 
 ## Install
 
-```powershell
-# 1. Install the package
-pip install atfield
+### Recommended — one-click installer (no Python required)
 
-# 2. Register the Windows Service (run from elevated PowerShell)
-atf install
+1. Download **`AT-Field_x64-setup.exe`** from the [latest release](https://github.com/alonsorobots/at-field/releases/latest).
+2. Double-click it. Because the binary isn't code-signed yet, Windows SmartScreen may say *"Windows protected your PC"* — click **More info → Run anyway**. (Signing is on the v1.0 roadmap.)
+3. Done. The installer registers the `AT-Field Watchdog` service (auto-start, `LocalSystem`), bundles the sensor helper + LibreHardwareMonitor DLLs, and drops a starter `config.toml`. A tray icon appears; click it for the dashboard.
+
+That's the whole setup — no Python, no PATH, no elevated PowerShell.
+
+### Power users — pip
+
+If you already live in Python:
+
+```powershell
+pip install atfield        # (or: pip install -e .  from a source checkout)
+atf install                # run from an elevated PowerShell
 ```
 
-That's it. The installer downloads NSSM into `%ProgramData%\ATField\`, registers `AT-Field Watchdog` as a `LocalSystem` auto-start service, drops a starter `config.toml`, and starts the service. Existing config is preserved on reinstall.
+`atf install` downloads NSSM into `%ProgramData%\ATField\`, registers the `LocalSystem` auto-start service, builds the sensor helper, drops a starter `config.toml`, and starts the service. Existing config is preserved on reinstall. Run `atf install-lhm` first if you want VRAM/CPU-temp sensors on the pip path.
 
-### LibreHardwareMonitor — bundled (v0.3+)
+### LibreHardwareMonitor — bundled, read headlessly (v0.3+)
 
-The Tauri-bundled installer (single `.exe` from the GitHub release) includes LibreHardwareMonitor v0.9.6 unmodified, supervised as a child process of the watchdog service. The supervisor *re-asserts LHM's config on every spawn* (web server enabled, port 8085, start minimized) so a future LHM version bump can't silently break the integration the way v0.9.4 → v0.9.6 did in v0.2.
+The board-level sensors (VRAM temp, CPU package temp, PSU rail voltages) come from LibreHardwareMonitor, but AT-Field reads it through its **library**, not its GUI web server. The bundled installer ships `LibreHardwareMonitorLib.dll` plus a tiny `atfield-sensors.exe` helper that loads the DLL and streams readings to the service over stdout — there's **no web server, port, URL ACL, or GUI** to misconfigure or break. (This replaced the fragile HTTP transport that a v0.9.4 → v0.9.6 LHM bump silently broke in v0.2.)
 
-If you installed via `pip install atfield` instead of the bundled `.exe`, run `atf install-lhm` to fetch the same LHM build into `%ProgramData%\ATField\` — or set `ATFIELD_LHM_EXE` to point at an existing LibreHardwareMonitor.exe (v0.9.5+).
+If you installed via `pip install atfield` instead of the bundled `.exe`, run `atf install-lhm` to fetch the LHM DLLs into `%ProgramData%\ATField\`; `atf install` then builds `atfield-sensors.exe` next to them using the in-box .NET Framework compiler (no extra toolchain needed). Set `ATFIELD_SENSOR_EXE` to override the helper location.
 
 For all the gory details — confidence matrix per signal × hardware combo, and why we read LibreHardwareMonitor through its library instead of its web server — see [docs/sensors.md](docs/sensors.md).
 
@@ -112,10 +121,15 @@ nvml: OK
     gpu.1.core_temp_c = 35.000 celsius
     ...
 
-lhm: unavailable
-  reason: LibreHardwareMonitor HTTP not reachable at http://127.0.0.1:8085/data.json;
-          ensure LHM is installed, running, and 'Run web server' is enabled in Options
+lhmlib: OK
+  reason: atfield-sensors.exe streaming 6 sensor(s) via LibreHardwareMonitorLib
+    gpu.0.mem_junction_temp_c = 52.000 celsius
+    system.cpu_package_temp_c = 41.000 celsius
 ```
+
+(If `lhmlib` shows `unavailable`, the helper binary is missing — build it with
+`scripts\build_helper.ps1` or set `ATFIELD_SENSOR_EXE`. The NVML and system
+collectors still protect you in the meantime.)
 
 ## Configuration
 
@@ -137,7 +151,7 @@ Rules referencing signals no probed collector provides are auto-disabled with a 
 
 ## Status
 
-Pre-release v0.1.0. End-to-end verified on the development rig (2× RTX 5090). CI runs the test suite on Windows + Linux × Python 3.10/3.11/3.12 plus a wheel install + CLI smoke test.
+Pre-release v0.3.0. End-to-end verified on the development rig (2× RTX 5090). CI runs the test suite on Windows + Linux × Python 3.10/3.11/3.12 plus a wheel install + CLI smoke test.
 
 Primary development rig:
 
