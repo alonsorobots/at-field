@@ -378,12 +378,12 @@ pub fn run() {
                 let _ = app
                     .notification()
                     .builder()
-                    .title("AT-Field is watching")
+                    .title("AT-Field is on guard")
                     .body(
-                        "Your AI workloads are protected. The tray icon \
-                         lives in the system tray (click the ^ chevron \
-                         in your taskbar if you don't see it), or open \
-                         the dashboard from there.",
+                        "Your GPU, memory, and temperatures are protected. \
+                         The tray icon lives in the system tray -- click the \
+                         ^ chevron in your taskbar if you don't see it, then \
+                         open the dashboard from there.",
                     )
                     .show();
             }

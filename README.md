@@ -1,10 +1,35 @@
-# AT-Field — Windows GPU/VRAM/RAM watchdog for AI workloads
+# AT-Field — Windows GPU watchdog that kills runaway workloads before they cook your rig
 
-> Always-on Windows hardware watchdog for AI workloads. Monitors NVIDIA GPU and VRAM temperatures, GPU memory usage, system RAM, pagefile, and CPU package temperature — and kills runaway Python / PyTorch processes **before** they damage your hardware. Runs as a Windows Service. Tolerates load-time spikes via sustained-window thresholds.
+[![CI](https://github.com/alonsorobots/at-field/actions/workflows/ci.yml/badge.svg)](https://github.com/alonsorobots/at-field/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/alonsorobots/at-field?logo=github)](https://github.com/alonsorobots/at-field/releases/latest)
+[![PyPI](https://img.shields.io/pypi/v/atfield?logo=pypi&logoColor=white)](https://pypi.org/project/atfield/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platform: Windows 10/11](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?logo=windows)](#)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](#)
 
-> **Status:** v0.4.0 — one-step install, dashboard polish, and hardened sensors. Single Tauri-bundled installer ships the watchdog service + tray dashboard + LibreHardwareMonitor in one `.exe`, and registers the watchdog for you in a single elevated step. See [CHANGELOG.md](CHANGELOG.md) and [docs/sensors.md](docs/sensors.md) for the full layered sensor strategy.
+> **Always-on Windows watchdog for your GPU rig.** It monitors NVIDIA GPU + VRAM
+> temperatures, GPU/VRAM/RAM usage, pagefile/commit charge, CPU package temp, and
+> PSU rail voltages — and when a workload runs away, it kills the offending
+> **process tree _before_ thermal or memory runaway crashes (or damages) your
+> machine**. Runs as a Windows service. Sustained-window thresholds ignore
+> harmless load spikes.
 
-In *Neon Genesis Evangelion*, an **AT Field** is an absolute defensive barrier that prevents catastrophic damage to a high-power system. Here it's recontextualized as a backronym — **A**bsolute **T**hermal-and-memory **Field** — a Python-aware Windows service that intercepts the AI jobs trying to melt your rig.
+**Built for AI rigs — useful for any heavy GPU/CPU workload.** Overnight model
+training is the headline case (and where the process-tree kill shines), but the
+same protection covers 3D/video renders, scientific/CUDA compute, overclock
+stability testing, or simply keeping an expensive GPU alive and your machine
+responsive. The watchdog runs headless; an optional tray dashboard gives you live
+sparklines and a pause toggle.
+
+In *Neon Genesis Evangelion*, an **AT Field** is an absolute defensive barrier
+that prevents catastrophic damage to a high-power system. Here it's a backronym —
+**A**bsolute **T**hermal-and-memory **Field** — a process-aware Windows service
+that intercepts the jobs trying to melt your rig.
+
+> **Status:** v0.4.2 (pre-release). `pip install atfield` for the headless
+> watchdog, or grab the one-click installer for the watchdog + tray dashboard in a
+> single `.exe`. See [CHANGELOG.md](CHANGELOG.md) and
+> [docs/sensors.md](docs/sensors.md) for the full layered sensor strategy.
 
 ## Two pieces, one tool
 
@@ -39,12 +64,15 @@ These are the north stars every design decision is measured against:
 
 If any of these are your search query, you're in the right place:
 
-- *"earlyoom for Windows"*
+- *"earlyoom for Windows"* / *"Windows OOM killer for runaway processes"*
 - *"automatic process killer when GPU VRAM temperature too high"*
 - *"NVIDIA RTX VRAM thermal protection sustained threshold"*
 - *"kill python process when RAM exceeds threshold Windows service"*
 - *"PyTorch / accelerate / torchrun killed my machine again"*
 - *"how do I protect dual-GPU AI rig from runaway training jobs"*
+- *"shut down Blender / render when GPU overheats Windows"*
+- *"GPU thermal protection auto-kill for rendering / mining / overclock"*
+- *"warn me before a long job crashes my workstation overnight"*
 
 Existing tools either monitor without acting ([System-Resource-Monitor](https://github.com/Thymester/System-Resource-Monitor)), throttle a single VRAM signal ([VRAM-Guard](https://github.com/Yp-pro/VRAM-Guard), [VRAM Shield](https://vramshield.com/)), or are manual primitives ([killall](https://github.com/NoCoderRandom/killall)). AT-Field combines **multi-signal sustained triggers**, **process-tree-aware Python targeting**, and **true Windows Service** deployment.
 
@@ -63,27 +91,36 @@ Existing tools either monitor without acting ([System-Resource-Monitor](https://
 
 ## Install
 
-### Recommended — one-click installer (no Python required)
+### Recommended — pip (no installer, no SmartScreen prompt)
+
+If you have Python 3.10+ (most AI/dev boxes do), this is the fastest, friction-free
+path — no unsigned-installer SmartScreen warning, just a package install:
+
+```powershell
+pip install atfield        # or: pipx install atfield
+atf install                # run once from an elevated PowerShell — registers the service
+atf status                 # confirm it's armed
+```
+
+`atf install` downloads NSSM into `%ProgramData%\ATField\`, registers the
+`LocalSystem` auto-start Windows service, builds the headless sensor helper, drops
+a starter `config.toml`, and starts the service. Existing config is preserved on
+reinstall. Want VRAM-junction / CPU-package temps too? Run `atf install-lhm` first
+to fetch the LibreHardwareMonitor DLLs.
+
+This installs the **headless watchdog + CLI** — the engine that does all the work.
+For the live tray **dashboard**, use the one-click installer below.
+
+### Full experience — one-click installer (watchdog + tray dashboard)
 
 1. Download **`AT-Field_x64-setup.exe`** from the [latest release](https://github.com/alonsorobots/at-field/releases/latest).
-2. Double-click it. Because the binary isn't code-signed yet, Windows SmartScreen may say *"Windows protected your PC"* — click **More info → Run anyway**. (Signing is on the v1.0 roadmap.)
+2. Double-click it. Because the binary isn't code-signed yet, Windows SmartScreen may say *"Windows protected your PC"* — click **More info → Run anyway**. (Signing is on the v1.0 roadmap; the pip route above avoids this entirely.)
 3. **Accept the single UAC prompt.** The installer needs admin once to register the watchdog as a Windows service; that one consent covers the whole setup.
 4. Done. In its post-install step the installer registers the `AT-Field Watchdog` service (auto-start, `LocalSystem`), bundles the sensor helper + LibreHardwareMonitor DLLs, and drops a starter `config.toml`. A tray icon appears; click it for the dashboard.
 
-That's the whole setup — no Python, no PATH, no separate elevated PowerShell.
-Step-by-step install, verification, and troubleshooting for a fresh machine
-live in [docs/install.md](docs/install.md).
-
-### Power users — pip
-
-If you already live in Python:
-
-```powershell
-pip install atfield        # (or: pip install -e .  from a source checkout)
-atf install                # run from an elevated PowerShell
-```
-
-`atf install` downloads NSSM into `%ProgramData%\ATField\`, registers the `LocalSystem` auto-start service, builds the sensor helper, drops a starter `config.toml`, and starts the service. Existing config is preserved on reinstall. Run `atf install-lhm` first if you want VRAM/CPU-temp sensors on the pip path.
+No Python, no PATH, no separate elevated PowerShell. Step-by-step install,
+verification, and troubleshooting for a fresh machine live in
+[docs/install.md](docs/install.md).
 
 ### LibreHardwareMonitor — bundled, read headlessly (v0.3+)
 
@@ -154,7 +191,7 @@ Rules referencing signals no probed collector provides are auto-disabled with a 
 
 ## Status
 
-Pre-release v0.4.0. End-to-end verified on the development rig (2× RTX 5090). CI runs the test suite on Windows + Linux × Python 3.10/3.11/3.12 plus a wheel install + CLI smoke test.
+Pre-release v0.4.2. End-to-end verified on the development rig (2× RTX 5090) and clean-installed on additional machines. CI runs the test suite on Windows + Linux × Python 3.10/3.11/3.12 plus a wheel install + CLI smoke test.
 
 Primary development rig:
 

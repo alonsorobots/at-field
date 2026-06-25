@@ -1,7 +1,7 @@
 {
   "name": "at-field-tray",
   "private": true,
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "module",
   "description": "AT-Field tray app + dashboard. User-mode UI for the watchdog service.",
   "scripts": {

@@ -41,7 +41,7 @@ stack — so CPU / VRAM / PSU temps work out of the box with no extra downloads.
    once, installs to `C:\Program Files\AT-Field`, and — in its post-install
    step — registers the watchdog for you. That single consent covers the whole
    setup.
-4. The tray app launches with a *"AT-Field is watching."* toast. Windows 11
+4. The tray app launches with a *"AT-Field is on guard."* toast. Windows 11
    hides new tray icons in the `^` overflow — click the chevron and drag the
    AT-Field icon out if you want it always visible.
 

@@ -56,6 +56,35 @@ jobs:
           retention-days: 7
 
   # ─────────────────────────────────────────────────────────────────
+  # 1b. Publish the wheel + sdist to PyPI via Trusted Publishing (OIDC).
+  #
+  #     No API token/secret: PyPI verifies the GitHub OIDC identity. This
+  #     requires a one-time "pending publisher" set up on PyPI pointing at
+  #     this repo + workflow + the `pypi` environment (see docs/packaging.md).
+  #     Runs only for real (non-prerelease) version tags. A failure here does
+  #     NOT block the GitHub Release job below -- they're independent.
+  # ─────────────────────────────────────────────────────────────────
+  publish-pypi:
+    name: Publish to PyPI
+    needs: wheel
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    environment:
+      name: pypi
+      url: https://pypi.org/project/atfield/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download wheel + sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: python-dists
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  # ─────────────────────────────────────────────────────────────────
   # 2. Standalone PyInstaller bundle (Windows-only).
   #    Produces dist/atfield/ with atfield-service.exe + atf.exe and
   #    a shared _internal/. Zips it for the GitHub release.

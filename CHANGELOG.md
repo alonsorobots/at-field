@@ -7,7 +7,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-## [0.4.1] — 2026-06-25 — Clean-machine installer fixes
+## [0.4.2] — 2026-06-25 — Broader positioning, PyPI install, branded installer
+
+### Added
+
+- **`pip install atfield` is now real.** The release workflow publishes the
+  wheel + sdist to PyPI via Trusted Publishing (GitHub OIDC, no stored tokens).
+  pip is now the recommended, SmartScreen-free path to the headless watchdog;
+  the one-click installer remains the way to also get the tray dashboard.
+- **Branded NSIS installer.** The setup wizard now ships the AT-Field logo as
+  its icon plus custom header and sidebar artwork (Tokyo-3 dark + the orange
+  hexagon), replacing the generic NSIS chrome. Generated reproducibly by
+  `scripts/gen_installer_images.py`.
+
+### Changed
+
+- **Repositioned: "built for AI rigs, useful for any heavy GPU/CPU workload."**
+  README, PyPI description, tray store copy, and the About modal now lead with
+  the broader hardware-protection story (renders, sims, overclock testing,
+  general OOM protection) while keeping AI training as the hero use case.
+  README also gains badges and broadened search keywords for discoverability.
+- **First-launch tray toast reworded** from "AT-Field is watching" to
+  "AT-Field is on guard" with a protection-focused body (less surveillance-y).
 
 The one-step installer shipped in 0.4.0 worked on the dev machine but silently
 failed to register the watchdog on a truly clean PC ("service unreachable"
@@ -327,7 +348,8 @@ audit trail in `events.jsonl`.
 - **Multi-OS CI** (Windows + Linux + macOS) running 129 tests with
   ruff lint.
 
-[Unreleased]: https://github.com/alonsorobots/at-field/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/alonsorobots/at-field/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/alonsorobots/at-field/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/alonsorobots/at-field/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/alonsorobots/at-field/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/alonsorobots/at-field/releases/tag/v0.3.0

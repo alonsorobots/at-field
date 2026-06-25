@@ -146,6 +146,40 @@ that zip, re-stages it at `dist/atfield/`, and runs the Tauri/NSIS build —
 so the single installer ships both the tray app and a complete, sensor-ready
 watchdog. End-user install/verification lives in [`docs/install.md`](install.md).
 
+## Publishing to PyPI (Trusted Publishing)
+
+`pip install atfield` is served from PyPI. The `publish-pypi` job in
+`release.yml` uploads the wheel + sdist using **Trusted Publishing** — PyPI
+verifies GitHub's OIDC identity, so there are **no API tokens or repo secrets**
+to manage. One-time setup on the maintainer's PyPI account:
+
+1. Create/sign in to a PyPI account and enable 2FA (mandatory).
+2. Go to **Account → Publishing → Add a new pending publisher** with:
+   - **PyPI Project Name:** `atfield`
+   - **Owner:** `alonsorobots`
+   - **Repository name:** `at-field`
+   - **Workflow name:** `release.yml`
+   - **Environment name:** `pypi`
+3. (Optional) In the GitHub repo, create an Environment named `pypi`
+   (Settings → Environments) for an extra approval gate.
+
+The next non-prerelease `v*` tag then publishes automatically and claims the
+`atfield` name. Until this is configured, the `publish-pypi` job fails but does
+**not** block the GitHub Release (installer + wheel still ship there).
+
+## NSIS installer artwork
+
+The branded setup chrome (`installerIcon`, `headerImage`, `sidebarImage` in
+`tauri.conf.json`) comes from `at-field-tray/src-tauri/installer/`. Regenerate
+the BMPs from the logo with:
+
+```pwsh
+.venv/Scripts/python.exe scripts/gen_installer_images.py
+```
+
+NSIS requires 24-bit BMPs at exactly 150×57 (header) and 164×314 (sidebar);
+the script enforces those sizes.
+
 ## Known caveats
 
 - **Icon path** in the spec assumes the Tauri tray icon exists at

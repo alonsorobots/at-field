@@ -82,7 +82,7 @@ export default function AboutModal({ open, onClose, version }: AboutModalProps) 
                   v{version ?? "—"}
                 </span>
                 <p className="text-[11px] text-[var(--color-text-secondary)] text-center mt-2 leading-relaxed">
-                  An absolute thermal-and-memory field for your AI rig — kills runaway
+                  An absolute thermal-and-memory field for your rig — kills runaway
                   jobs before they cook your GPU.
                 </p>
               </div>

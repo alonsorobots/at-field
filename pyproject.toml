@@ -4,16 +4,18 @@ build-backend = "hatchling.build"
 
 [project]
 name = "atfield"
-version = "0.4.1"
-description = "Always-on Windows hardware watchdog for AI workloads. Monitors NVIDIA GPU/VRAM temps, system RAM, pagefile and CPU temperature; kills runaway Python/PyTorch processes before they damage your hardware."
+version = "0.4.2"
+description = "Always-on Windows hardware watchdog for GPU rigs: kills runaway workloads (AI training, renders, sims) before thermal or memory runaway damages your machine. Monitors NVIDIA GPU/VRAM temps, RAM, pagefile, CPU temp and PSU rails."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Alonso Martinez" }]
 keywords = [
     "gpu", "vram", "nvidia", "windows", "watchdog", "thermal",
-    "ai", "pytorch", "oom-killer", "monitoring", "hardware-monitor",
-    "process-killer", "machine-learning", "deep-learning", "rtx",
+    "ai", "pytorch", "oom-killer", "earlyoom", "monitoring",
+    "hardware-monitor", "process-killer", "machine-learning",
+    "deep-learning", "rtx", "cuda", "rendering", "overclocking",
+    "system-monitor",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
