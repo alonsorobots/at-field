@@ -625,7 +625,7 @@ def ensure_url_reservation(port: int, *, host: str = "+") -> str:
         )
         if url.lower() in (shown.stdout or "").lower():
             return "present"
-    except Exception as exc:  # noqa: BLE001 -- diagnostics only, never fatal
+    except Exception as exc:
         _log.debug("netsh show urlacl %s raised %r", url, exc)
 
     # 2. Add the reservation for Everyone (World SID, locale-independent).
@@ -646,7 +646,7 @@ def ensure_url_reservation(port: int, *, host: str = "+") -> str:
             url, reason, url,
         )
         return f"failed:{reason}"
-    except Exception as exc:  # noqa: BLE001 -- never let this break startup
+    except Exception as exc:
         _log.warning("netsh add urlacl %s raised %r; spawning LHM anyway", url, exc)
         return f"failed:{exc!r}"
 

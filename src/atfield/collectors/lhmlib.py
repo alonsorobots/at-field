@@ -108,7 +108,7 @@ def find_sensor_helper(
                 if cand.is_dir():
                     extra.append(cand)
                     break
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         program_data = os.environ.get("PROGRAMDATA", r"C:\ProgramData")
         extra.append(Path(program_data) / "ATField" / "lhm")
@@ -117,14 +117,14 @@ def find_sensor_helper(
         if root is None:
             try:
                 root = Path(sys.executable).parent
-            except Exception:  # noqa: BLE001
+            except Exception:
                 root = None
 
         lhm = find_lhm_executable(bundled_root=root, extra_search_paths=tuple(extra))
         if lhm is not None:
             candidate_dirs.append(lhm.parent)
         candidate_dirs.extend(extra)
-    except Exception:  # noqa: BLE001 -- discovery must never raise
+    except Exception:
         pass
 
     # (3) bundled_root / sys.executable dir
@@ -132,7 +132,7 @@ def find_sensor_helper(
         candidate_dirs.append(bundled_root)
     try:
         candidate_dirs.append(Path(sys.executable).parent)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
     for d in candidate_dirs:
@@ -325,23 +325,29 @@ class LhmLibCollector:
                 value = self._usable_value(s, "celsius")
                 if value is None:
                     continue
-                if hw_type in _GPU_HW_TYPES and hw not in matched_gpu_hw:
-                    if any(p.search(name) for p in _VRAM_JUNCTION_PATTERNS):
-                        mapping[sid] = (f"gpu.{gpu_idx}.mem_junction_temp_c", "celsius")
-                        matched_gpu_hw.add(hw)
-                        gpu_idx += 1
-                        continue
-                if hw_type == "Cpu" and hw not in matched_cpu_hw:
-                    if any(p.search(name) for p in _CPU_PACKAGE_PATTERNS):
-                        sig = (
-                            "system.cpu_package_temp_c"
-                            if cpu_idx == 0
-                            else f"system.cpu{cpu_idx}_package_temp_c"
-                        )
-                        mapping[sid] = (sig, "celsius")
-                        matched_cpu_hw.add(hw)
-                        cpu_idx += 1
-                        continue
+                if (
+                    hw_type in _GPU_HW_TYPES
+                    and hw not in matched_gpu_hw
+                    and any(p.search(name) for p in _VRAM_JUNCTION_PATTERNS)
+                ):
+                    mapping[sid] = (f"gpu.{gpu_idx}.mem_junction_temp_c", "celsius")
+                    matched_gpu_hw.add(hw)
+                    gpu_idx += 1
+                    continue
+                if (
+                    hw_type == "Cpu"
+                    and hw not in matched_cpu_hw
+                    and any(p.search(name) for p in _CPU_PACKAGE_PATTERNS)
+                ):
+                    sig = (
+                        "system.cpu_package_temp_c"
+                        if cpu_idx == 0
+                        else f"system.cpu{cpu_idx}_package_temp_c"
+                    )
+                    mapping[sid] = (sig, "celsius")
+                    matched_cpu_hw.add(hw)
+                    cpu_idx += 1
+                    continue
 
             elif stype == "Voltage":
                 value = self._usable_value(s, "volts")
@@ -435,7 +441,7 @@ class LhmLibCollector:
                         self._elevated = bool(obj.get("elevated"))
                 elif event == "error":
                     _log.warning("sensor helper error: %s", obj.get("message"))
-        except Exception:  # noqa: BLE001 -- reader thread must not crash service
+        except Exception:
             pass
 
     def _terminate_proc(self) -> None:
@@ -454,7 +460,7 @@ class LhmLibCollector:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 proc.kill()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     # -- Health / lifecycle ------------------------------------------------
