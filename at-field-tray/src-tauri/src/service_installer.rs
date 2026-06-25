@@ -1,7 +1,7 @@
 //! Bridge between the tray UI and the bundled service binaries.
 //!
 //! When the user installs AT-Field via the NSIS installer they get the
-//! tray app PLUS a `resources/atfield/` directory that ships:
+//! tray app PLUS an `atfield/` directory (next to the tray exe) that ships:
 //!
 //!     atfield/
 //!       atf.exe                <- frozen CLI (PyInstaller)
@@ -65,14 +65,14 @@ pub struct ServiceStatus {
     pub install_script: Option<String>,
 }
 
-/// Resolve the bundled `resources/atfield/` directory regardless of
-/// whether we're running from the installed location or from
-/// `cargo run` in a dev tree.
+/// Resolve the bundled `atfield/` directory regardless of whether we're
+/// running from the installed location or from `cargo run` in a dev tree.
 fn resource_root(app: &AppHandle) -> Option<PathBuf> {
-    // PathResolver resolves relative to the *resource* directory, which
-    // for an installed Tauri app is `resources/`. We bundle the staged
-    // PyInstaller output into `resources/atfield/`, so the lookup is
-    // relative to that.
+    // Tauri v2 places bundle resources directly under the install dir, so
+    // `resource_dir()` == $INSTDIR (there is no `resources\` subfolder like
+    // Tauri v1). Our mapping targets are "atfield/...", so the staged
+    // PyInstaller output lands at $INSTDIR\atfield\ and the lookup is just
+    // resource_dir()/atfield.
     let resolver = app.path();
     resolver.resource_dir().ok().map(|root| root.join("atfield"))
 }

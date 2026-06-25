@@ -73,6 +73,10 @@ SHARED_DATAS = [
     (str(SCRIPTS / "uninstall_service.ps1"),     "scripts"),
     (str(SCRIPTS / "grant_service_control.ps1"), "scripts"),
     (str(SCRIPTS / "config.example.toml"),       "scripts"),
+    # Vendored NSSM (win64, 2.24) so install_service.ps1 never has to download
+    # from the flaky nssm.cc at install time. Lands beside the scripts so
+    # Ensure-Nssm finds it via $PSScriptRoot.
+    (str(SCRIPTS / "vendor" / "nssm.exe"),       "scripts"),
 ]
 
 a_service = Analysis(

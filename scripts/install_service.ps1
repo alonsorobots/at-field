@@ -86,6 +86,26 @@ function Ensure-Nssm {
     $nssm = Join-Path $DestDir 'nssm.exe'
     if (Test-Path $nssm) { return $nssm }
 
+    # Prefer a copy vendored next to this script. The Tauri/PyInstaller bundle
+    # ships nssm.exe alongside install_service.ps1 (and the dev checkout keeps
+    # it in scripts\vendor\), so a normal install needs ZERO network access --
+    # nssm.cc is frequently flaky (HTTP 503) and download-at-install is the
+    # single most fragile step of the whole setup. We just copy it into the
+    # state dir and move on.
+    $bundledCandidates = @(
+        (Join-Path $PSScriptRoot 'nssm.exe'),
+        (Join-Path $PSScriptRoot 'vendor\nssm.exe')
+    )
+    foreach ($cand in $bundledCandidates) {
+        if (Test-Path $cand) {
+            Write-Host "Using bundled NSSM: $cand"
+            Copy-Item -Path $cand -Destination $nssm -Force
+            return $nssm
+        }
+    }
+
+    # Fallback only when no bundled copy is present (e.g. a bare `atf install`
+    # from a pip checkout without the vendored binary).
     # NSSM 2.24 is the canonical version everyone bundles. The .zip ships
     # win32 + win64 binaries; we keep the win64 one.
     $url = 'https://nssm.cc/release/nssm-2.24.zip'
@@ -120,7 +140,7 @@ function Drop-StarterConfig {
     }
 
     # Find the example config relative to this script.
-    $here = Split-Path -Parent $MyInvocation.ScriptName
+    $here = $PSScriptRoot
     $example = Join-Path $here 'config.example.toml'
     if (-not (Test-Path $example)) {
         Write-Host "No config.example.toml found; service will run with built-in defaults."
@@ -166,8 +186,12 @@ $nssm = Ensure-Nssm -DestDir $StateDir
 Write-Host "NSSM:      $nssm"
 
 # If the service already exists, stop+remove so we can re-register cleanly.
-$existing = & $nssm status $ServiceName 2>$null
-if ($LASTEXITCODE -eq 0) {
+# Use Get-Service (not `nssm status`) for the existence probe: on a clean
+# machine `nssm status <missing>` writes "Can't open service!" to stderr,
+# which -- under $ErrorActionPreference='Stop' -- PowerShell promotes to a
+# terminating NativeCommandError and aborts the whole install. Get-Service
+# with -ErrorAction SilentlyContinue is the side-effect-free way to ask.
+if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
     Write-Host "Service $ServiceName already exists -- stopping + removing for clean reinstall."
     & $nssm stop $ServiceName confirm 2>$null | Out-Null
     & $nssm remove $ServiceName confirm | Out-Null
@@ -203,14 +227,18 @@ if ($bundledMode) {
 #   2. <repoRoot>\dist\atfield\LibreHardwareMonitor.exe
 #      (dev workflow: PyInstaller-built bundle in a source tree).
 #   3. <repoRoot>\LibreHardwareMonitor.exe  (installed bundle, flat
-#      scripts\ layout: repoRoot is resources\atfield\ where the vendored
+#      scripts\ layout: repoRoot is <InstallDir>\atfield\ where the vendored
 #      DLLs sit flat next to it).
 #   4. <repoRoot>\..\LibreHardwareMonitor.exe  (installed bundle, scripts
-#      staged under _internal\scripts\: repoRoot is resources\atfield\
-#      _internal, so the DLLs are one level up in resources\atfield\).
+#      staged under _internal\scripts\: repoRoot is <InstallDir>\atfield\
+#      _internal, so the DLLs are one level up in <InstallDir>\atfield\).
 #   5. %ProgramFiles%\LibreHardwareMonitor\LibreHardwareMonitor.exe
 #      (upstream installer path).
-$scriptDir = Split-Path -Parent $MyInvocation.ScriptName
+# $PSScriptRoot (not $MyInvocation.ScriptName) is the script's own directory:
+# when launched via `powershell -File install_service.ps1` there is no calling
+# script, so $MyInvocation.ScriptName is empty and `Split-Path -Parent ''`
+# throws a terminating ParameterArgumentValidationError mid-install.
+$scriptDir = $PSScriptRoot
 $repoRoot = Split-Path -Parent $scriptDir
 $repoRootParent = if ($repoRoot) { Split-Path -Parent $repoRoot } else { $null }
 $lhmExe = $env:ATFIELD_LHM_EXE
@@ -283,7 +311,8 @@ Write-Host "Starting service ..."
 & $nssm start $ServiceName | Out-Null
 
 Start-Sleep -Seconds 2
-$status = & $nssm status $ServiceName
+$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+$status = if ($svc) { $svc.Status } else { 'Unknown' }
 Write-Host "Service status: $status"
 
 Write-Host ""

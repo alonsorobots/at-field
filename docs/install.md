@@ -66,7 +66,7 @@ From the **dashboard** (easiest) — click the tray icon:
 - **Signals** page → live sparklines update every couple of seconds.
 
 From a terminal (optional), using the bundled CLI at
-`C:\Program Files\AT-Field\resources\atfield\atf.exe` (or `atf` if pip-installed):
+`C:\Program Files\AT-Field\atfield\atf.exe` (or `atf` if pip-installed):
 
 ```pwsh
 atf status     # heartbeat + working signal map
@@ -94,7 +94,7 @@ If you want routine `Restart-Service ATFieldWatchdog` without a UAC prompt each
 time, run the bundled helper once (elevated):
 
 ```pwsh
-powershell -ExecutionPolicy Bypass -File "C:\Program Files\AT-Field\resources\atfield\_internal\scripts\grant_service_control.ps1"
+powershell -ExecutionPolicy Bypass -File "C:\Program Files\AT-Field\atfield\_internal\scripts\grant_service_control.ps1"
 ```
 
 ---
@@ -117,7 +117,7 @@ powershell -ExecutionPolicy Bypass -File "C:\Program Files\AT-Field\resources\at
 | --- | --- |
 | SmartScreen blocks the installer | Unsigned binary. *More info → Run anyway*. |
 | Tray icon missing after install | Windows 11 overflow. Click the taskbar `^` and drag it out. |
-| `lhm` collector `FAILED` / `UNAVAILABLE` | Click **Install watchdog** on the Status screen to re-register; confirm `atfield-sensors.exe` + `LibreHardwareMonitor.exe` are in `...\resources\atfield\`. |
+| `lhm` collector `FAILED` / `UNAVAILABLE` | Click **Install watchdog** on the Status screen to re-register; confirm `atfield-sensors.exe` + `LibreHardwareMonitor.exe` are in `...\AT-Field\atfield\`. |
 | `nvml` `UNAVAILABLE` | Expected on machines without an NVIDIA GPU. |
 | Service won't start | Check `%ProgramData%\ATField\service.stderr.log`. |
 | "Install watchdog" greyed out / "missing bundled watchdog" | The installer didn't stage the watchdog (a locked-file local build — see [packaging.md](packaging.md)). Use the GitHub Release artifact. |

@@ -17,7 +17,7 @@ the components are modified.
   release archive from GitHub at build time and extracts it into
   `dist/atfield/` next to AT-Field's frozen binaries. The full LHM
   payload (including its `License.txt`) ships unmodified inside the
-  installed product at `<InstallDir>\resources\atfield\`. See
+  installed product at `<InstallDir>\atfield\`. See
   `vendor/lhm/README.md` for the full rationale.
 
 ## NSSM (Non-Sucking Service Manager)

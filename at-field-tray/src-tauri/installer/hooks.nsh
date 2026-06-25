@@ -8,14 +8,17 @@
 ; Install/Uninstall buttons remain available as a repair / fallback path.
 ;
 ; The install/uninstall PowerShell scripts ship as PyInstaller `datas`, so in
-; the staged bundle they live under resources\atfield\_internal\scripts\.
-; install_service.ps1 auto-detects the vendored LibreHardwareMonitor.exe +
-; atfield-sensors.exe sitting one level up in resources\atfield\.
+; the staged bundle they live under atfield\_internal\scripts\. Tauri v2 maps
+; bundle `resources` straight under $INSTDIR (resource_dir() == $INSTDIR), so
+; the mapping target "atfield/..." lands at $INSTDIR\atfield\... -- there is NO
+; extra "resources\" segment. install_service.ps1 auto-detects the vendored
+; LibreHardwareMonitor.exe + atfield-sensors.exe sitting next to it in
+; $INSTDIR\atfield\.
 
 !macro NSIS_HOOK_POSTINSTALL
   DetailPrint "Registering the AT-Field watchdog service..."
   Push $0
-  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\resources\atfield\_internal\scripts\install_service.ps1" -BundledExe "$INSTDIR\resources\atfield\atfield-service.exe"'
+  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\atfield\_internal\scripts\install_service.ps1" -BundledExe "$INSTDIR\atfield\atfield-service.exe"'
   Pop $0
   DetailPrint "Watchdog service installer finished (exit code $0)."
   Pop $0
@@ -24,7 +27,7 @@
 !macro NSIS_HOOK_PREUNINSTALL
   DetailPrint "Removing the AT-Field watchdog service..."
   Push $0
-  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\resources\atfield\_internal\scripts\uninstall_service.ps1"'
+  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\atfield\_internal\scripts\uninstall_service.ps1"'
   Pop $0
   Pop $0
 !macroend

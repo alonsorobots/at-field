@@ -9,7 +9,7 @@
 
     AT-Field's lhm_supervisor.find_lhm_executable() looks first next to
     the running atfield-service.exe (Path(sys.executable).parent), which
-    in the installed product is `<InstallDir>\resources\atfield\`. By
+    in the installed product is `<InstallDir>\atfield\`. By
     staging LHM there at build time, the installed AT-Field service
     finds and supervises it automatically -- no separate download or
     UAC step for the end user.

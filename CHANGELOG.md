@@ -7,6 +7,35 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-06-25 — Clean-machine installer fixes
+
+The one-step installer shipped in 0.4.0 worked on the dev machine but silently
+failed to register the watchdog on a truly clean PC ("service unreachable"
+after install). Three independent clean-machine bugs are fixed here.
+
+### Fixed
+
+- **Installer hook pointed at the wrong path.** Tauri v2 stages bundle
+  resources directly under the install dir (`$INSTDIR\atfield\…`), but the
+  NSIS post-install/pre-uninstall hooks called `$INSTDIR\resources\atfield\…`.
+  That path never existed, so the service installer script never ran. The dev
+  machine masked it because it already had the service from an earlier setup.
+- **`install_service.ps1` aborted on a clean machine.** Its idempotency probe
+  ran `nssm status <service>`; for a not-yet-installed service NSSM writes
+  "Can't open service!" to stderr, which under `$ErrorActionPreference='Stop'`
+  PowerShell promotes to a terminating error — killing the install before it
+  could register anything. The existence check now uses
+  `Get-Service -ErrorAction SilentlyContinue` (no side effects).
+- **NSSM is now bundled** (win64 2.24) instead of downloaded from `nssm.cc` at
+  install time. The download step routinely returned HTTP 503 and was the most
+  fragile part of setup; `install_service.ps1` now copies the vendored copy
+  shipped beside it and only falls back to the network when one isn't present.
+
+### Changed
+
+- Documentation and code comments corrected to reference the real
+  `…\AT-Field\atfield\` bundle path (not `…\resources\atfield\`).
+
 ## [0.4.0] — 2026-06-24 — One-step install, dashboard polish, hardened sensors
 
 ### Added
@@ -298,7 +327,8 @@ audit trail in `events.jsonl`.
 - **Multi-OS CI** (Windows + Linux + macOS) running 129 tests with
   ruff lint.
 
-[Unreleased]: https://github.com/alonsorobots/at-field/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/alonsorobots/at-field/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/alonsorobots/at-field/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/alonsorobots/at-field/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/alonsorobots/at-field/releases/tag/v0.3.0
 [0.2.0]: https://github.com/alonsorobots/at-field/releases/tag/v0.2.0

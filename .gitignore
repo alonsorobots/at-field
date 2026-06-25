@@ -39,6 +39,9 @@ local_state/
 *.log
 events.jsonl
 nssm.exe
+# ...but the vendored NSSM that ships in the installer IS tracked on purpose
+# (install_service.ps1 copies it so setup never depends on the flaky nssm.cc).
+!scripts/vendor/nssm.exe
 resources/LibreHardwareMonitor/
 
 # PyInstaller -- generated specs only. Keep our authored spec under packaging/.

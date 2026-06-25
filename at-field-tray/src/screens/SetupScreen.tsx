@@ -146,7 +146,7 @@ export default function SetupScreen({ onInstalled }: SetupScreenProps) {
         <h2 className="text-lg font-semibold mb-3">Watchdog binaries missing</h2>
         <p className="text-sm text-[var(--color-text-secondary)] mb-4">
           This build of AT-Field shipped without the bundled service binaries
-          (<code>resources/atfield/</code> is empty). You can still install
+          (<code>atfield/</code> is empty). You can still install
           the watchdog via the Python package:
         </p>
         <pre className="mb-4 p-3 rounded bg-[var(--color-bg-elev)] text-xs text-[var(--color-text-primary)] overflow-x-auto">

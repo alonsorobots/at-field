@@ -28,16 +28,20 @@ function Assert-Admin {
 
 Assert-Admin
 
-$nssm = Join-Path $StateDir 'nssm.exe'
-if (-not (Test-Path $nssm)) {
-    Write-Host "NSSM not found at $nssm; falling back to sc.exe."
-    & sc.exe stop $ServiceName 2>$null | Out-Null
-    & sc.exe delete $ServiceName | Out-Null
+if (-not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) {
+    Write-Host "Service $ServiceName is not installed; nothing to remove."
 } else {
-    Write-Host "Stopping service $ServiceName ..."
-    & $nssm stop $ServiceName confirm 2>$null | Out-Null
-    Write-Host "Removing service $ServiceName ..."
-    & $nssm remove $ServiceName confirm | Out-Null
+    $nssm = Join-Path $StateDir 'nssm.exe'
+    if (-not (Test-Path $nssm)) {
+        Write-Host "NSSM not found at $nssm; falling back to sc.exe."
+        & sc.exe stop $ServiceName 2>$null | Out-Null
+        & sc.exe delete $ServiceName | Out-Null
+    } else {
+        Write-Host "Stopping service $ServiceName ..."
+        & $nssm stop $ServiceName confirm 2>$null | Out-Null
+        Write-Host "Removing service $ServiceName ..."
+        & $nssm remove $ServiceName confirm | Out-Null
+    }
 }
 
 if ($PurgeStateDir.IsPresent) {
