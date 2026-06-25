@@ -78,7 +78,11 @@ class _ScriptedSpawner:
             raise OSError("no fake proc enqueued -- test script exhausted")
         return self.script.pop(0)
 
-    def wait_for_spawn(self, timeout: float = 2.0) -> bool:
+    def wait_for_spawn(self, timeout: float = 10.0) -> bool:
+        # Generous ceiling: the event fires the instant spawn() is called,
+        # so a large timeout costs nothing on passing runs -- it only gives
+        # slow / contended CI runners slack. (A 2.0s ceiling flaked on a
+        # Windows runner where the pre-spawn config write pushed past it.)
         ok = self._spawn_event.wait(timeout)
         self._spawn_event.clear()
         return ok
@@ -146,7 +150,7 @@ class TestSpawnedArgs:
         sup = LhmSupervisor(cfg, spawner=spawner)
         sup.start()
         try:
-            assert spawner.wait_for_spawn(2.0)
+            assert spawner.wait_for_spawn(10.0)
             args = spawner.spawn_calls[0]
             assert args[0] == str(cfg.executable)
             # Without extra_args, no other CLI flags are passed -- the
@@ -169,7 +173,7 @@ class TestSpawnedArgs:
         sup = LhmSupervisor(cfg, spawner=spawner)
         sup.start()
         try:
-            assert spawner.wait_for_spawn(2.0)
+            assert spawner.wait_for_spawn(10.0)
             args = spawner.spawn_calls[0]
             # extra_args is appended verbatim; supervisor doesn't pass
             # the configured port as a CLI flag (LHM 0.9.x reads it from
@@ -384,7 +388,7 @@ class TestConfigManagement:
         sup = LhmSupervisor(cfg, spawner=spawner)
         sup.start()
         try:
-            assert spawner.wait_for_spawn(2.0)
+            assert spawner.wait_for_spawn(10.0)
             cfg_path = tmp_path / LHM_CONFIG_FILENAME
             assert cfg_path.exists(), (
                 "supervisor should have ensured the LHM config file before spawn"
@@ -424,7 +428,7 @@ class TestConfigManagement:
         sup = LhmSupervisor(cfg, spawner=spawner)
         sup.start()
         try:
-            assert spawner.wait_for_spawn(2.0)
+            assert spawner.wait_for_spawn(10.0)
             text = cfg_path.read_text(encoding="utf-8")
             assert 'key="runWebServerMenuItem" value="True"' in text
             assert 'key="webServerPortNumeric.Value" value="8085"' in text
@@ -540,7 +544,7 @@ class TestRestartOnNoHttp:
         sup = LhmSupervisor(self._cfg(tmp_path, limit=2), spawner=spawner)
         sup.start()
         try:
-            assert spawner.wait_for_spawn(2.0)
+            assert spawner.wait_for_spawn(10.0)
             time.sleep(0.25)
             assert len(spawner.spawn_calls) == 1  # healthy -> no respawn
             with sup.status_lock:
