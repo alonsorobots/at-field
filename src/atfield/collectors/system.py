@@ -42,6 +42,7 @@ _SIGNALS: Final = (
     "system.ram_used_percent",
     "system.swap_used_percent",
     "system.commit_percent",
+    "system.cpu_used_percent",
 )
 
 
@@ -108,6 +109,12 @@ class SystemCollector:
         try:
             psutil.virtual_memory()
             psutil.swap_memory()
+            # Prime psutil's CPU-percent ticker. The first non-blocking call
+            # always returns 0.0 because it has no prior reading to diff
+            # against; calling it here means the FIRST real sample() already
+            # returns a meaningful percent (avoiding an initial "0% CPU" tile
+            # that's just an artifact of the probe ordering).
+            psutil.cpu_percent(interval=None)
             if self._on_windows:
                 _read_commit_percent_windows()
                 reason = "psutil + Win32 GlobalMemoryStatusEx OK"
@@ -138,6 +145,12 @@ class SystemCollector:
             vm = psutil.virtual_memory()
             sw = psutil.swap_memory()
             commit = _read_commit_percent_windows() if self._on_windows else float(sw.percent)
+            # Non-blocking: returns % busy averaged over interval since the
+            # last call (or since probe() primed the ticker). Cheap -- no
+            # interval sleep, no subprocess. System-wide aggregate; per-core
+            # breakdown is available via psutil.cpu_percent(percpu=True) but
+            # the dashboard only needs the headline number.
+            cpu = float(psutil.cpu_percent(interval=None))
 
             self._consecutive_failures = 0
             self._health = HealthState.HEALTHY
@@ -157,6 +170,12 @@ class SystemCollector:
                 ),
                 "system.commit_percent": Sample(
                     value=commit,
+                    taken_at_ns=now,
+                    source_id=_NAME,
+                    unit="percent",
+                ),
+                "system.cpu_used_percent": Sample(
+                    value=cpu,
                     taken_at_ns=now,
                     source_id=_NAME,
                     unit="percent",

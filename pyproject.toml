@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "atfield"
-version = "0.4.2"
+version = "0.4.3"
 description = "Always-on Windows hardware watchdog for GPU rigs: kills runaway workloads (AI training, renders, sims) before thermal or memory runaway damages your machine. Monitors NVIDIA GPU/VRAM temps, RAM, pagefile, CPU temp and PSU rails."
 readme = "README.md"
 requires-python = ">=3.10"

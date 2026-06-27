@@ -24,9 +24,15 @@ import {
   compareSignalPriority,
   formatValue as fmtUnit,
   isDefaultDisplaySignal,
+  signalCategory,
   signalDisplayName,
 } from "../lib/format";
 import { getPollIntervalMs } from "../lib/preferences";
+import {
+  loadActiveCategory,
+  saveActiveCategory,
+  type ActiveCategory,
+} from "../lib/signal-category";
 import { clearSignalOrder, resolveOrder, saveSignalOrder } from "../lib/signal-order";
 import {
   loadHiddenSignals,
@@ -103,6 +109,17 @@ export default function SignalsScreen({ rules, refreshGen, onSelectSignal }: Pro
   const [hidden, setHidden] = useState<Set<string>>(() => loadHiddenSignals());
   const [manageOpen, setManageOpen] = useState(false);
 
+  // Active category tab (All / GPU / CPU / Memory). Persisted across
+  // reloads. Composes WITH `hidden` -- a signal hidden via Manage is
+  // hidden in every category, not just "All". "Other" (voltages, etc.)
+  // is intentionally not its own tab; it only appears under "All" so the
+  // per-resource tabs stay scoped.
+  const [category, setCategoryState] = useState<ActiveCategory>(() => loadActiveCategory());
+  const setCategory = (c: ActiveCategory) => {
+    setCategoryState(c);
+    saveActiveCategory(c);
+  };
+
   // Seed the default-hidden signals (voltages, page file) the first time
   // each one is observed. Reconciliation tracks "seen" separately so a
   // signal the user later un-hides stays visible across restarts.
@@ -136,10 +153,32 @@ export default function SignalsScreen({ rules, refreshGen, onSelectSignal }: Pro
   };
 
   // What actually renders: ordered, minus hidden, minus anything no longer
-  // reporting. `order` stays the full set so the Manage panel can reveal
-  // hidden tiles and drag-reorder still has stable indices.
-  const visibleOrder = order.filter((s) => !hidden.has(s) && data?.latest[s]);
-  const hiddenCount = order.filter((s) => hidden.has(s)).length;
+  // reporting, minus signals outside the active category tab. `order` stays
+  // the full set so the Manage panel can reveal hidden tiles and drag-reorder
+  // still has stable indices regardless of the active category.
+  const inCategory = (s: string) => category === "all" || signalCategory(s) === category;
+  const reporting = (s: string) => Boolean(data?.latest[s]);
+  const visibleOrder = order.filter(
+    (s) => !hidden.has(s) && reporting(s) && inCategory(s),
+  );
+  const hiddenCount = order.filter((s) => hidden.has(s) && inCategory(s)).length;
+
+  // Per-category counts for the tab strip ("GPU (6)" etc.). We count only
+  // visible-eligible signals (reporting + not hidden) so the badges match
+  // what the user will actually see when they switch tabs. The "All" tab's
+  // count is the sum of every visible-eligible signal regardless of bucket.
+  const categoryCounts = useMemo(() => {
+    const counts = { all: 0, gpu: 0, cpu: 0, memory: 0, other: 0 } as Record<ActiveCategory, number>;
+    for (const sig of order) {
+      if (hidden.has(sig) || !reporting(sig)) continue;
+      counts.all += 1;
+      counts[signalCategory(sig)] += 1;
+    }
+    return counts;
+    // `reporting` is a closure over `data`, but order/hidden change too --
+    // recompute on any of them.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [order, hidden, data]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -168,8 +207,48 @@ export default function SignalsScreen({ rules, refreshGen, onSelectSignal }: Pro
     return <div className="p-6 text-sm text-[var(--color-text-secondary)]">No collectors are reporting yet.</div>;
   }
 
+  // Tab strip definitions. Kept declarative so the rendering loop stays
+  // simple; "Other" is intentionally only surfaced when something would
+  // actually appear under it (voltages on rigs with PSU sensors).
+  const tabs: { id: ActiveCategory; label: string }[] = [
+    { id: "all", label: "All" },
+    { id: "gpu", label: "GPU" },
+    { id: "cpu", label: "CPU" },
+    { id: "memory", label: "Memory" },
+  ];
+  if (categoryCounts.other > 0) tabs.push({ id: "other", label: "Other" });
+
   return (
     <div className="p-4 overflow-y-auto h-full">
+      <div className="flex items-center gap-1 mb-2" role="tablist" aria-label="Signal category">
+        {tabs.map((t) => {
+          const active = category === t.id;
+          const count = categoryCounts[t.id];
+          const disabled = !active && count === 0;
+          return (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              disabled={disabled}
+              onClick={() => setCategory(t.id)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-xs transition-colors
+                          disabled:opacity-40 disabled:cursor-default ${
+                            active
+                              ? "border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-surface-hover)]"
+                              : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
+                          }`}
+              title={disabled ? `No ${t.label.toLowerCase()} signals reporting` : `Show ${t.label.toLowerCase()} signals`}
+            >
+              <span>{t.label}</span>
+              <span className="font-mono text-[10px] text-[var(--color-text-tertiary)] tabular-nums">
+                {count}
+              </span>
+            </button>
+          );
+        })}
+      </div>
       <div className="flex items-center justify-between gap-2 mb-3">
         <div className="text-[11px] text-[var(--color-text-tertiary)] tabular-nums">
           {visibleOrder.length} shown
@@ -266,16 +345,32 @@ export default function SignalsScreen({ rules, refreshGen, onSelectSignal }: Pro
       {visibleOrder.length === 0 ? (
         <div className="frosted rounded-lg border border-[var(--color-border)] p-6 text-center">
           <div className="text-sm text-[var(--color-text-secondary)] mb-3">
-            All signals are hidden.
+            {category !== "all" && categoryCounts[category] === 0 && categoryCounts.all > 0
+              ? `No ${tabs.find((t) => t.id === category)?.label.toLowerCase()} signals reporting on this machine.`
+              : "All signals are hidden."}
           </div>
-          <button
-            type="button"
-            onClick={showAll}
-            className="px-3 py-1.5 rounded-md border border-[var(--color-border-strong)]
-                       text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
-          >
-            Show all signals
-          </button>
+          <div className="flex items-center justify-center gap-2">
+            {category !== "all" && (
+              <button
+                type="button"
+                onClick={() => setCategory("all")}
+                className="px-3 py-1.5 rounded-md border border-[var(--color-border-strong)]
+                           text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
+              >
+                Show all categories
+              </button>
+            )}
+            {hiddenCount > 0 && (
+              <button
+                type="button"
+                onClick={showAll}
+                className="px-3 py-1.5 rounded-md border border-[var(--color-border-strong)]
+                           text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
+              >
+                Unhide all signals
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>

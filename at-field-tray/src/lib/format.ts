@@ -131,6 +131,7 @@ const SIGNAL_NAMES: Record<string, string> = {
   "system.ram_used_percent": "RAM used (%)",
   "system.swap_used_percent": "Page file used (%)",
   "system.cpu_package_temp_c": "CPU temp (°C)",
+  "system.cpu_used_percent": "CPU used (%)",
 };
 
 /** Signal-display filter: returns false for signals we don't want surfaced
@@ -170,6 +171,7 @@ export function signalPriorityRank(s: string): number {
   if (s.includes("vram_used")) return 4; // GPU memory pressure (OOM)
   if (s.includes("ram_used")) return 5; // system RAM pressure
   if (s.includes("commit")) return 6; // commit charge — the real Windows OOM predictor
+  if (s === "system.cpu_used_percent") return 6.5; // CPU load — between RAM pressure and GPU power
   if (s.includes("power_w")) return 7; // GPU power draw
   if (s.includes("util_percent")) return 8; // GPU utilization
   if (s.endsWith(".processes") || s === "gpu.processes") return 9; // process count
@@ -181,6 +183,38 @@ export function signalPriorityRank(s: string): number {
 /** Comparator form of {@link signalPriorityRank}. */
 export function compareSignalPriority(a: string, b: string): number {
   return signalPriorityRank(a) - signalPriorityRank(b) || a.localeCompare(b);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Signal categories (Signals-screen filter tabs)
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Coarse "what part of the rig is this about?" bucket. Drives the
+ * All/GPU/CPU/Memory tab filter on the Signals screen and any future
+ * grouping UI.
+ *
+ *   "gpu"     -- everything on a GPU card: core/VRAM temps, util, power,
+ *                VRAM bytes/percent, per-GPU process count. VRAM lives
+ *                here (not "memory") because it's *the GPU's memory* --
+ *                Task Manager, GPU-Z, and every hardware monitor group
+ *                it the same way, and it makes the GPU tab a complete
+ *                "everything about this card" view.
+ *   "cpu"     -- system.cpu_* (package temp, used %, future per-core).
+ *   "memory"  -- *system* memory pressure only: RAM %, commit %, page
+ *                file %. Not GPU VRAM. The tab answers "is my box about
+ *                to OOM / thrash the page file?".
+ *   "other"   -- voltages, fan speeds, and anything we haven't bucketed.
+ *                These only show under the "All" tab so the per-category
+ *                views stay tightly scoped.
+ */
+export type SignalCategory = "gpu" | "cpu" | "memory" | "other";
+
+export function signalCategory(wire: string): SignalCategory {
+  if (/^gpu\./.test(wire)) return "gpu";
+  if (/^system\.cpu_/.test(wire)) return "cpu";
+  if (/^system\.(ram_|swap_|commit_|page)/.test(wire)) return "memory";
+  return "other";
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -212,6 +246,7 @@ const SYSTEM_CORE_METRICS = new Set([
   "commit_bytes",
   "swap_used_percent",
   "swap_used_bytes",
+  "cpu_used_percent",
 ]);
 
 /**

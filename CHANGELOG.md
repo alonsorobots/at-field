@@ -7,7 +7,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-## [0.4.2] — 2026-06-25 — Broader positioning, PyPI install, branded installer
+## [0.4.3] — 2026-06-27 — CPU utilization, signal category tabs
+
+### Added
+
+- **CPU utilization signal.** The `system` collector now emits
+  `system.cpu_used_percent` (system-wide busy %, via psutil; primed in
+  `probe()` so the first sample is a real value, not the 0.0 cold-start
+  artifact). Shows up as "CPU used (%)" on the dashboard. No new kill-rule
+  ships with it -- high CPU during training is expected, not pathological;
+  CPU package temp already covers the actual damage case.
+- **Signals screen category tabs.** A new **All / GPU / CPU / Memory** tab
+  strip filters the grid down to one bucket at a time, with live counts
+  next to each label (e.g. "GPU 6"). The active tab persists per machine
+  via the `atfield.signal_category` localStorage key. Composes with the
+  existing Manage / hide / drag-reorder system -- hidden stays hidden in
+  every tab, and "Other" (voltages and anything uncategorized) only
+  surfaces under "All" so per-resource views stay tightly scoped.
+
+  VRAM lives under GPU (not Memory) because it's the *GPU's* memory --
+  same grouping every hardware monitor uses. The Memory tab is strictly
+  system memory pressure (RAM %, commit %, page file %), answering "is my
+  box about to OOM / thrash the page file?".
 
 ### Added
 
@@ -348,7 +369,8 @@ audit trail in `events.jsonl`.
 - **Multi-OS CI** (Windows + Linux + macOS) running 129 tests with
   ruff lint.
 
-[Unreleased]: https://github.com/alonsorobots/at-field/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/alonsorobots/at-field/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/alonsorobots/at-field/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/alonsorobots/at-field/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/alonsorobots/at-field/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/alonsorobots/at-field/compare/v0.3.0...v0.4.0

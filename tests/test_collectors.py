@@ -60,6 +60,7 @@ class TestSystemCollector:
         assert "system.ram_used_percent" in result.signals
         assert "system.swap_used_percent" in result.signals
         assert "system.commit_percent" in result.signals
+        assert "system.cpu_used_percent" in result.signals
         assert c.health() is HealthState.HEALTHY
 
     def test_sample_returns_valid_values(self):
@@ -71,6 +72,16 @@ class TestSystemCollector:
         assert 0 <= ram.value <= 100, f"RAM% out of range: {ram.value}"
         assert ram.unit == "percent"
         assert ram.source_id == "system"
+
+        # CPU% comes from psutil.cpu_percent() primed during probe(); a real
+        # value (not the 0.0 cold-start artifact) should be reported on the
+        # first sample after probe() since probe() called cpu_percent() to
+        # establish the diff baseline.
+        assert "system.cpu_used_percent" in samples
+        cpu = samples["system.cpu_used_percent"]
+        assert 0 <= cpu.value <= 100, f"CPU% out of range: {cpu.value}"
+        assert cpu.unit == "percent"
+        assert cpu.source_id == "system"
 
     @pytest.mark.skipif(sys.platform != "win32", reason="commit charge accuracy is Windows-specific")
     def test_commit_percent_uses_globalmemorystatusex(self):
