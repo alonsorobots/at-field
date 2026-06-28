@@ -1,6 +1,6 @@
 [package]
 name = "at-field-tray"
-version = "0.4.3"
+version = "0.4.4"
 description = "AT-Field tray app + dashboard"
 authors = ["Alonso Martinez"]
 edition = "2021"

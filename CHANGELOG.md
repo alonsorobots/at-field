@@ -7,6 +7,34 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-06-28 — Reliable in-place upgrades
+
+### Fixed
+
+- **Upgrade-over-running-service race.** Installing a new release on top of an
+  existing AT-Field install could leave the service in a half-upgraded state:
+  the new `atfield-service.exe` got written, but stale `.pyc` files under
+  `_internal/atfield/` did not (the old service was still holding them open
+  during NSIS file replacement). The new exe then loaded the old bytecode and
+  `/health` would report the *previous* version even though the registry said
+  the new one. In some cases the service also failed to start at all after the
+  upgrade, requiring a manual `sc start ATFieldWatchdog`. Hardened in three
+  layers:
+  - `uninstall_service.ps1` now force-kills any lingering `atfield-service`,
+    `atfield-sensors`, and `atf` processes after `nssm remove`, waiting up to
+    10s with a 250ms poll. This is what the NSIS pre-uninstall hook calls
+    during upgrades, so files are truly unlocked before NSIS replaces them.
+  - `install_service.ps1` does the same defensive kill at startup, in case it
+    is invoked outside the NSIS hook (e.g. `atf install` on a manual rerun).
+  - `install_service.ps1` now polls for `Get-Service` to reach `Running` for
+    up to 30s after `nssm start`, instead of trusting the first status read
+    after a 2s sleep. NSSM returns the moment SCM accepts the start request,
+    not when the PyInstaller bundle has finished its (sometimes slow) cold
+    bootstrap on a freshly-extracted install.
+
+  Net effect: upgrading from any prior 0.4.x to 0.4.4+ is a single click with
+  no manual `sc start` and no stale-bytecode mismatch.
+
 ## [0.4.3] — 2026-06-27 — CPU utilization, signal category tabs
 
 ### Added
@@ -369,7 +397,8 @@ audit trail in `events.jsonl`.
 - **Multi-OS CI** (Windows + Linux + macOS) running 129 tests with
   ruff lint.
 
-[Unreleased]: https://github.com/alonsorobots/at-field/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/alonsorobots/at-field/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/alonsorobots/at-field/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/alonsorobots/at-field/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/alonsorobots/at-field/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/alonsorobots/at-field/compare/v0.4.0...v0.4.1

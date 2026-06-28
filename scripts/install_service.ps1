@@ -71,6 +71,53 @@ function Assert-Admin {
     }
 }
 
+# Defense-in-depth: kill any lingering atfield-* processes before we touch the
+# service. Mirrors Stop-AtfieldProcesses in uninstall_service.ps1. The NSIS
+# pre-uninstall hook already calls uninstall_service.ps1 during upgrades, so
+# this should normally be a no-op -- but if the uninstall path was skipped
+# (manual rerun, atf install from CLI, NSIS racing the service shutdown), the
+# old service.exe can still be holding _internal/atfield/*.pyc open. Replacing
+# those files happens BEFORE this script runs (NSIS sequence: files ->
+# postinstall hook); but if old processes are alive at THAT moment, we get a
+# stale-bytecode mismatch (exe at v0.4.4, bytecode at v0.4.3, /health reports
+# the old version). Killing them here is too late to fix the *bytecode* race,
+# but is essential to keep nssm install/start from racing against a still-
+# running ghost service.
+function Stop-AtfieldProcesses {
+    param([int]$TimeoutMs = 10000)
+    $targets = @('atfield-service', 'atfield-sensors', 'atf')
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    while ((Get-Date) -lt $deadline) {
+        $alive = Get-Process -Name $targets -ErrorAction SilentlyContinue
+        if (-not $alive) { return }
+        foreach ($p in $alive) {
+            try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
+        }
+        Start-Sleep -Milliseconds 250
+    }
+}
+
+# Poll for the service to actually reach Running after `nssm start`. NSSM's
+# start command returns 0 the moment SCM accepts the start request, NOT when
+# the service has finished its bootstrap -- and on a freshly-extracted
+# PyInstaller bundle (cold disk, Defender scanning .pyd files, etc.) that
+# bootstrap can take a few seconds. The old code did `Start-Sleep 2; nssm
+# status` and accepted whatever it got, which on slow first-launch produced
+# Stopped/Automatic and a service that never came up without manual nudging.
+function Wait-ServiceRunning {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [int]$TimeoutSec = 30
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq 'Running') { return $true }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
 function Resolve-PythonExe {
     param([string]$Hint)
     if ($Hint -and (Test-Path $Hint)) { return (Resolve-Path $Hint).Path }
@@ -155,6 +202,12 @@ function Drop-StarterConfig {
 # -----------------------------------------------------------------------------
 
 Assert-Admin
+
+# Defensive cleanup: kill any stale atfield-service / atfield-sensors / atf
+# processes left behind by a previous run (failed install, upgrade where the
+# uninstall hook didn't fully wait, dev `atf run` foreground). Safe no-op on
+# a clean install -- nothing to kill.
+Stop-AtfieldProcesses
 
 # Decide which mode we're in: bundled (PyInstaller exe shipped with the
 # Tauri installer) or pip-installed (developer / `pip install atfield` path).
@@ -310,10 +363,19 @@ $nssmStderr = Join-Path $StateDir 'service.stderr.log'
 Write-Host "Starting service ..."
 & $nssm start $ServiceName | Out-Null
 
-Start-Sleep -Seconds 2
-$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-$status = if ($svc) { $svc.Status } else { 'Unknown' }
-Write-Host "Service status: $status"
+# NSSM `start` returns the moment SCM accepts the start request, not when
+# the service has actually bootstrapped. On a freshly-extracted PyInstaller
+# bundle the first launch can take several seconds (cold disk, Defender
+# scanning .pyd files). Poll until we see Running, with a 30s ceiling that
+# is generous for any realistic cold start while still failing loudly if
+# the service can't come up at all.
+if (Wait-ServiceRunning -Name $ServiceName -TimeoutSec 30) {
+    Write-Host "Service status: Running"
+} else {
+    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    $status = if ($svc) { $svc.Status } else { 'Unknown' }
+    Write-Host "WARNING: service did not reach Running within 30s (current: $status). Check %ProgramData%\ATField\service.stderr.log."
+}
 
 Write-Host ""
 Write-Host "Done. AT-Field is installed. Useful next steps:"
