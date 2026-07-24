@@ -29,8 +29,18 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+import logging
+
 from atfield.collectors import HealthState, ProbeResult
-from atfield.signals import Sample, monotonic_ns
+from atfield.signals import Sample, is_plausible, monotonic_ns
+
+_log = logging.getLogger("atfield.collectors.nvml")
+
+# Consecutive ticks of physically-impossible readings before we rebuild the
+# NVML session. Three is unambiguous (no real sensor produces 885510 C three
+# times running) and at the 1 Hz tick that's a ~3 s recovery instead of the
+# 8 hours the 2026-07-23 incident actually took.
+_MAX_IMPLAUSIBLE_BEFORE_REINIT: Final = 3
 
 __all__ = ["PER_PROCESS_VRAM_KEY", "NvmlCollector"]
 
@@ -85,6 +95,9 @@ class NvmlCollector:
         self._signals: tuple[str, ...] = ()
         self._consecutive_failures = 0
         self._max_consecutive = 3
+        # Consecutive ticks where NVML returned SUCCESS but with impossible
+        # values -- the only detector we have for that mode (see sample()).
+        self._implausible_streak = 0
         # Live per-GPU process map. Keyed by gpu_idx; value is a list of
         # (pid, used_vram_bytes) tuples. Refreshed on a slow cadence from
         # sample() (cheap dashboard count) and force-refreshed at kill time.
@@ -257,6 +270,40 @@ class NvmlCollector:
             unit="count",
         )
 
+        # --- NVML "SUCCESS with garbage" detection -------------------------
+        # Observed 2026-07-23 22:39:26 on an RTX 5090 (driver 596.36) after a
+        # wedged NVDEC/CUDA context: nvmlDeviceGetTemperature returned
+        # 885510 C, and GetUtilizationRates/GetPowerUsage BOTH returned the
+        # same 260640043 -- while GetMemoryInfo on the SAME handle stayed
+        # perfectly correct. Every call returned NVML_SUCCESS, so nvidia-ml-py
+        # (which does check return codes) raised nothing, `any_failure` stayed
+        # False, health reset to HEALTHY, and no recovery ever ran.
+        #
+        # The poison was sticky to the SESSION, not the GPU: it survived the
+        # GPU returning to health and only cleared when the process restarted
+        # -- 8 hours later, by hand. Meanwhile /headroom read 0.0 and Kiroshi's
+        # WorkerTuner throttled a 6-worker node down to 1.
+        #
+        # So implausibility is the ONLY signal available here. Drop the bad
+        # samples and, if it persists, rebuild the NVML session in-process.
+        implausible = [k for k, s in out.items() if not is_plausible(s.value, s.unit)]
+        if implausible:
+            for k in implausible:
+                out.pop(k, None)
+            any_failure = True
+            self._implausible_streak += 1
+            if self._implausible_streak >= _MAX_IMPLAUSIBLE_BEFORE_REINIT:
+                _log.warning(
+                    "NVML returned impossible values on %d consecutive ticks (%s); "
+                    "rebuilding the NVML session -- this is the success-with-garbage "
+                    "mode that no exception reports",
+                    self._implausible_streak, ", ".join(sorted(implausible)),
+                )
+                if self._reinit_session():
+                    self._implausible_streak = 0
+        else:
+            self._implausible_streak = 0
+
         if any_failure:
             self._consecutive_failures += 1
             if self._consecutive_failures >= self._max_consecutive:
@@ -266,6 +313,41 @@ class NvmlCollector:
             self._health = HealthState.HEALTHY
 
         return out
+
+    def _reinit_session(self) -> bool:
+        """Tear down and rebuild the NVML session + device handles in-process.
+
+        Recovery path for the success-with-garbage mode described in
+        :meth:`sample`. Deliberately NOT a health-flag change: ``FAILED`` means
+        "unrecoverable, service stops polling until restart", which would turn
+        a transient poisoned session into a permanent GPU blind spot. Rebuilding
+        is what actually fixed it in the field (a fresh process read 36 C
+        immediately), so we do exactly that without needing a restart.
+
+        Best-effort: returns True only if a usable session + handles came back.
+        """
+        pynvml = self._pynvml
+        if pynvml is None:
+            return False
+        try:
+            # Balance the init refcount; a leaked one confuses later re-init
+            # in the same process (see the module notes on nvmlShutdown).
+            pynvml.nvmlShutdown()
+        except Exception:  # noqa: BLE001 - may already be torn down
+            pass
+        try:
+            pynvml.nvmlInit()
+            count = pynvml.nvmlDeviceGetCount()
+            if count == 0:
+                return False
+            self._handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(count)]
+            self._gpu_count = count
+            _log.info("NVML session rebuilt (%d GPU(s)); handles re-acquired", count)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("NVML session rebuild failed (%r); will retry next tick", exc)
+            self._handles = []
+            return False
 
     # -- Per-process VRAM accessor -----------------------------------------
 
