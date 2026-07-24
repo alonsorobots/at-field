@@ -107,6 +107,7 @@ tells you what to *expect* before you install.
 | `system.ram_used_percent` | psutil | **100%** | **100%** | **100%** | **100%** | **100%** |
 | `system.swap_used_percent` | psutil | **100%** | **100%** | **100%** | **100%** | **100%** |
 | `system.commit_percent` | psutil | **100%** | **100%** | **100%** | **100%** | **100%** |
+| `system.hard_fault_rate` | PDH | **99%**¹⁰ | **99%**¹⁰ | **99%**¹⁰ | **99%**¹⁰ | **99%**¹⁰ |
 | `gpu.N.core_temp_c` | NVML | **99%** | **99%** | **99%**¹ | **100%** | n/a (NVML) |
 | `gpu.N.util_percent` | NVML | **99%** | **99%** | **99%**¹ | **100%** | n/a |
 | `gpu.N.vram_used_bytes` | NVML | **99%** | **99%** | **99%**¹ | **100%** | n/a |
@@ -170,6 +171,14 @@ Footnotes:
 9. **Rail voltages on prebuilt corporate**: virtually never available
    for the same Super I/O lockdown reason as note 7. Don't write rules
    that depend on them.
+10. **Hard-fault rate** (`\Memory\Pages Input/sec` via the Win32 PDH API)
+    is present on essentially every Windows install -- it's a core OS perf
+    counter, not vendor/OEM-dependent. Windows-only (there is no
+    cross-platform equivalent; AT-Field simply omits the signal
+    elsewhere). The rare miss is a corrupted perf-counter registry
+    (`lodctr /R` as admin re-registers it), which AT-Field treats as a
+    non-fatal, best-effort collector failure -- every other `system.*`
+    signal keeps working.
 
 ### What this means for default rules
 

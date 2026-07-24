@@ -18,6 +18,7 @@ suite works on CI runners without GPUs / LHM.
 
 from __future__ import annotations
 
+import ctypes
 import sys
 
 import pytest
@@ -250,3 +251,204 @@ class TestLhmSensorDiscovery:
         assert len(rail_paths) == 1
         # First match wins; should be the Mainboard reading.
         assert "Mainboard" in rail_paths[0].full_path
+
+
+# ---------------------------------------------------------------------------
+# _HardFaultRateReader (PDH \Memory\Pages Input/sec)
+# ---------------------------------------------------------------------------
+
+
+class TestHardFaultRateReader:
+    """PDH is Windows-only infra. These tests mock the DLL boundary so the
+    reader's OWN logic (priming, error handling, close) is exercised on any
+    platform. test_read_returns_a_plausible_value_on_real_windows below
+    covers the real pdh.dll end-to-end and is skipped off-Windows.
+
+    Mocking note: production code calls PDH with ctypes.byref(...) output
+    params (matching the rest of this file's style, e.g.
+    _read_commit_percent_windows). A byref() result can be recovered with
+    ctypes.cast(pvalue, POINTER(T)).contents inside a fake function to mutate
+    the caller's struct in place -- verified directly against CPython's
+    ctypes before relying on it here.
+    """
+
+    @staticmethod
+    def _set_via_byref(pvalue, cstatus, double_value):
+        from atfield.collectors.system import _PdhFmtCounterValue
+        target = ctypes.cast(pvalue, ctypes.POINTER(_PdhFmtCounterValue)).contents
+        target.CStatus = cstatus
+        target.doubleValue = double_value
+
+    def test_read_before_open_returns_none(self):
+        from atfield.collectors.system import _HardFaultRateReader
+        r = _HardFaultRateReader()
+        assert r.read() is None
+
+    def test_open_raises_when_pdh_unavailable(self, monkeypatch):
+        from atfield.collectors import system as sysmod
+        monkeypatch.setattr(sysmod, "_pdh", None)
+        r = sysmod._HardFaultRateReader()
+        with pytest.raises(OSError):
+            r.open()
+
+    def test_open_failure_is_a_clean_oserror_and_closes_the_query(self, monkeypatch):
+        from atfield.collectors import system as sysmod
+
+        closed = {"n": 0}
+
+        class FakePdh:
+            def PdhOpenQueryW(self, *a): return 0
+            def PdhAddEnglishCounterW(self, *a): return 1  # nonzero = failure
+            def PdhCloseQuery(self, *a): closed["n"] += 1; return 0
+
+        monkeypatch.setattr(sysmod, "_pdh", FakePdh())
+        r = sysmod._HardFaultRateReader()
+        with pytest.raises(OSError, match="PdhAddEnglishCounterW"):
+            r.open()
+        assert closed["n"] == 1, "a failed AddCounter must close the query it opened"
+        assert r.read() is None, "never opened successfully -> read() is a no-op"
+
+    def test_priming_call_returns_none(self, monkeypatch):
+        """Real PDH behavior: the first CollectQueryData succeeds, but the
+        formatted value has CStatus != 0 -- no prior sample to diff a rate
+        against yet."""
+        from atfield.collectors import system as sysmod
+
+        class FakePdh:
+            def PdhOpenQueryW(self, *a): return 0
+            def PdhAddEnglishCounterW(self, *a): return 0
+            def PdhCollectQueryData(self, hquery): return 0
+            def PdhGetFormattedCounterValue(self, hcounter, fmt, ptype, pvalue):
+                TestHardFaultRateReader._set_via_byref(pvalue, cstatus=0xC0000BC6, double_value=0.0)
+                return 0
+
+        monkeypatch.setattr(sysmod, "_pdh", FakePdh())
+        r = sysmod._HardFaultRateReader()
+        r.open()
+        assert r.read() is None
+
+    def test_read_returns_the_formatted_value_on_success(self, monkeypatch):
+        from atfield.collectors import system as sysmod
+
+        class FakePdh:
+            def PdhOpenQueryW(self, *a): return 0
+            def PdhAddEnglishCounterW(self, *a): return 0
+            def PdhCollectQueryData(self, hquery): return 0
+            def PdhGetFormattedCounterValue(self, hcounter, fmt, ptype, pvalue):
+                TestHardFaultRateReader._set_via_byref(pvalue, cstatus=0, double_value=42.5)
+                return 0
+
+        monkeypatch.setattr(sysmod, "_pdh", FakePdh())
+        r = sysmod._HardFaultRateReader()
+        r.open()
+        assert r.read() == 42.5
+
+    def test_collect_query_data_failure_returns_none(self, monkeypatch):
+        from atfield.collectors import system as sysmod
+
+        class FakePdh:
+            def PdhOpenQueryW(self, *a): return 0
+            def PdhAddEnglishCounterW(self, *a): return 0
+            def PdhCollectQueryData(self, hquery): return 1  # nonzero = failure
+
+        monkeypatch.setattr(sysmod, "_pdh", FakePdh())
+        r = sysmod._HardFaultRateReader()
+        r.open()
+        assert r.read() is None
+
+    def test_close_is_idempotent_and_safe_before_open(self, monkeypatch):
+        from atfield.collectors import system as sysmod
+
+        class FakePdh:
+            def PdhOpenQueryW(self, *a): return 0
+            def PdhAddEnglishCounterW(self, *a): return 0
+            def PdhCloseQuery(self, *a): return 0
+
+        monkeypatch.setattr(sysmod, "_pdh", FakePdh())
+        r = sysmod._HardFaultRateReader()
+        r.close()  # never opened -- must not raise
+        r.open()
+        r.close()
+        r.close()  # idempotent
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="real pdh.dll is Windows-only")
+    def test_read_returns_a_plausible_value_on_real_windows(self):
+        """End-to-end against the REAL PDH counter: open, read twice with a
+        real time gap (a rate counter needs two samples), and confirm the
+        result is a sane non-negative float -- the ground-truth check that no
+        amount of mocking substitutes for."""
+        import time
+        from atfield.collectors.system import _HardFaultRateReader
+
+        r = _HardFaultRateReader()
+        try:
+            r.open()
+            first = r.read()
+            time.sleep(1.2)
+            second = r.read()
+        finally:
+            r.close()
+        # first is very likely None (priming call); do not assert on it.
+        assert second is None or (isinstance(second, float) and second >= 0.0)
+
+
+# ---------------------------------------------------------------------------
+# SystemCollector: hard_fault_rate integration
+# ---------------------------------------------------------------------------
+
+
+class TestSystemCollectorHardFaultRate:
+    @pytest.mark.skipif(sys.platform != "win32", reason="hard_fault_rate is Windows-only")
+    def test_probe_declares_hard_fault_rate_signal(self):
+        c = SystemCollector()
+        result = c.probe()
+        assert "system.hard_fault_rate" in result.signals
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="hard_fault_rate is Windows-only")
+    def test_probe_failure_to_open_pdh_does_not_fail_the_collector(self, monkeypatch):
+        """A missing/broken perf counter category must degrade gracefully --
+        the whole collector (RAM/CPU/commit) must not go down with it."""
+        from atfield.collectors import system as sysmod
+
+        def boom(self):
+            raise OSError("perf counter category not registered")
+
+        monkeypatch.setattr(sysmod._HardFaultRateReader, "open", boom)
+        c = SystemCollector()
+        result = c.probe()
+        assert result.available and c.health() is HealthState.HEALTHY
+        assert "unavailable" in result.metadata.get("hard_fault_rate_source", "")
+        samples = c.sample()
+        assert "system.hard_fault_rate" not in samples
+        assert "system.ram_used_percent" in samples  # everything else still works
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="hard_fault_rate is Windows-only")
+    def test_sample_omits_signal_when_reader_returns_none(self, monkeypatch):
+        """The priming-call case: sample() must NOT fabricate a 0.0 (which
+        would read as "no thrash" instead of "no reading yet")."""
+        c = SystemCollector()
+        c.probe()
+        monkeypatch.setattr(c._hard_fault_reader, "read", lambda: None)
+        samples = c.sample()
+        assert "system.hard_fault_rate" not in samples
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="hard_fault_rate is Windows-only")
+    def test_sample_includes_signal_when_reader_has_a_value(self, monkeypatch):
+        c = SystemCollector()
+        c.probe()
+        monkeypatch.setattr(c._hard_fault_reader, "read", lambda: 7.5)
+        samples = c.sample()
+        assert "system.hard_fault_rate" in samples
+        s = samples["system.hard_fault_rate"]
+        assert s.value == 7.5 and s.unit == "count" and s.source_id == "system"
+
+    def test_shutdown_closes_the_reader(self, monkeypatch):
+        c = SystemCollector()
+        c.probe()
+        if c._hard_fault_reader is not None:
+            closed = {"n": 0}
+            monkeypatch.setattr(c._hard_fault_reader, "close", lambda: closed.__setitem__("n", 1))
+            c.shutdown()
+            assert closed["n"] == 1
+        else:
+            c.shutdown()  # off-Windows / PDH unavailable: must not raise

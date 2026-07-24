@@ -1,4 +1,4 @@
-"""System-level collector: RAM %, swap %, true commit charge %.
+"""System-level collector: RAM %, swap %, true commit charge %, hard-fault rate.
 
 This is the Tier-1 always-available collector. psutil is a hard dependency
 of the package, and ``GlobalMemoryStatusEx`` is in every Windows version
@@ -17,6 +17,13 @@ Design notes
   ``system.commit_percent`` rule is a soft approximation off-Windows.
 * **Cheap probe.** psutil import is the entire probe. No subprocess, no
   HTTP, no file I/O. Always ``HEALTHY`` after a successful probe.
+* **Hard-fault rate (Windows only), via PDH.** ``commit_percent`` measures how
+  much virtual memory has been PROMISED, not whether the machine is actually
+  paging -- a box can sit at 85% commit perfectly healthy or thrash at 70%.
+  ``\\Memory\\Pages Input/sec`` (read via the PDH API, since psutil doesn't
+  expose Windows perf counters) is the canonical "is it actually thrashing"
+  signal. Best-effort: if the perf counter category is unavailable, this
+  signal is simply omitted, never a collector failure.
 """
 
 from __future__ import annotations
@@ -24,7 +31,7 @@ from __future__ import annotations
 import ctypes
 import sys
 from ctypes import wintypes
-from typing import Final
+from typing import Final, Optional
 
 import psutil
 
@@ -44,6 +51,7 @@ _SIGNALS: Final = (
     "system.commit_percent",
     "system.cpu_used_percent",
     "system.input_idle_s",
+    "system.hard_fault_rate",
 )
 
 
@@ -117,6 +125,106 @@ def _read_commit_percent_windows() -> float:
 
 
 # ---------------------------------------------------------------------------
+# Win32 hard-fault-rate reader (PDH)
+# ---------------------------------------------------------------------------
+
+_PDH_FMT_DOUBLE: Final = 0x00000200
+
+_pdh = ctypes.WinDLL("pdh.dll") if sys.platform == "win32" else None
+if _pdh is not None:
+    _pdh.PdhOpenQueryW.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p, ctypes.POINTER(wintypes.HANDLE)]
+    _pdh.PdhOpenQueryW.restype = wintypes.LONG
+    _pdh.PdhAddEnglishCounterW.argtypes = [wintypes.HANDLE, wintypes.LPCWSTR, ctypes.c_void_p,
+                                           ctypes.POINTER(wintypes.HANDLE)]
+    _pdh.PdhAddEnglishCounterW.restype = wintypes.LONG
+    _pdh.PdhCollectQueryData.argtypes = [wintypes.HANDLE]
+    _pdh.PdhCollectQueryData.restype = wintypes.LONG
+    _pdh.PdhCloseQuery.argtypes = [wintypes.HANDLE]
+    _pdh.PdhCloseQuery.restype = wintypes.LONG
+
+
+class _PdhFmtCounterValue(ctypes.Structure):
+    # Real PDH_FMT_COUNTERVALUE is {DWORD CStatus; union{...double...}}. We
+    # only ever read doubleValue; ctypes pads CStatus to 8-byte alignment for
+    # the following c_double exactly like the real union does, so the memory
+    # layout PdhGetFormattedCounterValue writes into matches.
+    _fields_ = [("CStatus", wintypes.DWORD), ("doubleValue", ctypes.c_double)]
+
+
+if _pdh is not None:
+    _pdh.PdhGetFormattedCounterValue.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(_PdhFmtCounterValue),
+    ]
+    _pdh.PdhGetFormattedCounterValue.restype = wintypes.LONG
+
+
+class _HardFaultRateReader:
+    """Reads Windows' ``\\Memory\\Pages Input/sec`` perf counter via PDH.
+
+    This is the canonical Windows "is the machine actually thrashing" signal:
+    pages read back from disk because they weren't resident -- real paging
+    pain, not just how much virtual memory has been PROMISED (which
+    ``commit_percent`` already covers, and which can sit at 85% perfectly
+    healthy or 70% and thrashing -- commit measures reservation, not pain).
+    psutil does not expose this on Windows; PDH is the standard way to read
+    a perf counter without spawning ``perfmon``/``typeperf``.
+
+    ``PdhAddEnglishCounterW`` (not the localized ``PdhAddCounterW``) so the
+    counter path is not locale-dependent on non-English Windows installs.
+
+    A PDH *rate* counter needs two ``PdhCollectQueryData`` calls spaced apart
+    in time to compute a rate; the very first read after opening has no prior
+    sample to diff against and returns "no data yet". Best-effort: that's
+    ``None``, not an error -- exactly the same prime-on-first-call pattern
+    ``psutil.cpu_percent`` already uses above.
+    """
+
+    _COUNTER_PATH: Final = r"\Memory\Pages Input/sec"
+
+    def __init__(self) -> None:
+        self._hquery = wintypes.HANDLE()
+        self._hcounter = wintypes.HANDLE()
+        self._opened = False
+
+    def open(self) -> None:
+        if _pdh is None:
+            raise OSError("pdh.dll unavailable (not on Windows)")
+        rc = _pdh.PdhOpenQueryW(None, None, ctypes.byref(self._hquery))
+        if rc != 0:
+            raise OSError(f"PdhOpenQueryW failed: 0x{rc & 0xFFFFFFFF:08X}")
+        rc = _pdh.PdhAddEnglishCounterW(
+            self._hquery, self._COUNTER_PATH, None, ctypes.byref(self._hcounter))
+        if rc != 0:
+            _pdh.PdhCloseQuery(self._hquery)
+            raise OSError(f"PdhAddEnglishCounterW({self._COUNTER_PATH!r}) failed: "
+                          f"0x{rc & 0xFFFFFFFF:08X}")
+        self._opened = True
+
+    def read(self) -> Optional[float]:
+        """Pages-input/sec since the previous call, or ``None`` if not yet
+        available (not opened, or this is the priming call)."""
+        if not self._opened:
+            return None
+        if _pdh.PdhCollectQueryData(self._hquery) != 0:
+            return None
+        value = _PdhFmtCounterValue()
+        rc = _pdh.PdhGetFormattedCounterValue(
+            self._hcounter, _PDH_FMT_DOUBLE, None, ctypes.byref(value))
+        if rc != 0 or value.CStatus != 0:
+            return None  # e.g. PDH_CSTATUS_INVALID_DATA on the priming call
+        return float(value.doubleValue)
+
+    def close(self) -> None:
+        if self._opened and _pdh is not None:
+            try:
+                _pdh.PdhCloseQuery(self._hquery)
+            except Exception:  # noqa: BLE001
+                pass
+            self._opened = False
+
+
+# ---------------------------------------------------------------------------
 # Collector
 # ---------------------------------------------------------------------------
 
@@ -134,6 +242,10 @@ class SystemCollector:
         self._on_windows = sys.platform == "win32"
         self._consecutive_failures = 0
         self._max_consecutive = 3  # 3 strikes -> DEGRADED
+        # Best-effort: if PDH is unavailable (odd Windows install, permissions,
+        # the counter category not registered), hard_fault_rate is simply
+        # omitted -- never fails the whole collector. See probe().
+        self._hard_fault_reader: Optional[_HardFaultRateReader] = None
 
     def probe(self) -> ProbeResult:
         try:
@@ -149,6 +261,18 @@ class SystemCollector:
                 _read_commit_percent_windows()
                 reason = "psutil + Win32 GlobalMemoryStatusEx OK"
                 meta = {"commit_charge_source": "GlobalMemoryStatusEx"}
+                # Best-effort: hard_fault_rate is a bonus signal, never a
+                # reason to fail this collector. A box with the Memory perf
+                # counter category unregistered (rare, e.g. `lodctr /R`
+                # never run) just doesn't get the signal.
+                try:
+                    reader = _HardFaultRateReader()
+                    reader.open()
+                    self._hard_fault_reader = reader
+                    meta["hard_fault_rate_source"] = "PDH \\Memory\\Pages Input/sec"
+                except Exception as exc:  # noqa: BLE001
+                    self._hard_fault_reader = None
+                    meta["hard_fault_rate_source"] = f"unavailable ({exc!r})"
             else:
                 reason = "psutil OK; commit_percent approximated by swap_used_percent off-Windows"
                 meta = {"commit_charge_source": "swap_memory (fallback)"}
@@ -226,6 +350,16 @@ class SystemCollector:
                     )
                 except Exception:
                     pass
+                if self._hard_fault_reader is not None:
+                    # None on the priming call (first tick after probe()) or
+                    # any transient PDH hiccup -- omit the sample rather than
+                    # emit a fabricated 0, which would look like "no thrash"
+                    # instead of "no reading".
+                    rate = self._hard_fault_reader.read()
+                    if rate is not None:
+                        out["system.hard_fault_rate"] = Sample(
+                            value=rate, taken_at_ns=now, source_id=_NAME, unit="count",
+                        )
             return out
         except Exception:
             self._consecutive_failures += 1
@@ -237,5 +371,6 @@ class SystemCollector:
         return self._health
 
     def shutdown(self) -> None:
-        # No resources to release; psutil maintains its own caches.
-        return None
+        if self._hard_fault_reader is not None:
+            self._hard_fault_reader.close()
+            self._hard_fault_reader = None
