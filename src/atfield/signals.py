@@ -45,6 +45,7 @@ __all__ = [
     "Verdict",
     "evaluate_window",
     "fraction_over_threshold",
+    "is_plausible",
     "monotonic_ns",
 ]
 
@@ -96,6 +97,50 @@ class Sample:
 
     def is_stale(self, *, now_ns: int, max_age_ns: int) -> bool:
         return (now_ns - self.taken_at_ns) > max_age_ns
+
+
+# ---------------------------------------------------------------------------
+# Plausibility
+# ---------------------------------------------------------------------------
+
+# Physically-impossible readings must be treated as MISSING data, never as
+# "far over threshold". Observed 2026-07-24 on a Blackwell RTX 5090 with the
+# deprecated ``pynvml``: ``gpu.0.core_temp_c`` read a constant **885510 C**.
+# That pinned ``/headroom`` to 0.0 (so Kiroshi's WorkerTuner throttled to the
+# floor for a fake reason) and fired the gpu-core-hot kill rule every 60s.
+#
+# This is the same principle as staleness above -- a collector that can't be
+# trusted must make its rule ABSTAIN, never fail open in the dangerous
+# direction. A garbage-high sample is arguably worse than a missing one,
+# because it actively triggers protective action.
+#
+# Only units with a hard physical ceiling are bounded above. ``count`` MUST
+# stay unbounded (``system.input_idle_s`` is a seconds counter that grows
+# without limit); unknown units are never rejected (fail-safe).
+_PLAUSIBLE_RANGE: Final[dict[str, tuple[float, float]]] = {
+    "celsius": (-50.0, 150.0),      # any silicon temp outside this is bogus
+    "percent": (0.0, 100.5),        # small epsilon for rounding overshoot
+    "watts": (0.0, 2000.0),
+}
+_NON_NEGATIVE_UNITS: Final[tuple[str, ...]] = ("bytes", "count", "volts")
+
+
+def is_plausible(value: float, unit: str) -> bool:
+    """True if ``value`` is a physically possible reading for ``unit``.
+
+    Rejects NaN/inf always. Applies a hard range for units with real physical
+    ceilings; a non-negativity floor for counters/sizes; and accepts anything
+    with an unrecognized unit (fail-safe -- we only drop what we're SURE is
+    impossible).
+    """
+    if value != value or value in (float("inf"), float("-inf")):  # NaN / +-inf
+        return False
+    rng = _PLAUSIBLE_RANGE.get(unit)
+    if rng is not None:
+        return rng[0] <= value <= rng[1]
+    if unit in _NON_NEGATIVE_UNITS:
+        return value >= 0.0
+    return True
 
 
 # ---------------------------------------------------------------------------

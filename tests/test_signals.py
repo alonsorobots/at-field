@@ -259,3 +259,42 @@ class TestEvaluateWindow:
         assert isinstance(r, EvalResult)
         assert r.samples_considered == 5
         assert r.latest_value == 95.0
+
+
+# ------------------------------------------------- plausibility (2026-07-24)
+def test_implausible_gpu_temp_is_rejected():
+    """The real incident: a Blackwell 5090 + deprecated pynvml reported
+    gpu.0.core_temp_c = 885510 C, which pinned /headroom to 0.0 and fired the
+    kill rule every 60s. Such a sample must be rejected so its rule ABSTAINS."""
+    from atfield.signals import is_plausible
+    assert not is_plausible(885510.0, "celsius")
+    assert is_plausible(72.0, "celsius")      # a normal GPU temp still passes
+    assert is_plausible(-10.0, "celsius")     # cold but possible
+    assert not is_plausible(1000.0, "celsius")
+
+
+def test_percent_and_watts_bounds():
+    from atfield.signals import is_plausible
+    assert is_plausible(0.0, "percent") and is_plausible(100.0, "percent")
+    assert not is_plausible(101.0, "percent")
+    assert not is_plausible(-1.0, "percent")
+    assert is_plausible(350.0, "watts")
+    assert not is_plausible(999999.0, "watts")
+
+
+def test_count_is_unbounded_above_so_idle_seconds_survive():
+    """system.input_idle_s is unit='count' and grows without limit (hours of
+    idle). It must NEVER be rejected -- presence detection depends on it."""
+    from atfield.signals import is_plausible
+    assert is_plausible(0.0, "count")
+    assert is_plausible(86_400.0, "count")     # a full day idle
+    assert not is_plausible(-5.0, "count")     # negative is still bogus
+
+
+def test_nan_inf_and_unknown_units():
+    from atfield.signals import is_plausible
+    assert not is_plausible(float("nan"), "celsius")
+    assert not is_plausible(float("inf"), "percent")
+    assert not is_plausible(float("-inf"), "count")
+    # unknown unit -> fail-safe, never rejected
+    assert is_plausible(123456.0, "furlongs")

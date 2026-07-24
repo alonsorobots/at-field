@@ -52,12 +52,14 @@ from atfield.forensics import ForensicBuffer
 from atfield.forensics import rotate_on_startup as rotate_forensics_on_startup
 from atfield.http_api import ApiServer, ServiceState, collector_view_from_probe
 from atfield.policy import PolicyEngine
-from atfield.signals import Sample
+from atfield.reporter import report_kill
+from atfield.signals import Sample, is_plausible
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
     "HEARTBEAT_FILENAME",
     "PAUSE_SENTINEL_FILENAME",
+    "PRESENCE_SENTINEL_FILENAME",
     "main",
     "run_service",
 ]
@@ -125,6 +127,42 @@ def _read_pause_sentinel(state_dir: Path) -> int | None:
         return time.monotonic_ns() + (10**18)
 
 
+# ---------------------------------------------------------------------------
+# Presence sentinel
+# ---------------------------------------------------------------------------
+#
+# Deliberately a SEPARATE file from PAUSE_SENTINEL_FILENAME above.
+# pause.sentinel is AT-Field's own self-pause (``atf pause`` -- suppresses
+# THIS service's kill rules, e.g. "I know what I'm doing, don't kill me").
+# presence.sentinel is a read-only-by-consumers signal for any external
+# scheduler to back off while a human is at the keyboard. These
+# must never be conflated: writing presence into pause.sentinel would
+# silently disable AT-Field's own thermal/OOM protection exactly when
+# someone is actively using the machine -- the opposite of what's wanted.
+
+PRESENCE_SENTINEL_FILENAME = "presence.sentinel"
+
+
+def _write_presence_sentinel(state_dir: Path) -> None:
+    """Mark the machine as "present" for external consumers. Empty file;
+    existence alone is the signal (mirrors pause.sentinel's own convention
+    for an indefinite/no-expiry state, since presence has no natural
+    "until" -- it's continuously re-evaluated every tick, not scheduled)."""
+    p = state_dir / PRESENCE_SENTINEL_FILENAME
+    try:
+        p.touch(exist_ok=True)
+    except OSError:
+        _log.exception("failed to write presence.sentinel")
+
+
+def _clear_presence_sentinel(state_dir: Path) -> None:
+    p = state_dir / PRESENCE_SENTINEL_FILENAME
+    try:
+        p.unlink(missing_ok=True)
+    except OSError:
+        _log.exception("failed to clear presence.sentinel")
+
+
 def _pause_until_unix(state_dir: Path) -> float | None:
     """Return wall-clock unix timestamp the pause expires, or None.
 
@@ -151,6 +189,27 @@ def _pause_until_unix(state_dir: Path) -> float | None:
 # ---------------------------------------------------------------------------
 # Heartbeat
 # ---------------------------------------------------------------------------
+
+
+# Implausible readings are usually a STUCK sensor (the 885510 C case repeated
+# every tick), so log once per signal per interval rather than at 1 Hz forever
+# -- loud enough to diagnose, quiet enough not to bury the log.
+_IMPLAUSIBLE_WARN_INTERVAL_S = 300.0
+_implausible_last_warn: dict[str, float] = {}
+
+
+def _warn_implausible_once(signal: str, value: float, unit: str) -> None:
+    """Rate-limited warning that a sample was dropped as physically impossible."""
+    now = time.monotonic()
+    last = _implausible_last_warn.get(signal, 0.0)
+    if now - last < _IMPLAUSIBLE_WARN_INTERVAL_S:
+        return
+    _implausible_last_warn[signal] = now
+    _log.warning(
+        "dropping implausible sample %s=%r (%s) -- treating as MISSING so its "
+        "rule abstains instead of firing; check the collector/driver for this signal",
+        signal, value, unit,
+    )
 
 
 def _write_heartbeat(state_dir: Path, *, observe_only: bool) -> None:
@@ -378,6 +437,7 @@ def run_service(
     pause_check_interval_ns = 5_000_000_000  # 5 s
     ticks = 0
     exit_code = 0
+    last_presence_state: bool | None = None  # None = not yet determined this run
 
     try:
         while not stop:
@@ -421,6 +481,29 @@ def run_service(
                 # Reflect health state changes into the API mirror.
                 api_state.update_collector_health(c.name, c.health().name)  # type: ignore[attr-defined]
             samples.pop(PER_PROCESS_VRAM_KEY, None)
+
+            # Drop physically-impossible readings BEFORE anything consumes them
+            # (api mirror, forensics, policy evaluation, /headroom). A garbage
+            # sample must look like MISSING data so its rule abstains -- never
+            # like "far over threshold", which fails open in the dangerous
+            # direction. See signals.is_plausible for the 885510 C incident.
+            implausible = [k for k, s in samples.items() if not is_plausible(s.value, s.unit)]
+            for k in implausible:
+                bad = samples.pop(k)
+                _warn_implausible_once(k, bad.value, bad.unit)
+
+            # Presence: write/clear presence.sentinel on state transitions only
+            # (not every tick) to avoid needless filesystem churn at 1Hz+.
+            if cfg.presence.enabled:
+                idle_sample = samples.get("system.input_idle_s")
+                if idle_sample is not None:
+                    is_present = idle_sample.value < cfg.presence.idle_threshold_s
+                    if is_present != last_presence_state:
+                        if is_present:
+                            _write_presence_sentinel(sd)
+                        else:
+                            _clear_presence_sentinel(sd)
+                        last_presence_state = is_present
 
             # Push samples into the API state mirror BEFORE evaluation so the
             # tray dashboard can show "current value" even if the rule abstained.
@@ -474,6 +557,7 @@ def run_service(
 
                 report = actuator.execute(effective, candidate_pids=candidate_pids)
                 audit.write_kill_report(report)
+                report_kill(sd, action=effective, report=report)
                 if report.kill_root:
                     script = script_name_from_cmdline(report.kill_root.cmdline)
                     # Surface the script on /health so the tray notification
