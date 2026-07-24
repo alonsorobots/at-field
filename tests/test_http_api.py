@@ -25,6 +25,7 @@ from atfield.config import (
     AtFieldConfig,
     GeneralConfig,
     KillConfig,
+    PresenceConfig,
     RuleConfig,
     TargetingConfig,
 )
@@ -59,6 +60,7 @@ def _make_engine() -> PolicyEngine:
         targeting=TargetingConfig(),
         kill=KillConfig(),
         api=ApiConfig(),
+        presence=PresenceConfig(),
         rules=(
             RuleConfig(
                 name="ram-pressure",
@@ -431,6 +433,64 @@ class TestRules:
         assert len(disabled) == 1
         assert disabled[0]["rule"] == "missing-signal"
         assert "not provided by any probed collector" in disabled[0]["reason"]
+
+
+# ---------------------------------------------------------------------------
+# /headroom
+# ---------------------------------------------------------------------------
+
+
+class TestHeadroom:
+    def test_headroom_empty_before_any_tick(self, server):
+        _, host, port = server
+        status, data = _get(host, port, "/headroom")
+        assert status == 200
+        assert data == {"min_headroom": None, "binding_rule": None, "per_rule": {}}
+
+    def test_headroom_reflects_latest_value(self, server):
+        state, host, port = server
+        engine = _make_engine()
+        state.attach_engine(engine)
+        # threshold=85.0, value=68.0 -> headroom = (85-68)/85 = 0.2
+        engine.tick({"system.ram_used_percent": _make_sample(68.0)}, now_ns=time.monotonic_ns())
+        status, data = _get(host, port, "/headroom")
+        assert status == 200
+        assert data["binding_rule"] == "ram-pressure"
+        assert data["min_headroom"] == pytest.approx(0.2, abs=1e-6)
+        assert data["per_rule"]["ram-pressure"] == pytest.approx(0.2, abs=1e-6)
+        # the "log"-action missing-signal rule must never appear -- headroom
+        # is specifically "distance to being killed."
+        assert "missing-signal" not in data["per_rule"]
+
+    def test_headroom_clamped_at_zero_past_threshold(self, server):
+        state, host, port = server
+        engine = _make_engine()
+        state.attach_engine(engine)
+        engine.tick({"system.ram_used_percent": _make_sample(99.0)}, now_ns=time.monotonic_ns())
+        _, data = _get(host, port, "/headroom")
+        assert data["min_headroom"] == 0.0
+
+    def test_headroom_picks_the_most_binding_rule(self, server):
+        state, host, port = server
+        cfg = AtFieldConfig(
+            general=GeneralConfig(), targeting=TargetingConfig(), kill=KillConfig(),
+            api=ApiConfig(), presence=PresenceConfig(),
+            rules=(
+                RuleConfig(name="ram-pressure", signal="system.ram_used_percent",
+                           threshold=85.0, window_s=10, min_fraction_over=0.75, action="kill"),
+                RuleConfig(name="commit-pressure", signal="system.commit_percent",
+                           threshold=90.0, window_s=10, min_fraction_over=0.75, action="kill"),
+            ),
+        )
+        engine = PolicyEngine(cfg, available_signals={"system.ram_used_percent", "system.commit_percent"})
+        state.attach_engine(engine)
+        engine.tick({
+            "system.ram_used_percent": _make_sample(68.0),   # headroom 0.2
+            "system.commit_percent": _make_sample(85.5, signal="system.commit_percent"),  # headroom 0.05
+        }, now_ns=time.monotonic_ns())
+        _, data = _get(host, port, "/headroom")
+        assert data["binding_rule"] == "commit-pressure"
+        assert data["min_headroom"] == pytest.approx(0.05, abs=1e-6)
 
 
 # ---------------------------------------------------------------------------

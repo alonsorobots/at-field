@@ -23,6 +23,7 @@ from atfield.config import (
     AtFieldConfig,
     GeneralConfig,
     KillConfig,
+    PresenceConfig,
     RuleConfig,
     TargetingConfig,
     default_config,
@@ -48,6 +49,7 @@ def _cfg_with_rule(**rule_overrides) -> AtFieldConfig:
         targeting=TargetingConfig(),
         kill=KillConfig(),
         api=ApiConfig(),
+        presence=PresenceConfig(),
         rules=(RuleConfig(**base),),
     )
 

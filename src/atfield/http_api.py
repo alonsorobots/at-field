@@ -520,6 +520,45 @@ class ServiceState:
             ]
             return {"effective": effective, "disabled": disabled}
 
+    def snapshot_headroom(self) -> dict[str, Any]:
+        """Collapse every kill-action rule to one number: distance to the
+        nearest danger line, in [0, 1] (0 = at the kill threshold, 1 = idle).
+
+        Generic and job-agnostic on purpose -- this says nothing about what's
+        consuming the resource, only "how close is THIS MACHINE to AT-Field
+        taking protective action." Any local process (Kiroshi's runner or
+        otherwise) can poll this to self-throttle before AT-Field has to.
+
+        All current rules are upper-bound (``value > threshold`` fires), so
+        headroom = ``(threshold - latest_value) / threshold``, clamped to
+        [0, 1]. Rules with no reading yet (``latest_value is None``) or a
+        non-``kill`` action are excluded -- headroom is specifically "distance
+        to being killed," not "distance to any rule firing."
+        """
+        with self._lock:
+            engine = self._engine
+            if engine is None:
+                return {"min_headroom": None, "binding_rule": None, "per_rule": {}}
+            stats = engine.stats_snapshot()
+            per_rule: dict[str, float] = {}
+            for rule in engine.effective_rules:
+                if rule.base_rule.action != "kill":
+                    continue
+                latest = stats.get(rule.name, {}).get("last_value")
+                threshold = rule.base_rule.threshold
+                if latest is None or not threshold:
+                    continue
+                headroom = (threshold - latest) / threshold
+                per_rule[rule.name] = max(0.0, min(1.0, headroom))
+            if not per_rule:
+                return {"min_headroom": None, "binding_rule": None, "per_rule": {}}
+            binding_rule = min(per_rule, key=per_rule.get)
+            return {
+                "min_headroom": per_rule[binding_rule],
+                "binding_rule": binding_rule,
+                "per_rule": per_rule,
+            }
+
     def events_path(self) -> Path:
         return self._events_path
 
@@ -892,6 +931,8 @@ def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
                     self._send_json(state.snapshot_signal_history(signal, hours=hours))
                 elif path == "/rules":
                     self._send_json(state.snapshot_rules())
+                elif path == "/headroom":
+                    self._send_json(state.snapshot_headroom())
                 elif path == "/events":
                     since = _maybe_float(qs.get("since"))
                     limit = _maybe_int(qs.get("limit"))

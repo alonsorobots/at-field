@@ -173,6 +173,27 @@ class ApiConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PresenceConfig:
+    """Presence/idle detection: is a human actively at this machine?
+
+    Drives the ``presence.sentinel`` file (separate from ``pause.sentinel``,
+    AT-Field's own self-pause -- see the comment above ``PRESENCE_SENTINEL_FILENAME``
+    in ``service.py`` for why they must never be conflated) that any external
+    scheduler may poll before scheduling work on this machine. Purely local,
+    read-only config today -- no killable-process semantics, so it lives
+    outside the ``[[rules]]`` mechanism entirely.
+    """
+
+    enabled: bool = True
+    # Below this many idle seconds, the machine is considered "present" and
+    # the sentinel is written (external schedulers should back off). At/above it, "away" and
+    # the sentinel is cleared. 180s (3 min) matches the plan's stated
+    # default -- long enough that a moment's pause reading something on
+    # screen doesn't flap the sentinel, short enough to feel responsive.
+    idle_threshold_s: int = 180
+
+
+@dataclass(frozen=True, slots=True)
 class RuleConfig:
     name: str
     signal: str
@@ -191,6 +212,7 @@ class AtFieldConfig:
     targeting: TargetingConfig
     kill: KillConfig
     api: ApiConfig
+    presence: PresenceConfig
     rules: tuple[RuleConfig, ...]
 
     def cooldown_for(self, rule: RuleConfig) -> int:
@@ -299,6 +321,7 @@ def default_config() -> AtFieldConfig:
         targeting=TargetingConfig(),
         kill=KillConfig(),
         api=ApiConfig(),
+        presence=PresenceConfig(),
         rules=_default_rules(),
     )
 
@@ -347,7 +370,7 @@ def load_config_from_dict(data: dict[str, Any], *, source: str = "<dict>") -> At
     if not isinstance(data, dict):
         raise ConfigError(f"{source}: expected a TOML table at the root")
 
-    allowed_top = {"general", "targeting", "kill", "api", "rules"}
+    allowed_top = {"general", "targeting", "kill", "api", "presence", "rules"}
     unknown = set(data.keys()) - allowed_top
     if unknown:
         raise ConfigError(
@@ -360,9 +383,12 @@ def load_config_from_dict(data: dict[str, Any], *, source: str = "<dict>") -> At
     targeting = _parse_targeting(data.get("targeting"), base.targeting, source)
     kill = _parse_kill(data.get("kill"), base.kill, source)
     api = _parse_api(data.get("api"), base.api, source)
+    presence = _parse_presence(data.get("presence"), base.presence, source)
     rules = _parse_rules(data.get("rules"), base.rules, source)
 
-    cfg = AtFieldConfig(general=general, targeting=targeting, kill=kill, api=api, rules=rules)
+    cfg = AtFieldConfig(
+        general=general, targeting=targeting, kill=kill, api=api, presence=presence, rules=rules
+    )
     _cross_validate(cfg, source)
     return cfg
 
@@ -522,6 +548,25 @@ def _parse_api(raw: Any, base: ApiConfig, source: str) -> ApiConfig:
         if port > 65535:
             raise ConfigError(f"{source}: api.port must be 1..65535, got {port}")
         out = replace(out, port=port)
+    return out
+
+
+def _parse_presence(raw: Any, base: PresenceConfig, source: str) -> PresenceConfig:
+    if raw is None:
+        return base
+    table = _require_table(raw, "presence", source)
+    _check_unknown_keys(table, {"enabled", "idle_threshold_s"}, "presence", source)
+
+    out = base
+    if "enabled" in table:
+        if not isinstance(table["enabled"], bool):
+            raise ConfigError(f"{source}: presence.enabled must be a boolean")
+        out = replace(out, enabled=table["enabled"])
+    if "idle_threshold_s" in table:
+        out = replace(
+            out,
+            idle_threshold_s=_as_int(table["idle_threshold_s"], "presence.idle_threshold_s", source, minimum=1),
+        )
     return out
 
 

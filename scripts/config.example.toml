@@ -67,6 +67,22 @@ post_kill_cooldown_seconds = 60
 
 
 # -----------------------------------------------------------------------------
+# Presence detection
+# -----------------------------------------------------------------------------
+[presence]
+# Whether AT-Field writes the presence.sentinel file (separate from its own
+# pause.sentinel self-pause) that any external scheduler may poll before
+# scheduling work on this machine. Purely local/read-only -- no
+# killable-process semantics, separate from [[rules]] entirely.
+enabled = true
+
+# Seconds of no keyboard/mouse input before the machine is considered
+# "away" (sentinel cleared -- consumers may use full resources). Below
+# this, "present" (sentinel written -- consumers should back off).
+idle_threshold_s = 180
+
+
+# -----------------------------------------------------------------------------
 # Rules -- the heart of the watchdog
 # -----------------------------------------------------------------------------
 # Each rule is { name, signal, threshold, window_s, min_fraction_over, action,

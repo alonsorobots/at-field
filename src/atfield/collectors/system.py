@@ -43,6 +43,7 @@ _SIGNALS: Final = (
     "system.swap_used_percent",
     "system.commit_percent",
     "system.cpu_used_percent",
+    "system.input_idle_s",
 )
 
 
@@ -63,6 +64,35 @@ class _MEMORYSTATUSEX(ctypes.Structure):
         ("ullAvailVirtual", ctypes.c_ulonglong),
         ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
     ]
+
+
+class _LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.UINT),
+        ("dwTime", wintypes.DWORD),
+    ]
+
+
+def _read_input_idle_seconds_windows() -> float:
+    """Seconds since the last keyboard/mouse input, system-wide.
+
+    ``GetLastInputInfo`` reports the tick count of the last input event
+    (keyboard OR mouse -- Windows doesn't distinguish the two at this API),
+    which is exactly the "is anyone physically at this machine" signal:
+    session-lock and idle time both flow through it. ``GetTickCount64`` is
+    used (not ``GetTickCount``) to avoid the ~49.7-day 32-bit wraparound.
+    """
+    info = _LASTINPUTINFO()
+    info.cbSize = ctypes.sizeof(_LASTINPUTINFO)
+    if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+        raise OSError("GetLastInputInfo returned 0")
+    now_ms = ctypes.windll.kernel32.GetTickCount64()
+    # dwTime is a 32-bit tick count (GetTickCount-scale); compare against the
+    # low 32 bits of the 64-bit now to stay correct across the wrap.
+    elapsed_ms = (now_ms & 0xFFFFFFFF) - info.dwTime
+    if elapsed_ms < 0:
+        elapsed_ms += 1 << 32
+    return elapsed_ms / 1000.0
 
 
 def _read_commit_percent_windows() -> float:
@@ -155,7 +185,7 @@ class SystemCollector:
             self._consecutive_failures = 0
             self._health = HealthState.HEALTHY
 
-            return {
+            out = {
                 "system.ram_used_percent": Sample(
                     value=float(vm.percent),
                     taken_at_ns=now,
@@ -181,6 +211,22 @@ class SystemCollector:
                     unit="percent",
                 ),
             }
+            # Presence signal: seconds since the last keyboard/mouse input,
+            # system-wide. Windows-only (no cross-platform equivalent here);
+            # omitted off-Windows rather than faked, same policy as the
+            # commit-charge fallback being an explicit approximation rather
+            # than a silent one.
+            if self._on_windows:
+                try:
+                    out["system.input_idle_s"] = Sample(
+                        value=_read_input_idle_seconds_windows(),
+                        taken_at_ns=now,
+                        source_id=_NAME,
+                        unit="count",
+                    )
+                except Exception:
+                    pass
+            return out
         except Exception:
             self._consecutive_failures += 1
             if self._consecutive_failures >= self._max_consecutive:

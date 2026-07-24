@@ -189,6 +189,12 @@ action            = "kill"                # log | throttle | kill
 
 Rules referencing signals no probed collector provides are auto-disabled with a startup log line — adding new hardware support never breaks existing configs.
 
+### Presence detection and event webhooks (v0.5+)
+
+AT-Field can tell whether a human is currently at the keyboard/mouse (`[presence]`, `system.input_idle_s`) and writes `presence.sentinel` in its state dir accordingly — any external scheduler can poll for that file's existence to decide whether to back off while someone's actively using the machine. This is separate from AT-Field's own `pause.sentinel` self-pause; see the comment above `PRESENCE_SENTINEL_FILENAME` in `service.py` for why.
+
+AT-Field also has a generic, opt-in **event webhook** convention: any service can write a small manifest into `%ProgramData%\ATField\clients\<your-service-name>\*.json` containing an `atfield_event_webhook` field (a full URL). AT-Field POSTs a JSON payload there — exactly as registered, no path assumptions — every time a rule fires a kill/pressure action, so a subscriber learns *why* a process on that machine disappeared instead of it looking like a bare crash. Multiple services can subscribe simultaneously; none of this requires AT-Field to know anything about what the subscriber is or does.
+
 ## Status
 
 Pre-release v0.4.2. End-to-end verified on the development rig (2× RTX 5090) and clean-installed on additional machines. CI runs the test suite on Windows + Linux × Python 3.10/3.11/3.12 plus a wheel install + CLI smoke test.
