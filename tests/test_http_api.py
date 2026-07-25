@@ -574,6 +574,32 @@ class TestHeadroomDetail:
         assert entry["mean"] < 90.0
         assert entry["spike"] > 0.0
 
+    def test_single_outlier_sample_barely_moves_spike(self, server):
+        """Percentile-based (median + p95-median), not max()-mean(): a
+        single noisy sample among many stable ones should barely move the
+        spike reading, unlike a max-based estimator where one outlier
+        dominates. Found necessary by live measurement (2026-07-24/25) --
+        a resize-induced spurious shrink loop traced partly to spike being
+        too sensitive to individual samples."""
+        state, host, port = server
+        now = time.time()
+        # 20 stable samples at 50, one lone outlier at 90.
+        for i in range(20):
+            state.record_tick(
+                now_unix=now - 21 + i,
+                samples={"system.ram_used_percent": _make_sample(50.0)},
+            )
+        state.record_tick(
+            now_unix=now, samples={"system.ram_used_percent": _make_sample(90.0)}
+        )
+        _, data = _get(host, port, "/headroom/detail")
+        entry = data["per_signal"]["system.ram_used_percent"]
+        # A max-based estimator would report spike ~= 90 - 50*20/21 ~= 38.
+        # Percentile-based should stay small since the outlier doesn't reach
+        # the 95th percentile of 21 samples.
+        assert entry["spike"] < 5.0
+        assert entry["mean"] == pytest.approx(50.0, abs=1.0)
+
     def test_headroom_scalar_endpoint_is_unaffected(self, server):
         """/headroom must stay byte-identical for existing consumers --
         /headroom/detail is purely additive."""

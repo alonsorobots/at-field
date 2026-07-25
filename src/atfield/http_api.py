@@ -67,6 +67,23 @@ from atfield.signal_class import classify_signal
 # enough to smooth 1 Hz sampling noise, short enough to reflect "just now".
 _DETAIL_WINDOW_S = 60.0
 
+
+def _percentile(sorted_values: list[float], pct: float) -> float:
+    """Linear-interpolated percentile of an already-sorted list.
+
+    Deliberately hand-rolled instead of ``statistics.quantiles`` so it
+    degrades gracefully for tiny windows (a single-sample window, common
+    right after a signal first appears, just returns that sample) rather
+    than raising on ``n < 2``.
+    """
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    idx = (pct / 100.0) * (len(sorted_values) - 1)
+    lo = int(idx)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    frac = idx - lo
+    return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * frac
+
 __all__ = [
     "DEFAULT_API_HOST",
     "DEFAULT_API_PORT",
@@ -591,6 +608,13 @@ class ServiceState:
         module has no notion of a lower-bound rule today, so an unmapped
         signal's ``comparator`` is also ``"upper"`` (the direction "more is
         worse" that a reservoir/thermal signal both share).
+
+        ``mean`` and ``spike`` are percentile-based (median and p95-median
+        over the trailing window), not ``max()``/arithmetic-mean -- more
+        robust to a single noisy sample. This does NOT make a SUSTAINED
+        ramp read as zero spike (p95 rises right along with a real ramp
+        too); guarding against a self-inflicted ramp (e.g. a consumer's own
+        resize) is the consumer's job, not this endpoint's.
         """
         with self._lock:
             now = time.time()
@@ -615,15 +639,27 @@ class ServiceState:
                 )
                 if not window:
                     window = [value]
-                mean = sum(window) / len(window)
-                spike = max(0.0, max(window) - mean)
+                # Percentile-based, not max/mean: p50 (median) as the center
+                # and p95-p50 as the spike. More robust than max()-mean() to
+                # a single noisy/outlier sample -- max() is a single extreme
+                # point, so one bad tick can double-count as "spike". This
+                # does NOT solve a SUSTAINED ramp (e.g. a consumer's own pool
+                # resize allocating memory over tens of seconds) -- p95 rises
+                # right along with a real ramp too. That failure mode is the
+                # consumer's job to guard against (e.g. Kiroshi's tuner
+                # ignores this window for a settling period after its own
+                # resize -- see spike_tuner.py's SETTLE_S).
+                sorted_window = sorted(window)
+                median = _percentile(sorted_window, 50)
+                p95 = _percentile(sorted_window, 95)
+                spike = max(0.0, p95 - median)
                 threshold, rule_name = thresholds.get(sig, (None, None))
                 per_signal[sig] = {
                     "class": classify_signal(sig),
                     "unit": unit,
                     "latest": value,
                     "latest_ts": ts,
-                    "mean": mean,
+                    "mean": median,
                     "spike": spike,
                     "threshold": threshold,
                     "comparator": "upper" if threshold is not None else None,
