@@ -60,6 +60,12 @@ from atfield.rule_profiles import (
     RULE_PROFILES,
     classify,
 )
+from atfield.signal_class import classify_signal
+
+# Window over which /headroom/detail computes each signal's mean/spike.
+# Matches the tuner's fast mid-batch brake cadence (PHASE3.5 §3b) -- long
+# enough to smooth 1 Hz sampling noise, short enough to reflect "just now".
+_DETAIL_WINDOW_S = 60.0
 
 __all__ = [
     "DEFAULT_API_HOST",
@@ -559,6 +565,72 @@ class ServiceState:
                 "per_rule": per_rule,
             }
 
+    def snapshot_headroom_detail(self) -> dict[str, Any]:
+        """Per-signal FACTS for every classified signal (PHASE3.5 §3a, option a).
+
+        Unlike :meth:`snapshot_headroom`, this does NOT iterate kill-action
+        rules only -- it reports every signal currently in ``_latest_signal``
+        (i.e. everything ``/signals`` already reports, plausibility-filtered
+        upstream by the collectors before it ever lands here). A signal that
+        happens to have a matching kill rule also carries that rule's
+        ``threshold``; one that doesn't (e.g. ``vram_used_percent`` or
+        ``hard_fault_rate`` when no operator-authored rule targets it) still
+        appears, with ``threshold: null``.
+
+        This is the fix for a real gap found by field measurement
+        (2026-07-24): a spike-aware controller fed only the old scalar
+        ``/headroom`` was blind to a resource sitting at 96.5% full, because
+        that resource had no kill rule and therefore never appeared there.
+
+        Deliberately states facts only -- no reservation coefficient, no
+        AIMD, no policy. That's the consumer's job (Kiroshi owns POLICY,
+        AT-Field owns the DESCRIPTION -- see PHASE3.5 §3).
+
+        All current rules are upper-bound (``value > threshold`` fires), so
+        every entry with a threshold reports ``comparator: "upper"``; this
+        module has no notion of a lower-bound rule today, so an unmapped
+        signal's ``comparator`` is also ``"upper"`` (the direction "more is
+        worse" that a reservoir/thermal signal both share).
+        """
+        with self._lock:
+            now = time.time()
+            thresholds: dict[str, tuple[float, str]] = {}
+            engine = self._engine
+            if engine is not None:
+                for rule in engine.effective_rules:
+                    if rule.base_rule.action != "kill":
+                        continue
+                    threshold = rule.base_rule.threshold
+                    if not threshold:
+                        continue
+                    thresholds[rule.signal] = (threshold, rule.name)
+
+            per_signal: dict[str, Any] = {}
+            for sig, (ts, value, _source, unit) in self._latest_signal.items():
+                hist = self._history.get(sig)
+                window = (
+                    [v for (s_ts, v) in hist.tier0.samples if s_ts >= now - _DETAIL_WINDOW_S]
+                    if hist is not None
+                    else []
+                )
+                if not window:
+                    window = [value]
+                mean = sum(window) / len(window)
+                spike = max(0.0, max(window) - mean)
+                threshold, rule_name = thresholds.get(sig, (None, None))
+                per_signal[sig] = {
+                    "class": classify_signal(sig),
+                    "unit": unit,
+                    "latest": value,
+                    "latest_ts": ts,
+                    "mean": mean,
+                    "spike": spike,
+                    "threshold": threshold,
+                    "comparator": "upper" if threshold is not None else None,
+                    "rule": rule_name,
+                }
+            return {"per_signal": per_signal, "ts": now}
+
     def events_path(self) -> Path:
         return self._events_path
 
@@ -933,6 +1005,8 @@ def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
                     self._send_json(state.snapshot_rules())
                 elif path == "/headroom":
                     self._send_json(state.snapshot_headroom())
+                elif path == "/headroom/detail":
+                    self._send_json(state.snapshot_headroom_detail())
                 elif path == "/events":
                     since = _maybe_float(qs.get("since"))
                     limit = _maybe_int(qs.get("limit"))

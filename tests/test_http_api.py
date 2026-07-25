@@ -494,6 +494,103 @@ class TestHeadroom:
 
 
 # ---------------------------------------------------------------------------
+# /headroom/detail (PHASE3.5 §3a, option a)
+# ---------------------------------------------------------------------------
+
+
+class TestHeadroomDetail:
+    def test_empty_before_any_tick(self, server):
+        _, host, port = server
+        status, data = _get(host, port, "/headroom/detail")
+        assert status == 200
+        assert data["per_signal"] == {}
+        assert data["ts"] == pytest.approx(time.time(), abs=5.0)
+
+    def test_signal_with_a_kill_rule_carries_threshold_and_class(self, server):
+        state, host, port = server
+        state.record_tick(
+            now_unix=time.time(),
+            samples={"system.ram_used_percent": _make_sample(68.0)},
+        )
+        _, data = _get(host, port, "/headroom/detail")
+        entry = data["per_signal"]["system.ram_used_percent"]
+        assert entry["class"] == "reservoir"
+        assert entry["threshold"] == 85.0
+        assert entry["comparator"] == "upper"
+        assert entry["rule"] == "ram-pressure"
+        assert entry["latest"] == 68.0
+
+    def test_signal_with_no_matching_rule_still_appears_with_null_threshold(self, server):
+        """The gap this endpoint exists to close: vram_used_percent /
+        hard_fault_rate have no default kill rule, but must still be
+        visible -- with threshold=None -- not silently dropped the way the
+        old scalar /headroom drops anything outside kill-rule iteration."""
+        state, host, port = server
+        state.record_tick(
+            now_unix=time.time(),
+            samples={
+                "gpu.0.vram_used_percent": _make_sample(96.5, signal="gpu.0.vram_used_percent"),
+                "system.hard_fault_rate": _make_sample(12.0, signal="system.hard_fault_rate"),
+            },
+        )
+        _, data = _get(host, port, "/headroom/detail")
+        vram = data["per_signal"]["gpu.0.vram_used_percent"]
+        assert vram["class"] == "reservoir"
+        assert vram["threshold"] is None
+        assert vram["comparator"] is None
+        assert vram["rule"] is None
+        assert vram["latest"] == 96.5
+
+        hfr = data["per_signal"]["system.hard_fault_rate"]
+        assert hfr["class"] == "reservoir"
+        assert hfr["threshold"] is None
+
+    def test_throughput_and_thermal_signals_classified_correctly(self, server):
+        state, host, port = server
+        state.record_tick(
+            now_unix=time.time(),
+            samples={
+                "gpu.0.util_percent": _make_sample(100.0, signal="gpu.0.util_percent"),
+                "gpu.0.core_temp_c": _make_sample(41.0, signal="gpu.0.core_temp_c"),
+            },
+        )
+        _, data = _get(host, port, "/headroom/detail")
+        assert data["per_signal"]["gpu.0.util_percent"]["class"] == "throughput"
+        assert data["per_signal"]["gpu.0.core_temp_c"]["class"] == "thermal"
+
+    def test_mean_and_spike_computed_over_the_recent_window(self, server):
+        state, host, port = server
+        now = time.time()
+        # A flat run of 58, then one spike to 90 -- mean should sit near 58,
+        # spike should capture the jump.
+        for i, v in enumerate([58.0, 58.0, 58.0, 90.0]):
+            state.record_tick(
+                now_unix=now - 3 + i,
+                samples={"system.ram_used_percent": _make_sample(v)},
+            )
+        _, data = _get(host, port, "/headroom/detail")
+        entry = data["per_signal"]["system.ram_used_percent"]
+        assert entry["latest"] == 90.0
+        assert entry["mean"] < 90.0
+        assert entry["spike"] > 0.0
+
+    def test_headroom_scalar_endpoint_is_unaffected(self, server):
+        """/headroom must stay byte-identical for existing consumers --
+        /headroom/detail is purely additive."""
+        state, host, port = server
+        state.record_tick(
+            now_unix=time.time(),
+            samples={"system.ram_used_percent": _make_sample(68.0)},
+        )
+        engine = _make_engine()
+        state.attach_engine(engine)
+        engine.tick({"system.ram_used_percent": _make_sample(68.0)}, now_ns=time.monotonic_ns())
+        _, data = _get(host, port, "/headroom")
+        assert set(data.keys()) == {"min_headroom", "binding_rule", "per_rule"}
+        assert data["binding_rule"] == "ram-pressure"
+
+
+# ---------------------------------------------------------------------------
 # /events
 # ---------------------------------------------------------------------------
 
