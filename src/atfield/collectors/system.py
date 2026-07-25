@@ -130,33 +130,61 @@ def _read_commit_percent_windows() -> float:
 
 _PDH_FMT_DOUBLE: Final = 0x00000200
 
-_pdh = ctypes.WinDLL("pdh.dll") if sys.platform == "win32" else None
-if _pdh is not None:
-    _pdh.PdhOpenQueryW.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p, ctypes.POINTER(wintypes.HANDLE)]
-    _pdh.PdhOpenQueryW.restype = wintypes.LONG
-    _pdh.PdhAddEnglishCounterW.argtypes = [wintypes.HANDLE, wintypes.LPCWSTR, ctypes.c_void_p,
-                                           ctypes.POINTER(wintypes.HANDLE)]
-    _pdh.PdhAddEnglishCounterW.restype = wintypes.LONG
-    _pdh.PdhCollectQueryData.argtypes = [wintypes.HANDLE]
-    _pdh.PdhCollectQueryData.restype = wintypes.LONG
-    _pdh.PdhCloseQuery.argtypes = [wintypes.HANDLE]
-    _pdh.PdhCloseQuery.restype = wintypes.LONG
+def _load_pdh():
+    """Load pdh.dll, or return None if unavailable.
+
+    MUST NOT raise: this runs at import time, and ``service.py`` imports
+    ``SystemCollector`` at module scope. An unguarded ``WinDLL`` failure here
+    would fail the import of the Tier-1 always-available collector, which in
+    turn fails the import of the whole service -- i.e. one optional bonus
+    signal could take down the entire watchdog, leaving every machine with no
+    thermal/memory protection at all. hard_fault_rate is strictly best-effort;
+    losing it must cost exactly that signal and nothing more.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        return ctypes.WinDLL("pdh.dll")
+    except Exception:  # noqa: BLE001 - any load failure => signal unavailable
+        return None
 
 
 class _PdhFmtCounterValue(ctypes.Structure):
     # Real PDH_FMT_COUNTERVALUE is {DWORD CStatus; union{...double...}}. We
     # only ever read doubleValue; ctypes pads CStatus to 8-byte alignment for
     # the following c_double exactly like the real union does, so the memory
-    # layout PdhGetFormattedCounterValue writes into matches.
+    # layout PdhGetFormattedCounterValue writes into matches. (Verified:
+    # sizeof == 16 and doubleValue.offset == 8, matching the Win32 x64 ABI.)
     _fields_ = [("CStatus", wintypes.DWORD), ("doubleValue", ctypes.c_double)]
 
 
-if _pdh is not None:
-    _pdh.PdhGetFormattedCounterValue.argtypes = [
-        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
-        ctypes.POINTER(_PdhFmtCounterValue),
-    ]
-    _pdh.PdhGetFormattedCounterValue.restype = wintypes.LONG
+def _bind_pdh_signatures(pdh) -> bool:
+    """Declare argtypes/restypes. Returns False (rather than raising) if any
+    symbol is missing -- same import-time-safety rule as :func:`_load_pdh`."""
+    try:
+        pdh.PdhOpenQueryW.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p,
+                                      ctypes.POINTER(wintypes.HANDLE)]
+        pdh.PdhOpenQueryW.restype = wintypes.LONG
+        pdh.PdhAddEnglishCounterW.argtypes = [wintypes.HANDLE, wintypes.LPCWSTR, ctypes.c_void_p,
+                                              ctypes.POINTER(wintypes.HANDLE)]
+        pdh.PdhAddEnglishCounterW.restype = wintypes.LONG
+        pdh.PdhCollectQueryData.argtypes = [wintypes.HANDLE]
+        pdh.PdhCollectQueryData.restype = wintypes.LONG
+        pdh.PdhCloseQuery.argtypes = [wintypes.HANDLE]
+        pdh.PdhCloseQuery.restype = wintypes.LONG
+        pdh.PdhGetFormattedCounterValue.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(_PdhFmtCounterValue),
+        ]
+        pdh.PdhGetFormattedCounterValue.restype = wintypes.LONG
+        return True
+    except Exception:  # noqa: BLE001 - missing symbol => signal unavailable
+        return False
+
+
+_pdh = _load_pdh()
+if _pdh is not None and not _bind_pdh_signatures(_pdh):
+    _pdh = None  # symbols missing -> treat exactly like "PDH unavailable"
 
 
 class _HardFaultRateReader:
@@ -189,7 +217,9 @@ class _HardFaultRateReader:
 
     def open(self) -> None:
         if _pdh is None:
-            raise OSError("pdh.dll unavailable (not on Windows)")
+            raise OSError(
+                "PDH unavailable: not on Windows, pdh.dll failed to load, or a "
+                "required Pdh* symbol is missing (see _load_pdh/_bind_pdh_signatures)")
         rc = _pdh.PdhOpenQueryW(None, None, ctypes.byref(self._hquery))
         if rc != 0:
             raise OSError(f"PdhOpenQueryW failed: 0x{rc & 0xFFFFFFFF:08X}")

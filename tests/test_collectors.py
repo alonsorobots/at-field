@@ -279,6 +279,50 @@ class TestHardFaultRateReader:
         target.CStatus = cstatus
         target.doubleValue = double_value
 
+    def test_pdh_load_failure_must_not_break_module_import(self):
+        """REGRESSION (found in review): pdh.dll was loaded at module scope
+        UNGUARDED. service.py imports SystemCollector at module scope, so a
+        WinDLL failure there didn't just lose hard_fault_rate -- it failed the
+        import of the Tier-1 always-available collector and therefore of the
+        entire watchdog, leaving every machine with NO thermal/memory
+        protection. One optional bonus signal must never be able to do that.
+
+        Simulates the failure by re-importing the module with a WinDLL that
+        raises for pdh.dll.
+        """
+        import importlib
+        real_windll = ctypes.WinDLL
+
+        def boom(name, *a, **k):
+            if "pdh" in str(name).lower():
+                raise OSError("simulated: pdh.dll not loadable")
+            return real_windll(name, *a, **k)
+
+        import atfield.collectors.system as sysmod
+        ctypes.WinDLL = boom
+        try:
+            reloaded = importlib.reload(sysmod)  # must NOT raise
+            assert reloaded._pdh is None, "failed load must degrade to None"
+            # ...and the collector still works for every other signal
+            c = reloaded.SystemCollector()
+            result = c.probe()
+            assert result.available, "Tier-1 collector must survive a PDH failure"
+            assert "system.ram_used_percent" in c.sample()
+        finally:
+            ctypes.WinDLL = real_windll
+            importlib.reload(sysmod)  # restore real module state for other tests
+
+    def test_missing_pdh_symbol_degrades_to_unavailable(self):
+        """Same invariant one level down: if pdh.dll loads but a symbol is
+        missing, binding argtypes must not raise at import time either."""
+        from atfield.collectors import system as sysmod
+
+        class PartialPdh:
+            def __getattr__(self, name):
+                raise AttributeError(f"no symbol {name}")
+
+        assert sysmod._bind_pdh_signatures(PartialPdh()) is False
+
     def test_read_before_open_returns_none(self):
         from atfield.collectors.system import _HardFaultRateReader
         r = _HardFaultRateReader()
