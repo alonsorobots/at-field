@@ -144,6 +144,23 @@ class TargetingConfig:
     launcher_names: tuple[str, ...] = _DEFAULT_LAUNCHER_NAMES
     never_kill_names: tuple[str, ...] = _DEFAULT_NEVER_KILL_NAMES
 
+    # Protection by process NAME is useless for Python tooling: every
+    # supervisor, tray icon and job worker is `python.exe`, and
+    # never_kill_names cannot express "python.exe is killable except these"
+    # (validation rejects overlap with killable_names). These two settings
+    # protect long-lived supervisors without making their job children immune.
+    #
+    # fnmatch patterns tested against the whole joined cmdline, e.g.
+    # "*-m kiroshi tray*".
+    never_kill_cmdline_patterns: tuple[str, ...] = ()
+
+    # Client-declared roles to protect, read from the manifests clients already
+    # write under <state_dir>/clients/<name>/*.json. AT-Field stays
+    # job-agnostic: it attaches no meaning to any role string, the operator
+    # names the roles their services declare. A manifest may also opt itself in
+    # with "atfield_never_kill": true, which is always honoured.
+    protected_client_roles: tuple[str, ...] = ()
+
 
 @dataclass(frozen=True, slots=True)
 class KillConfig:
@@ -468,7 +485,13 @@ def _parse_targeting(raw: Any, base: TargetingConfig, source: str) -> TargetingC
     table = _require_table(raw, "targeting", source)
     _check_unknown_keys(
         table,
-        {"killable_names", "launcher_names", "never_kill_names"},
+        {
+            "killable_names",
+            "launcher_names",
+            "never_kill_names",
+            "never_kill_cmdline_patterns",
+            "protected_client_roles",
+        },
         "targeting",
         source,
     )
@@ -480,6 +503,22 @@ def _parse_targeting(raw: Any, base: TargetingConfig, source: str) -> TargetingC
         out = replace(out, launcher_names=_as_str_list(table["launcher_names"], "targeting.launcher_names", source))
     if "never_kill_names" in table:
         out = replace(out, never_kill_names=_as_str_list(table["never_kill_names"], "targeting.never_kill_names", source))
+    if "never_kill_cmdline_patterns" in table:
+        out = replace(
+            out,
+            never_kill_cmdline_patterns=_as_str_list(
+                table["never_kill_cmdline_patterns"],
+                "targeting.never_kill_cmdline_patterns",
+                source,
+            ),
+        )
+    if "protected_client_roles" in table:
+        out = replace(
+            out,
+            protected_client_roles=_as_str_list(
+                table["protected_client_roles"], "targeting.protected_client_roles", source
+            ),
+        )
 
     if not out.killable_names:
         raise ConfigError(f"{source}: targeting.killable_names must contain at least one name")

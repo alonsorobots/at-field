@@ -48,6 +48,27 @@ never_kill_names  = [
     "atfield-service.exe", "atf.exe",
 ]
 
+# Names cannot protect a Python service: its supervisor, tray icon and job
+# workers are all "python.exe", and never_kill_names may not overlap
+# killable_names. These two settings protect the long-lived processes while
+# leaving their job children killable -- the walk-up stops just below a
+# protected process, so pressure sheds the job, not the service running it.
+
+# fnmatch patterns tested against the whole joined cmdline.
+never_kill_cmdline_patterns = [
+    # "*-m myservice worker*",
+]
+
+# Roles to protect, read from the manifests clients already register under
+# <state_dir>/clients/<name>/*.json. AT-Field attaches no meaning to any role
+# string -- name the roles your own services declare. Stale manifests are
+# ignored: each PID is checked against the live process table and its recorded
+# start time, so a recycled PID cannot inherit protection. A manifest may also
+# protect itself with "atfield_never_kill": true, which is always honoured.
+protected_client_roles = [
+    # "coordinator", "runner",
+]
+
 
 # -----------------------------------------------------------------------------
 # Kill behavior

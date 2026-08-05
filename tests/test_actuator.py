@@ -9,14 +9,18 @@ accelerate -> deepspeed -> python -> python workers; etc).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 from atfield.actuator import (
     Actuator,
     ProcInfo,
     find_kill_root,
+    offender_axis,
     script_name_from_cmdline,
 )
+from atfield.client_registry import discover_protected
 from atfield.config import default_config
 from atfield.policy import Action
 
@@ -29,6 +33,8 @@ class _FakeProc:
     cmdline: tuple[str, ...] = ()
     rss: int = 0
     alive: bool = True
+    cpu: float = 0.0
+    create_time: float = 0.0
 
 
 @dataclass
@@ -47,6 +53,7 @@ class FakeProvider:
     killed: list[int] = field(default_factory=list)
     suspended: list[int] = field(default_factory=list)
     resumed: list[int] = field(default_factory=list)
+    cpu_sampled: list[tuple[int, ...]] = field(default_factory=list)
 
     @classmethod
     def from_tree(cls, edges: list[tuple[int, int, str, int]], own: int = 99999) -> FakeProvider:
@@ -54,11 +61,23 @@ class FakeProvider:
         d = {pid: _FakeProc(pid=pid, ppid=ppid, name=name, rss=rss) for pid, ppid, name, rss in edges}
         return cls(procs=d, own=own)
 
+    @classmethod
+    def from_procs(cls, procs: list[_FakeProc], own: int = 99999) -> FakeProvider:
+        """Build from fully-specified procs (cpu, cmdline, create_time)."""
+        return cls(procs={p.pid: p for p in procs}, own=own)
+
     def own_pid(self) -> int:
         return self.own
 
     def _to_info(self, p: _FakeProc) -> ProcInfo:
-        return ProcInfo(pid=p.pid, ppid=p.ppid, name=p.name, cmdline=p.cmdline, rss_bytes=p.rss)
+        return ProcInfo(
+            pid=p.pid,
+            ppid=p.ppid,
+            name=p.name,
+            cmdline=p.cmdline,
+            rss_bytes=p.rss,
+            create_time=p.create_time,
+        )
 
     def list_all(self) -> list[ProcInfo]:
         return [self._to_info(p) for p in self.procs.values() if p.alive]
@@ -121,6 +140,14 @@ class FakeProvider:
             return False
         self.resumed.append(pid)
         return True
+
+    def sample_cpu_percent(self, pids, interval: float) -> dict[int, float]:
+        self.cpu_sampled.append(tuple(pids))
+        return {
+            pid: self.procs[pid].cpu
+            for pid in pids
+            if pid in self.procs and self.procs[pid].alive
+        }
 
     def _flip_dead_after_terminate(self) -> None:
         for pid in self.terminated:
@@ -243,12 +270,12 @@ class TestFindKillRoot:
 # ---------------------------------------------------------------------------
 
 
-def _action(kind: str = "kill") -> Action:
+def _action(kind: str = "kill", signal: str = "system.ram_used_percent") -> Action:
     return Action(
         kind=kind,
         rule_name="r",
         base_rule_name="r",
-        signal="system.ram_used_percent",
+        signal=signal,
         threshold=80,
         fraction_over=1.0,
         samples_considered=10,
@@ -573,5 +600,302 @@ class TestThrottleAction:
             assert provider.suspended.count(100) == 2
             # Only one entry tracked -- prior timer cancelled.
             assert len(actuator._active_throttles) == 1
+        finally:
+            actuator.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Offender axis + supervisor protection
+#
+# Regression cover for a mis-targeted kill on the dev rig (2026-08-05): a CPU
+# thermal rule killed a job coordinator that was not causing the heat. Two
+# independent defects combined, and each is pinned separately below.
+# ---------------------------------------------------------------------------
+
+
+def _cfg(tmp_path, **targeting):
+    """Config rooted at a temp state_dir so manifest lookups stay hermetic."""
+    cfg = default_config()
+    return replace(
+        cfg,
+        general=replace(cfg.general, state_dir=Path(tmp_path)),
+        targeting=replace(cfg.targeting, **targeting),
+    )
+
+
+def _write_manifest(root, filename: str, **fields) -> None:
+    d = Path(root) / "clients" / "kiroshi"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / filename).write_text(json.dumps(fields), encoding="utf-8")
+
+
+class TestOffenderAxis:
+    def test_cpu_signals_rank_by_cpu(self):
+        assert offender_axis("system.cpu_package_temp_c") == "cpu"
+        assert offender_axis("system.cpu_used_percent") == "cpu"
+
+    def test_other_signals_rank_by_memory(self):
+        for sig in (
+            "system.ram_used_percent",
+            "system.commit_percent",
+            "system.hard_fault_rate",
+        ):
+            assert offender_axis(sig) == "memory"
+
+
+class TestCpuAxisOffenderSelection:
+    """A CPU rule must target the busiest process, not the fattest.
+
+    The burn loop that caused the thermal event held almost no memory, so RSS
+    ranking never saw it and picked the largest idle service instead.
+    """
+
+    def _rig(self, tmp_path):
+        procs = [
+            _FakeProc(pid=10, ppid=0, name="explorer.exe"),
+            # Fat, but idle.
+            _FakeProc(
+                pid=20, ppid=10, name="python.exe", rss=4_000_000_000, cpu=0.4,
+                cmdline=("python.exe", "-m", "service"),
+            ),
+            # Tiny, but pinning a core: the actual source of the heat.
+            _FakeProc(
+                pid=30, ppid=10, name="python.exe", rss=12_000_000, cpu=99.0,
+                cmdline=("python.exe", "burn.py"),
+            ),
+        ]
+        provider = FakeProvider.from_procs(procs)
+        actuator = Actuator(_cfg(tmp_path), provider=provider, sleep=lambda _s: None)
+        return actuator, provider
+
+    def test_cpu_rule_targets_the_busy_process(self, tmp_path):
+        actuator, provider = self._rig(tmp_path)
+        report = actuator.execute(_action("kill", signal="system.cpu_package_temp_c"))
+        assert report.offender_pid == 30
+        touched = set(provider.terminated) | set(provider.killed)
+        assert 20 not in touched, "the idle service must not be collateral"
+
+    def test_memory_rule_still_targets_the_fat_process(self, tmp_path):
+        actuator, _provider = self._rig(tmp_path)
+        report = actuator.execute(_action("kill", signal="system.ram_used_percent"))
+        assert report.offender_pid == 20
+
+    def test_cpu_rule_measures_rather_than_guesses(self, tmp_path):
+        actuator, provider = self._rig(tmp_path)
+        actuator.execute(_action("kill", signal="system.cpu_package_temp_c"))
+        assert provider.cpu_sampled, "cpu axis must sample real busy-ness"
+
+
+class TestFindKillRootProtection:
+    def _tree(self):
+        # supervisor(python) -> job root(python) -> worker(python)
+        return FakeProvider.from_tree(
+            [
+                (10, 0, "explorer.exe", 0),
+                (20, 10, "python.exe", 0),
+                (30, 20, "python.exe", 0),
+                (40, 30, "python.exe", 0),
+            ]
+        )
+
+    def test_stops_below_protected_supervisor(self):
+        root = find_kill_root(
+            40,
+            provider=self._tree(),
+            killable_names=frozenset(["python.exe"]),
+            launcher_names=frozenset(),
+            protected_pids=frozenset({20}),
+        )
+        assert root is not None
+        assert root.pid == 30, "target the job subtree, not the supervisor"
+
+    def test_unprotected_walk_up_still_reaches_the_top(self):
+        # Pins the existing dispatcher behaviour: with no protection signal the
+        # climb goes all the way up, which is what took a whole service down
+        # when its supervisor was just another python.exe.
+        root = find_kill_root(
+            40,
+            provider=self._tree(),
+            killable_names=frozenset(["python.exe"]),
+            launcher_names=frozenset(),
+        )
+        assert root is not None
+        assert root.pid == 20
+
+    def test_protected_offender_yields_no_root(self):
+        assert (
+            find_kill_root(
+                20,
+                provider=self._tree(),
+                killable_names=frozenset(["python.exe"]),
+                launcher_names=frozenset(),
+                protected_pids=frozenset({20}),
+            )
+            is None
+        )
+
+
+class TestNeverKillCmdlinePatterns:
+    """Name matching cannot express "this python.exe but not that one"."""
+
+    def _rig(self, tmp_path, patterns):
+        procs = [
+            _FakeProc(pid=10, ppid=0, name="explorer.exe"),
+            _FakeProc(
+                pid=20, ppid=10, name="pythonw.exe", rss=900_000_000, cpu=90.0,
+                cmdline=("pythonw.exe", "-m", "kiroshi", "tray"),
+            ),
+            _FakeProc(
+                pid=30, ppid=10, name="python.exe", rss=10_000, cpu=50.0,
+                cmdline=("python.exe", "burn.py"),
+            ),
+        ]
+        provider = FakeProvider.from_procs(procs)
+        cfg = _cfg(tmp_path, never_kill_cmdline_patterns=patterns)
+        return Actuator(cfg, provider=provider, sleep=lambda _s: None), provider
+
+    def test_without_pattern_the_tray_is_selected(self, tmp_path):
+        actuator, _provider = self._rig(tmp_path, ())
+        report = actuator.execute(_action("kill", signal="system.cpu_package_temp_c"))
+        assert report.offender_pid == 20
+
+    def test_pattern_spares_it(self, tmp_path):
+        actuator, provider = self._rig(tmp_path, ("*-m kiroshi tray*",))
+        report = actuator.execute(_action("kill", signal="system.cpu_package_temp_c"))
+        assert report.offender_pid == 30
+        touched = set(provider.terminated) | set(provider.killed)
+        assert 20 not in touched
+
+
+class TestClientRegistry:
+    def _live(self, pid=20, create_time=1000.0):
+        return FakeProvider.from_procs(
+            [_FakeProc(pid=pid, ppid=0, name="python.exe", create_time=create_time)]
+        )
+
+    def test_configured_role_is_protected(self, tmp_path):
+        _write_manifest(
+            tmp_path, "coordinator-20.json",
+            pid=20, role="coordinator", name="kiroshi", started_at=1000.0,
+        )
+        found = discover_protected(
+            tmp_path, provider=self._live(), protected_roles=["coordinator"]
+        )
+        assert set(found) == {20}
+
+    def test_unconfigured_role_is_not_protected(self, tmp_path):
+        _write_manifest(
+            tmp_path, "coordinator-20.json",
+            pid=20, role="coordinator", name="kiroshi", started_at=1000.0,
+        )
+        found = discover_protected(
+            tmp_path, provider=self._live(), protected_roles=["fixer"]
+        )
+        assert found == {}
+
+    def test_manifest_may_opt_itself_in(self, tmp_path):
+        # No operator configuration at all: the service declares itself.
+        _write_manifest(
+            tmp_path, "thing-20.json",
+            pid=20, role="anything", name="kiroshi",
+            started_at=1000.0, atfield_never_kill=True,
+        )
+        found = discover_protected(tmp_path, provider=self._live(), protected_roles=[])
+        assert set(found) == {20}
+
+    def test_manifest_outliving_its_process_is_ignored(self, tmp_path):
+        _write_manifest(
+            tmp_path, "coordinator-20.json",
+            pid=20, role="coordinator", name="kiroshi", started_at=1000.0,
+        )
+        found = discover_protected(
+            tmp_path, provider=FakeProvider.from_procs([]),
+            protected_roles=["coordinator"],
+        )
+        assert found == {}, "stale manifests must not protect anything"
+
+    def test_recycled_pid_is_not_protected(self, tmp_path):
+        # Same PID, but the live process started long after the manifest.
+        _write_manifest(
+            tmp_path, "coordinator-20.json",
+            pid=20, role="coordinator", name="kiroshi", started_at=1000.0,
+        )
+        found = discover_protected(
+            tmp_path,
+            provider=self._live(create_time=9_000_000.0),
+            protected_roles=["coordinator"],
+        )
+        assert found == {}
+
+    def test_malformed_manifest_is_skipped(self, tmp_path):
+        d = Path(tmp_path) / "clients" / "kiroshi"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "junk.json").write_text("{not json", encoding="utf-8")
+        found = discover_protected(
+            tmp_path, provider=self._live(), protected_roles=["coordinator"]
+        )
+        assert found == {}
+
+    def test_missing_state_dir_is_harmless(self, tmp_path):
+        found = discover_protected(
+            Path(tmp_path) / "nope", provider=self._live(), protected_roles=["x"]
+        )
+        assert found == {}
+
+
+class TestSupervisorSurvivesThermalEvent:
+    """End-to-end cover for the 2026-08-05 mis-targeted kill.
+
+    A CPU thermal rule fired while a job subtree was hot under a registered
+    coordinator. The coordinator must survive; only the job dies.
+    """
+
+    def _rig(self, tmp_path):
+        procs = [
+            _FakeProc(pid=10, ppid=0, name="explorer.exe"),
+            _FakeProc(
+                pid=20, ppid=10, name="python.exe", rss=3_000_000_000, cpu=0.2,
+                create_time=1000.0,
+                cmdline=("python.exe", "kiroshi", "coordinator"),
+            ),
+            _FakeProc(
+                pid=30, ppid=20, name="python.exe", rss=50_000_000, cpu=97.0,
+                cmdline=("python.exe", "job.py"),
+            ),
+            _FakeProc(
+                pid=40, ppid=30, name="python.exe", rss=20_000_000, cpu=95.0,
+                cmdline=("python.exe", "job.py"),
+            ),
+        ]
+        provider = FakeProvider.from_procs(procs)
+        _write_manifest(
+            tmp_path, "coordinator-20.json",
+            pid=20, role="coordinator", name="kiroshi", started_at=1000.0,
+        )
+        cfg = _cfg(tmp_path, protected_client_roles=("coordinator",))
+        return Actuator(cfg, provider=provider, sleep=lambda _s: None), provider
+
+    def test_kills_the_job_not_the_coordinator(self, tmp_path):
+        actuator, provider = self._rig(tmp_path)
+        report = actuator.execute(_action("kill", signal="system.cpu_package_temp_c"))
+        assert report.kill_root is not None
+        assert report.kill_root.pid == 30
+        touched = set(provider.terminated) | set(provider.killed)
+        assert 20 not in touched, "the coordinator must survive"
+        assert {30, 40} <= touched, "the whole job subtree should go"
+
+    def test_protection_holds_for_memory_rules_too(self, tmp_path):
+        actuator, provider = self._rig(tmp_path)
+        # The coordinator is the fattest process, so RSS ranking would pick it.
+        report = actuator.execute(_action("kill", signal="system.ram_used_percent"))
+        assert report.offender_pid == 30
+        assert 20 not in set(provider.terminated) | set(provider.killed)
+
+    def test_throttle_also_spares_the_coordinator(self, tmp_path):
+        actuator, provider = self._rig(tmp_path)
+        try:
+            actuator.execute(_action("throttle", signal="system.cpu_package_temp_c"))
+            assert 20 not in provider.suspended
+            assert 30 in provider.suspended
         finally:
             actuator.shutdown()

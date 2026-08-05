@@ -39,14 +39,16 @@ Self-protection rules:
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from atfield.client_registry import discover_protected
 from atfield.config import AtFieldConfig
 from atfield.policy import Action
 
@@ -58,11 +60,17 @@ __all__ = [
     "ProcessProvider",
     "PsutilProvider",
     "find_kill_root",
+    "offender_axis",
     "script_name_from_cmdline",
 ]
 
 
 _log = logging.getLogger("atfield.actuator")
+
+# Window used to measure per-process CPU when ranking offenders for a CPU rule.
+# Long enough to be meaningful, short enough not to delay a thermal response --
+# and small next to the graceful-kill grace period that follows it.
+_CPU_SAMPLE_INTERVAL_S = 0.3
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +192,9 @@ class ProcInfo:
     name: str
     cmdline: tuple[str, ...]
     rss_bytes: int = 0
+    # Process start time, used to detect a client manifest whose PID has been
+    # recycled (see :mod:`atfield.client_registry`).
+    create_time: float = 0.0
 
 
 class ProcessProvider(Protocol):
@@ -228,6 +239,16 @@ class ProcessProvider(Protocol):
         success."""
         ...
 
+    def sample_cpu_percent(self, pids: Sequence[int], interval: float) -> dict[int, float]:
+        """CPU busy-ness of each PID over ``interval``, percent of one core.
+
+        Deliberately a separate call rather than a :class:`ProcInfo` field:
+        measuring CPU needs two samples separated in time, which is far too
+        expensive to do for every process on every scan. PIDs that vanish
+        mid-sample are simply absent from the result.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Real psutil-backed provider (used in production)
@@ -257,7 +278,18 @@ class PsutilProvider:
                     rss = int(p.memory_info().rss)
                 except Exception:
                     rss = 0
-            return ProcInfo(pid=p.pid, ppid=ppid, name=name, cmdline=cmdline, rss_bytes=rss)
+                try:
+                    created = float(p.create_time())
+                except Exception:
+                    created = 0.0
+            return ProcInfo(
+                pid=p.pid,
+                ppid=ppid,
+                name=name,
+                cmdline=cmdline,
+                rss_bytes=rss,
+                create_time=created,
+            )
         except Exception:
             return None
 
@@ -332,10 +364,61 @@ class PsutilProvider:
         except Exception:
             return False
 
+    def sample_cpu_percent(self, pids: Sequence[int], interval: float) -> dict[int, float]:
+        # psutil's Process.cpu_percent() is relative to the previous call on
+        # that same object, so it returns 0.0 the first time -- useless here,
+        # where every scan builds fresh Process objects. Two explicit
+        # cpu_times() snapshots give a real measurement instead.
+        if not pids or interval <= 0:
+            return {}
+
+        def snapshot() -> dict[int, float]:
+            out: dict[int, float] = {}
+            for pid in pids:
+                try:
+                    t = self._psutil.Process(pid).cpu_times()
+                    out[pid] = float(t.user) + float(t.system)
+                except Exception:
+                    continue
+            return out
+
+        first = snapshot()
+        if not first:
+            return {}
+        start = time.monotonic()
+        time.sleep(interval)
+        elapsed = time.monotonic() - start or interval
+        second = snapshot()
+
+        result: dict[int, float] = {}
+        for pid, before in first.items():
+            after = second.get(pid)
+            if after is None:
+                continue  # exited mid-sample
+            result[pid] = max(0.0, (after - before) / elapsed * 100.0)
+        return result
+
 
 # ---------------------------------------------------------------------------
 # Kill targeting
 # ---------------------------------------------------------------------------
+
+
+def offender_axis(signal: str) -> str:
+    """Which per-process metric identifies the offender for ``signal``.
+
+    Returns ``"cpu"`` or ``"memory"``. This exists because ranking candidates by
+    RSS for a *CPU* rule picks the wrong victim: a busy process can be tiny (a
+    compute loop holding almost no memory) while an idle supervisor is fat, so
+    RSS ranking silently kills the largest process rather than the one causing
+    the heat.
+
+    GPU rules don't appear here -- the caller already narrows those to the
+    per-GPU process map, so the candidate set itself carries the attribution.
+    """
+    if "cpu" in signal:
+        return "cpu"
+    return "memory"
 
 
 def find_kill_root(
@@ -344,6 +427,7 @@ def find_kill_root(
     provider: ProcessProvider,
     killable_names: frozenset[str],
     launcher_names: frozenset[str],
+    protected_pids: frozenset[int] = frozenset(),
 ) -> ProcInfo | None:
     """Walk up the parent chain to the highest python-or-launcher ancestor.
 
@@ -352,6 +436,14 @@ def find_kill_root(
     the dispatcher: terminating its tree takes self-healing workers down
     with it (the "many jobs have coordinators with self-healing workers"
     case from the bootstrap chat).
+
+    ``protected_pids`` bounds that climb. A long-lived supervisor (a job
+    coordinator, an MCP server, a tray icon) is itself ``python.exe``, so
+    without this the walk-up sails straight past the job it should be targeting
+    and returns the supervisor -- killing an entire service to shed one job's
+    load. When the parent is protected we stop and return the child, which is
+    the root of the job subtree. When the offender is *itself* protected there is
+    no legitimate target, so this returns ``None``.
 
     Returns ``None`` if ``pid`` doesn't exist anymore or never matched
     a killable/launcher name in the first place.
@@ -368,6 +460,9 @@ def find_kill_root(
     if cursor.name.lower() not in {n.lower() for n in keepers}:
         return None
 
+    if cursor.pid in protected_pids:
+        return None
+
     while True:
         if cursor.pid in seen:
             return cursor  # cycle guard (shouldn't happen, but defense in depth)
@@ -375,6 +470,8 @@ def find_kill_root(
         parent = provider.parent(cursor.pid)
         if parent is None:
             return cursor
+        if parent.pid in protected_pids:
+            return cursor  # stop below the supervisor: this is the job root
         if parent.name.lower() not in {n.lower() for n in keepers}:
             return cursor
         cursor = parent
@@ -433,6 +530,8 @@ class Actuator:
         self._killable = frozenset(n.lower() for n in cfg.targeting.killable_names)
         self._launchers = frozenset(n.lower() for n in cfg.targeting.launcher_names)
         self._never = frozenset(n.lower() for n in cfg.targeting.never_kill_names)
+        self._never_cmdline = tuple(cfg.targeting.never_kill_cmdline_patterns)
+        self._protected_roles = tuple(cfg.targeting.protected_client_roles)
         self._own_pid = self._provider.own_pid()
 
         # Throttle action support: tracks PIDs we've suspended so we can
@@ -477,7 +576,11 @@ class Actuator:
                 finished_at_ns=int(time.monotonic_ns()),
             )
 
-        offender_pid = self._pick_offender(candidate_pids)
+        protected = self._protected_pids()
+        axis = offender_axis(action.signal)
+        offender_pid = self._pick_offender(
+            candidate_pids, axis=axis, protected=protected
+        )
         if offender_pid is None:
             _log.warning(
                 "kill-action for rule=%s but no eligible offender PID found",
@@ -496,19 +599,27 @@ class Actuator:
             provider=self._provider,
             killable_names=frozenset(self._cfg.targeting.killable_names),
             launcher_names=frozenset(self._cfg.targeting.launcher_names),
+            protected_pids=protected,
         )
         if root is None:
             return KillReport(
                 action=action,
                 offender_pid=offender_pid,
                 kill_root=None,
-                skipped_reason=f"PID {offender_pid} no longer exists or did not match keepers",
+                skipped_reason=(
+                    f"PID {offender_pid} no longer exists, did not match keepers, "
+                    "or is a protected client process"
+                ),
                 finished_at_ns=int(time.monotonic_ns()),
             )
 
-        # Build the full target set: root + descendants, minus protected.
+        # Build the full target set: root + descendants, minus protected. A
+        # protected client can also sit *below* the root (a supervisor started by
+        # the process we're about to kill), so filter by PID as well as name.
         targets: list[ProcInfo] = [root, *self._provider.descendants(root.pid)]
-        targets = [t for t in targets if self._is_killable(t)]
+        targets = [
+            t for t in targets if self._is_killable(t) and t.pid not in protected
+        ]
 
         if not targets:
             return KillReport(
@@ -547,7 +658,12 @@ class Actuator:
         envelope. Suspended PIDs land in :attr:`_active_throttles` so
         :meth:`shutdown` can resume them if the service exits early.
         """
-        offender_pid = self._pick_offender(candidate_pids)
+        protected = self._protected_pids()
+        offender_pid = self._pick_offender(
+            candidate_pids,
+            axis=offender_axis(action.signal),
+            protected=protected,
+        )
         if offender_pid is None:
             _log.info(
                 "throttle for rule=%s but no eligible offender PID found",
@@ -566,18 +682,24 @@ class Actuator:
             provider=self._provider,
             killable_names=frozenset(self._cfg.targeting.killable_names),
             launcher_names=frozenset(self._cfg.targeting.launcher_names),
+            protected_pids=protected,
         )
         if root is None:
             return KillReport(
                 action=action,
                 offender_pid=offender_pid,
                 kill_root=None,
-                skipped_reason=f"PID {offender_pid} no longer exists or did not match keepers",
+                skipped_reason=(
+                    f"PID {offender_pid} no longer exists, did not match keepers, "
+                    "or is a protected client process"
+                ),
                 finished_at_ns=int(time.monotonic_ns()),
             )
 
         targets: list[ProcInfo] = [root, *self._provider.descendants(root.pid)]
-        targets = [t for t in targets if self._is_killable(t)]
+        targets = [
+            t for t in targets if self._is_killable(t) and t.pid not in protected
+        ]
         if not targets:
             return KillReport(
                 action=action,
@@ -663,45 +785,104 @@ class Actuator:
 
     # -- Helpers -----------------------------------------------------------
 
+    def _protected_pids(self) -> frozenset[int]:
+        """PIDs no kill may target, from the client manifests on disk.
+
+        Re-read per action rather than cached: kills are rare, and a stale cache
+        here means either killing a supervisor that registered moments ago or
+        sparing a job that has long since exited.
+        """
+        try:
+            found = discover_protected(
+                self._cfg.general.state_dir,
+                provider=self._provider,
+                protected_roles=self._protected_roles,
+            )
+        except Exception:
+            # Never let manifest trouble block a response to real thermal
+            # pressure -- fall back to unprotected rather than not acting.
+            _log.exception("failed to read protected client manifests")
+            return frozenset()
+        for entry in found.values():
+            _log.debug(
+                "protecting pid %d (%s role=%s): %s",
+                entry.pid, entry.client, entry.role, entry.reason,
+            )
+        return frozenset(found)
+
+    def _matches_never_cmdline(self, info: ProcInfo) -> bool:
+        if not self._never_cmdline:
+            return False
+        joined = " ".join(info.cmdline)
+        return any(fnmatch.fnmatch(joined, pat) for pat in self._never_cmdline)
+
     def _is_killable(self, info: ProcInfo) -> bool:
         if info.pid == self._own_pid:
             return False
-        return info.name.lower() not in self._never
+        if info.name.lower() in self._never:
+            return False
+        return not self._matches_never_cmdline(info)
 
-    def _pick_offender(self, candidate_pids: Iterable[int] | None) -> int | None:
+    def _pick_offender(
+        self,
+        candidate_pids: Iterable[int] | None,
+        *,
+        axis: str = "memory",
+        protected: frozenset[int] = frozenset(),
+    ) -> int | None:
         """Pick the PID we treat as the trigger.
 
-        Strategy:
-        * If ``candidate_pids`` is given (e.g. the per-GPU process map for a
-          GPU rule), pick the highest-RSS one whose name is in
-          ``killable_names``.
-        * Else (RAM/commit rule), scan all processes and pick the highest-RSS
-          one in ``killable_names``.
-        * If nothing matches, return None and let ``execute()`` log a miss.
+        Candidates are the processes in ``killable_names`` -- either the caller's
+        ``candidate_pids`` (the per-GPU process map for a GPU rule) or a full
+        scan. They are then ranked on ``axis``:
+
+        * ``"cpu"`` -- measured busy-ness. Required for CPU/thermal rules: a
+          compute loop can hold almost no memory, so RSS ranking overlooks it
+          entirely and picks the fattest idle process instead.
+        * ``"memory"`` -- RSS, correct for RAM/commit/pagefile rules and a
+          reasonable proxy within an already GPU-attributed candidate set.
+
+        Returns None if nothing is eligible, and ``execute()`` logs a miss.
         """
+        candidates: list[ProcInfo] = []
         if candidate_pids is not None:
-            best: ProcInfo | None = None
             for pid in candidate_pids:
                 info = self._provider.get(pid)
-                if info is None:
-                    continue
-                if info.name.lower() not in self._killable:
-                    continue
-                if info.pid == self._own_pid:
-                    continue
-                if best is None or info.rss_bytes > best.rss_bytes:
-                    best = info
-            return best.pid if best else None
+                if info is not None:
+                    candidates.append(info)
+        else:
+            candidates = self._provider.list_all()
 
-        best = None
-        for info in self._provider.list_all():
-            if info.name.lower() not in self._killable:
-                continue
-            if info.pid == self._own_pid:
-                continue
-            if best is None or info.rss_bytes > best.rss_bytes:
-                best = info
-        return best.pid if best else None
+        eligible = [
+            info
+            for info in candidates
+            if info.name.lower() in self._killable
+            and info.pid != self._own_pid
+            and info.pid not in protected
+            and not self._matches_never_cmdline(info)
+        ]
+        if not eligible:
+            return None
+
+        if axis == "cpu":
+            usage = self._sample_cpu(eligible)
+            if usage:
+                return max(usage, key=lambda pid: usage[pid])
+            # Measurement unavailable (provider can't sample, or every
+            # candidate exited); fall through to RSS rather than doing nothing.
+            _log.warning("cpu-axis offender ranking unavailable, falling back to RSS")
+
+        return max(eligible, key=lambda info: info.rss_bytes).pid
+
+    def _sample_cpu(self, candidates: list[ProcInfo]) -> dict[int, float]:
+        sampler = getattr(self._provider, "sample_cpu_percent", None)
+        if sampler is None:
+            return {}
+        try:
+            return sampler([c.pid for c in candidates], _CPU_SAMPLE_INTERVAL_S)
+        except Exception:
+            _log.exception("cpu sampling failed during offender selection")
+            return {}
 
     def _terminate_then_kill(self, targets: list[ProcInfo]) -> list[KilledProcess]:
         for t in targets:
