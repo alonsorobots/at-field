@@ -786,12 +786,20 @@ class Actuator:
     # -- Helpers -----------------------------------------------------------
 
     def _protected_pids(self) -> frozenset[int]:
-        """PIDs no kill may target, from the client manifests on disk.
+        """PIDs no kill may target, and that the kill-root walk-up may not pass.
+
+        Two sources, and both have to reach ``find_kill_root``: the client
+        manifests on disk, and ``never_kill_cmdline_patterns`` for the
+        supervisors that register no manifest. Honouring the patterns only when
+        filtering the final target list spares the supervisor process itself but
+        still lets the walk-up return it as the kill root, which takes down
+        every one of its children instead of just the offending job's subtree.
 
         Re-read per action rather than cached: kills are rare, and a stale cache
         here means either killing a supervisor that registered moments ago or
         sparing a job that has long since exited.
         """
+        pids: set[int] = set()
         try:
             found = discover_protected(
                 self._cfg.general.state_dir,
@@ -802,13 +810,25 @@ class Actuator:
             # Never let manifest trouble block a response to real thermal
             # pressure -- fall back to unprotected rather than not acting.
             _log.exception("failed to read protected client manifests")
-            return frozenset()
-        for entry in found.values():
-            _log.debug(
-                "protecting pid %d (%s role=%s): %s",
-                entry.pid, entry.client, entry.role, entry.reason,
-            )
-        return frozenset(found)
+        else:
+            for entry in found.values():
+                _log.debug(
+                    "protecting pid %d (%s role=%s): %s",
+                    entry.pid, entry.client, entry.role, entry.reason,
+                )
+            pids.update(found)
+
+        if self._never_cmdline:
+            try:
+                pids.update(
+                    info.pid
+                    for info in self._provider.list_all()
+                    if self._matches_never_cmdline(info)
+                )
+            except Exception:
+                _log.exception("failed to match never_kill_cmdline_patterns")
+
+        return frozenset(pids)
 
     def _matches_never_cmdline(self, info: ProcInfo) -> bool:
         if not self._never_cmdline:

@@ -766,6 +766,41 @@ class TestNeverKillCmdlinePatterns:
         touched = set(provider.terminated) | set(provider.killed)
         assert 20 not in touched
 
+    def test_pattern_also_bounds_the_kill_root_walk_up(self, tmp_path):
+        """A pattern-protected supervisor must stop the climb, not merely survive it.
+
+        Applying the patterns only when filtering the final target list leaves
+        the supervisor alive but still lets the walk-up return it as the kill
+        root, so every sibling job underneath dies to shed the load of one.
+        """
+        procs = [
+            _FakeProc(pid=10, ppid=0, name="explorer.exe"),
+            _FakeProc(
+                pid=20, ppid=10, name="python.exe", rss=500_000_000, cpu=2.0,
+                cmdline=("python.exe", "-m", "kiroshi", "mcp", "--fixer", "auto"),
+            ),
+            _FakeProc(
+                pid=30, ppid=20, name="python.exe", rss=10_000, cpu=95.0,
+                cmdline=("python.exe", "job_a.py"),
+            ),
+            _FakeProc(
+                pid=40, ppid=20, name="python.exe", rss=10_000, cpu=1.0,
+                cmdline=("python.exe", "job_b.py"),
+            ),
+        ]
+        provider = FakeProvider.from_procs(procs)
+        cfg = _cfg(tmp_path, never_kill_cmdline_patterns=("*-m kiroshi mcp*",))
+        actuator = Actuator(cfg, provider=provider, sleep=lambda _s: None)
+
+        report = actuator.execute(_action("kill", signal="system.cpu_package_temp_c"))
+
+        assert report.offender_pid == 30
+        assert report.kill_root is not None
+        assert report.kill_root.pid == 30
+        touched = set(provider.terminated) | set(provider.killed)
+        assert 20 not in touched, "supervisor was killed"
+        assert 40 not in touched, "sibling job was collateral damage"
+
 
 class TestClientRegistry:
     def _live(self, pid=20, create_time=1000.0):
