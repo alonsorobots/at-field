@@ -520,6 +520,49 @@ def run_service(
                 _log.exception("policy tick raised; skipping action dispatch this tick")
                 actions = []
 
+            # A rule whose signal died is not "quiet", it is BLIND -- it will sit
+            # at INSUFFICIENT forever and never fire, no matter how hot the
+            # hardware gets. Say so at ERROR and in events.jsonl, because the
+            # operator's only other clue is a tile that looks perfectly calm.
+            for change in engine.drain_signal_health_changes():
+                audit.write_signal_health(change)
+                if change.state == "starved":
+                    _log.error(
+                        "SIGNAL LOST: rule=%s signal=%s has produced nothing for %.1fs "
+                        "-- this rule is NOT guarding (action=%s would never fire)%s",
+                        change.rule_name,
+                        change.signal,
+                        change.silent_for_s,
+                        change.action,
+                        "" if change.ever_seen else " [signal never arrived this run]",
+                    )
+                else:
+                    _log.warning(
+                        "signal recovered: rule=%s signal=%s after %.1fs dark; "
+                        "rule is guarding again",
+                        change.rule_name, change.signal, change.silent_for_s,
+                    )
+
+            # Per-process cap, INDEPENDENT of any rule. The rules answer "is
+            # the machine in danger", which is necessarily late; this asks "is
+            # one process unreasonable", which is answerable while the machine
+            # is still healthy. Runs every tick because it is a cheap scan of
+            # already-collected process info and has no threshold to debounce:
+            # a process is either over its cap or it is not.
+            #
+            # Demoted with everything else in observe-only mode -- safe mode
+            # must mean safe mode, not "safe except this one new path".
+            if not observe_only and cfg.kill.max_process_rss_gb > 0:
+                try:
+                    for cap_report in actuator.enforce_rss_cap():
+                        audit.write_kill_report(cap_report)
+                        api_state.record_action(cap_report.action)
+                        report_kill(sd, action=cap_report.action, report=cap_report)
+                except Exception:  # noqa: BLE001
+                    # A bookkeeping failure here must never stop the tick loop
+                    # that also handles thermal emergencies.
+                    _log.exception("process RSS cap enforcement failed")
+
             # Dispatch
             for action in actions:
                 effective = action
