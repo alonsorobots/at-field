@@ -94,6 +94,41 @@ absolute headroom (10s of GB) at 80 % is plenty for spikes. On a 16 GB
 laptop, Relaxed is the only option that won't false-positive on
 normal browser usage.
 
+### When a system-wide threshold is not enough
+
+`ram-pressure` answers *"is the machine in danger"*, which is necessarily late:
+the memory is already committed by the time the percentage moves, so the guard
+is racing the allocator. Two `[kill]` settings cover what it cannot. Both are
+**off by default** — they need a number that only you know.
+
+```toml
+[kill]
+max_process_rss_gb  = 32.0   # no single process may hold more than this
+hard_ceiling_percent = 96.0  # above this, kill outright instead of granting grace
+```
+
+`max_process_rss_gb` asks a different question — *is one process unreasonable* —
+which is answerable while the machine is still healthy. Set it above anything
+you expect to run and below what would hurt; a legitimate trainer may hold
+40 GB, which is why there is no safe default. Unlike the pressure rules this
+kills **only the offending process and its own descendants**, never walking up
+to a supervisor: the point is to lose one unit of work, not a job.
+
+`hard_ceiling_percent` skips `grace_seconds`. Graceful termination is right at
+the threshold and wrong near the ceiling — at 97 % a five-second courtesy
+window is most of the time left.
+
+### Self-healing pools and the escalation path
+
+If the offending process is a child of a client that registered a protected
+manifest, killing it may achieve nothing: a worker pool respawns whatever you
+kill. AT-Field counts these. After two futile kills of the same owner's
+children it uses the owner's own advertised `control.graceful_stop` channel to
+ask it to stop; after three it takes the owner's tree down. A manifest that
+sets `atfield_never_kill: true` is never overridden — that is the client's hard
+refusal, whereas a role in `protected_client_roles` is a routine preference
+that yields to keeping the machine alive.
+
 ## Pagefile / committed memory (`pagefile-pressure`)
 
 Windows commit charge = RAM + pagefile usage. This rule catches the

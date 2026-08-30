@@ -48,7 +48,11 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from atfield.client_registry import discover_protected
+from atfield.client_registry import (
+    discover_protected,
+    is_absolute_protection,
+    request_stop,
+)
 from atfield.config import AtFieldConfig
 from atfield.policy import Action
 
@@ -61,6 +65,8 @@ __all__ = [
     "PsutilProvider",
     "find_kill_root",
     "offender_axis",
+    "processes_over_rss_cap",
+    "RSS_CAP_RULE",
     "script_name_from_cmdline",
 ]
 
@@ -421,6 +427,30 @@ def offender_axis(signal: str) -> str:
     return "memory"
 
 
+RSS_CAP_RULE = "process-rss-cap"
+
+
+def processes_over_rss_cap(
+    processes: Iterable[ProcInfo], cap_bytes: int
+) -> list[ProcInfo]:
+    """Processes holding more than ``cap_bytes`` of RSS, largest first.
+
+    Pure and separately testable, because the interesting part is the policy
+    question -- *is one process unreasonable* -- not the process walking.
+
+    This is the complement of the system-wide rules, not a duplicate of them.
+    A rule on ``system.ram_used_percent`` can only answer "is the machine in
+    danger", which is necessarily late: the memory is already committed by the
+    time the percentage moves, and the guard then races the allocator. A cap on
+    a single process is answerable while the machine is still healthy -- one
+    worker holding 67 GB is wrong at 60% system RAM, not merely at 97%.
+    """
+    if cap_bytes <= 0:
+        return []
+    over = [p for p in processes if p.rss_bytes > cap_bytes]
+    return sorted(over, key=lambda p: p.rss_bytes, reverse=True)
+
+
 def find_kill_root(
     pid: int,
     *,
@@ -541,7 +571,178 @@ class Actuator:
         self._throttle_lock = threading.Lock()
         self._active_throttles: dict[int, threading.Timer] = {}
 
+        # Escalation state: protected owner PID -> how many of its children we
+        # have killed without the pressure going away. See _escalate().
+        self._futile_kills: dict[int, int] = {}
+        # Owners we have already asked to stop, so we ask once and then escalate
+        # rather than re-dropping the same file forever.
+        self._stop_requested: set[int] = set()
+        # Populated by _protected_pids() so escalation can address the OWNER,
+        # not just avoid it. Discovery already parses these manifests; carrying
+        # the objects costs nothing and re-globbing would risk a different view
+        # of the world between deciding and acting.
+        self._clients_by_pid: dict[int, Any] = {}
+
     # -- Public entry point ------------------------------------------------
+
+    def enforce_rss_cap(self, *, now_ns: int | None = None) -> list[KillReport]:
+        """Kill any single process holding more than ``kill.max_process_rss_gb``.
+
+        Returns one report per process killed; empty when the cap is disabled
+        (the default) or nothing exceeds it.
+
+        DOES NOT WALK UP TO THE KILL ROOT, and that is the whole point. The
+        system-pressure path walks up deliberately: when the machine is in
+        danger you want to shed the whole job. Here the offender is one process
+        that has individually misbehaved, and its siblings are innocent -- so
+        killing just it (plus its own descendants) turns the incident into ONE
+        failed unit of work instead of a dead job or a dead machine. Walking up
+        would take out every sibling worker and lose all of their progress.
+
+        Deliberately NOT rate-limited by the kill cooldown. The cooldown exists
+        to stop a *system-wide* rule thrashing on one noisy signal; this fires
+        on a specific process crossing a specific number, so there is nothing to
+        flap about -- the process either is over the cap or it is not, and if
+        three workers are each over it, all three are individually wrong.
+        """
+        cap_gb = self._cfg.kill.max_process_rss_gb
+        if cap_gb <= 0:
+            return []
+        cap_bytes = int(cap_gb * (1024 ** 3))
+        protected = self._protected_pids()
+        candidates = [
+            p for p in self._provider.list_all()
+            if p.name.lower() in self._killable
+            and p.pid not in protected
+            and self._is_killable(p)
+        ]
+        reports: list[KillReport] = []
+        for offender in processes_over_rss_cap(candidates, cap_bytes):
+            action = Action(
+                kind="kill",
+                rule_name=RSS_CAP_RULE,
+                base_rule_name=RSS_CAP_RULE,
+                signal="process.rss_bytes",
+                threshold=float(cap_bytes),
+                fraction_over=1.0,
+                samples_considered=1,
+                latest_value=float(offender.rss_bytes),
+                triggered_at_ns=now_ns if now_ns is not None else int(time.monotonic_ns()),
+                cooldown_seconds=0,
+            )
+            targets = [offender, *self._provider.descendants(offender.pid)]
+            targets = [
+                t for t in targets if self._is_killable(t) and t.pid not in protected
+            ]
+            if not targets:
+                continue
+            _log.warning(
+                "process-rss-cap: pid=%s name=%s holds %.1f GB (cap %.1f GB); killing it",
+                offender.pid, offender.name, offender.rss_bytes / (1024 ** 3), cap_gb,
+            )
+            # Over-cap is already pathological, so do not grant a grace window
+            # that lets it allocate further while we wait politely.
+            results = self._kill_immediate(targets)
+            reports.append(
+                KillReport(
+                    action=action,
+                    offender_pid=offender.pid,
+                    kill_root=offender,
+                    killed=tuple(results),
+                    finished_at_ns=int(time.monotonic_ns()),
+                )
+            )
+        return reports
+
+
+    # -- Escalation --------------------------------------------------------
+
+    # How many of one owner's children we will kill before concluding that
+    # killing children is not working. One is a coincidence; two is a pattern,
+    # and waiting longer costs a machine.
+    _ESCALATE_ASK_AFTER = 2
+    # After asking politely this many times over, take the owner down.
+    _ESCALATE_KILL_AFTER = 3
+
+    def _escalate(
+        self,
+        root: ProcInfo,
+        owner: ProcInfo | None,
+        protected: frozenset[int],
+        action: Action,
+    ) -> None:
+        """Address the OWNER when killing its children is achieving nothing.
+
+        THE FAILURE THIS EXISTS FOR. ``find_kill_root`` stops just below a
+        protected process and returns the child, so pressure sheds "the job,
+        not the service". That reasoning holds for a one-shot child. It is
+        exactly wrong for a self-healing worker pool: the supervisor respawns
+        whatever we kill, so the memory comes straight back and the guard is
+        firing into a loop it cannot win.
+
+        Measured 2026-08-30: twelve ram-pressure kills over four hours, every
+        one of them a ``multiprocessing.spawn`` child of the same few protected
+        kiroshi runners, RAM recovering each time and climbing back. The
+        machine bugchecked with the guard still dutifully killing children.
+
+        So: count futile kills per owner. At ``_ESCALATE_ASK_AFTER``, use the
+        control channel the owner itself advertised -- clients publish
+        ``control.graceful_stop`` in their manifest and AT-Field had never once
+        read it. At ``_ESCALATE_KILL_AFTER``, stop asking and take the owner's
+        tree down, because a supervisor that will not stop spawning IS the
+        problem. An explicit ``atfield_never_kill`` opt-in is still honoured;
+        a role listed in config is an operator's routine preference and yields
+        to keeping the machine alive.
+        """
+        if owner is None or owner.pid not in protected:
+            self._futile_kills.pop(root.pid, None)
+            return  # nothing above us was spared; the normal path did its job
+
+        parent = owner
+        owner_pid = owner.pid
+        count = self._futile_kills.get(owner_pid, 0) + 1
+        self._futile_kills[owner_pid] = count
+        client = self._clients_by_pid.get(owner_pid)
+        who = f"{client.client} {client.role}" if client is not None else parent.name
+
+        if count < self._ESCALATE_ASK_AFTER:
+            return
+
+        if count >= self._ESCALATE_KILL_AFTER:
+            if client is not None and is_absolute_protection(client):
+                _log.error(
+                    "escalation blocked: %s (pid %s) has respawned through %d "
+                    "kills but declares atfield_never_kill; rule=%s signal=%s. "
+                    "Pressure cannot be shed by AT-Field alone.",
+                    who, owner_pid, count, action.rule_name, action.signal,
+                )
+                return
+            _log.error(
+                "escalating to OWNER: %s (pid %s) respawned through %d kills; "
+                "killing its tree to stop the spawn loop (rule=%s)",
+                who, owner_pid, count, action.rule_name,
+            )
+            targets = [parent, *self._provider.descendants(owner_pid)]
+            targets = [t for t in targets if self._is_killable(t)]
+            if targets:
+                self._kill_immediate(targets)
+            self._futile_kills.pop(owner_pid, None)
+            self._stop_requested.discard(owner_pid)
+            return
+
+        if client is not None and owner_pid not in self._stop_requested:
+            if request_stop(client):
+                self._stop_requested.add(owner_pid)
+                _log.warning(
+                    "asked %s (pid %s) to stop after %d futile child kills "
+                    "(rule=%s)", who, owner_pid, count, action.rule_name,
+                )
+                return
+        _log.warning(
+            "%s (pid %s) has now respawned through %d kills and offers no "
+            "usable stop channel; will take its tree next time (rule=%s)",
+            who, owner_pid, count, action.rule_name,
+        )
 
     def execute(
         self,
@@ -613,6 +814,12 @@ class Actuator:
                 finished_at_ns=int(time.monotonic_ns()),
             )
 
+        # Resolve the owner BEFORE killing anything. Once the child exits,
+        # psutil can no longer report its parent (the fake provider models this
+        # faithfully and caught it), so a post-kill lookup silently returns None
+        # and escalation never fires.
+        owner = self._provider.parent(root.pid)
+
         # Build the full target set: root + descendants, minus protected. A
         # protected client can also sit *below* the root (a supervisor started by
         # the process we're about to kill), so filter by PID as well as name.
@@ -630,10 +837,24 @@ class Actuator:
                 finished_at_ns=int(time.monotonic_ns()),
             )
 
-        if self._cfg.kill.mode == "aggressive":
+        # Near the ceiling, grace is a luxury. Graceful termination is correct
+        # at the threshold, where there is time for a process to close cleanly;
+        # it is wrong at 97%, where the 5-second courtesy window is most of the
+        # time remaining before the store manager fails. Measured: a kill action
+        # fired at 06:17:13 and the machine bugchecked at 06:17:16.
+        ceiling = self._cfg.kill.hard_ceiling_percent
+        immediate = self._cfg.kill.mode == "aggressive" or (
+            ceiling > 0
+            and action.signal.endswith("_percent")
+            and action.latest_value >= ceiling
+        )
+        if immediate:
             results = self._kill_immediate(targets)
         else:
             results = self._terminate_then_kill(targets)
+
+        # Killing this tree may not have shed the work at all -- see _escalate.
+        self._escalate(root, owner, protected, action)
 
         return KillReport(
             action=action,
@@ -811,6 +1032,7 @@ class Actuator:
             # pressure -- fall back to unprotected rather than not acting.
             _log.exception("failed to read protected client manifests")
         else:
+            self._clients_by_pid = dict(found)
             for entry in found.values():
                 _log.debug(
                     "protecting pid %d (%s role=%s): %s",

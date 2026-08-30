@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from atfield.actuator import (
+    processes_over_rss_cap,
     Actuator,
     ProcInfo,
     find_kill_root,
@@ -934,3 +935,182 @@ class TestSupervisorSurvivesThermalEvent:
             assert 30 in provider.suspended
         finally:
             actuator.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Per-process RSS cap and owner escalation (2026-08-30 incident)
+# ---------------------------------------------------------------------------
+
+
+GB = 1024 ** 3
+
+
+class TestProcessesOverRssCap:
+    """The pure selector: is ONE process unreasonable, regardless of the machine."""
+
+    def test_disabled_cap_selects_nothing(self):
+        procs = [ProcInfo(pid=1, ppid=0, name="python.exe", cmdline=(), rss_bytes=99 * GB)]
+        assert processes_over_rss_cap(procs, 0) == []
+
+    def test_selects_only_over_cap_largest_first(self):
+        procs = [
+            ProcInfo(pid=1, ppid=0, name="python.exe", cmdline=(), rss_bytes=2 * GB),
+            ProcInfo(pid=2, ppid=0, name="python.exe", cmdline=(), rss_bytes=67 * GB),
+            ProcInfo(pid=3, ppid=0, name="python.exe", cmdline=(), rss_bytes=9 * GB),
+        ]
+        got = processes_over_rss_cap(procs, 8 * GB)
+        assert [p.pid for p in got] == [2, 3], "largest first, under-cap excluded"
+
+    def test_boundary_is_strict(self):
+        """Exactly at the cap is not over it -- a cap you cannot sit on is a trap."""
+        procs = [ProcInfo(pid=1, ppid=0, name="python.exe", cmdline=(), rss_bytes=8 * GB)]
+        assert processes_over_rss_cap(procs, 8 * GB) == []
+
+
+class TestRssCapEnforcement:
+    def _actuator(self, edges, cap_gb):
+        provider = FakeProvider.from_tree(edges)
+        cfg = default_config()
+        cfg = replace(cfg, kill=replace(cfg.kill, max_process_rss_gb=cap_gb))
+        return Actuator(cfg, provider=provider, sleep=lambda _s: None), provider
+
+    def test_off_by_default(self):
+        cfg = default_config()
+        assert cfg.kill.max_process_rss_gb == 0.0, "a cap must be opt-in per machine"
+
+    def test_kills_the_hog_and_leaves_siblings(self):
+        """One failed unit of work, not a dead job -- the whole point."""
+        actuator, provider = self._actuator(
+            [
+                (10, 0, "python.exe", 1 * GB),     # runner
+                (11, 10, "python.exe", 67 * GB),   # the hog
+                (12, 10, "python.exe", 2 * GB),    # innocent sibling
+            ],
+            cap_gb=8.0,
+        )
+        reports = actuator.enforce_rss_cap()
+        assert len(reports) == 1
+        assert reports[0].offender_pid == 11
+        assert 11 in provider.killed
+        assert 12 not in provider.killed, "sibling worker must survive"
+        assert 10 not in provider.killed, "must NOT walk up to the runner"
+
+    def test_no_grace_window_for_over_cap(self):
+        """Over-cap is already pathological; do not wait politely while it grows."""
+        actuator, provider = self._actuator(
+            [(10, 0, "python.exe", 67 * GB)], cap_gb=8.0
+        )
+        actuator.enforce_rss_cap()
+        assert provider.killed == [10]
+        assert provider.terminated == [], "should go straight to kill"
+
+
+class TestOwnerEscalation:
+    """Killing a respawnable child of a protected owner achieves nothing."""
+
+    def _setup(self, tmp_path, *, can_stop=True, never_kill=False):
+        import json as _json
+
+        state = tmp_path / "state"
+        clients = state / "clients" / "kiroshi"
+        clients.mkdir(parents=True)
+        manifest = {
+            "pid": 10,
+            "role": "runner",
+            "name": "kiroshi",
+            "started_at": 0.0,
+        }
+        if can_stop:
+            manifest["control"] = {"graceful_stop": "drop a '<role>-<pid>.stop' file"}
+        if never_kill:
+            manifest["atfield_never_kill"] = True
+        (clients / "runner-10.json").write_text(_json.dumps(manifest), encoding="utf-8")
+
+        # runner(10) owns worker(11); worker is what a RAM rule will pick.
+        provider = FakeProvider.from_tree(
+            [(10, 0, "python.exe", 1 * GB), (11, 10, "python.exe", 60 * GB)]
+        )
+        for p in provider.procs.values():
+            p.create_time = 0.0
+        cfg = default_config()
+        cfg = replace(
+            cfg,
+            general=replace(cfg.general, state_dir=state),
+            targeting=replace(cfg.targeting, protected_client_roles=("runner",)),
+        )
+        return Actuator(cfg, provider=provider, sleep=lambda _s: None), provider, clients
+
+    @staticmethod
+    def _respawn(provider, ppid=10):
+        """A self-healing pool replaces the worker we just killed.
+
+        Without this the fake tree has no offender left after one kill and the
+        test would prove nothing -- respawning IS the behaviour that made the
+        real incident unwinnable.
+        """
+        new_pid = max(provider.procs) + 1
+        proc = _FakeProc(pid=new_pid, ppid=ppid, name="python.exe", rss=60 * GB)
+        proc.create_time = 0.0
+        provider.procs[new_pid] = proc
+        return new_pid
+
+    def test_first_kill_spares_the_owner(self, tmp_path):
+        actuator, provider, clients = self._setup(tmp_path)
+        actuator.execute(_action())
+        assert 11 in provider.killed or 11 in provider.terminated
+        assert 10 not in provider.killed, "owner is protected on the first pass"
+        assert not list(clients.glob("*.stop")), "too early to ask it to stop"
+
+    def test_second_futile_kill_asks_the_owner_to_stop(self, tmp_path):
+        actuator, provider, clients = self._setup(tmp_path)
+        actuator.execute(_action())
+        self._respawn(provider)
+        actuator.execute(_action())
+        stops = list(clients.glob("runner-10.stop"))
+        assert stops, "must use the control channel the manifest advertised"
+        assert 10 not in provider.killed, "ask before shooting"
+
+    def test_third_futile_kill_takes_the_owner_down(self, tmp_path):
+        actuator, provider, clients = self._setup(tmp_path)
+        for _ in range(3):
+            actuator.execute(_action())
+            self._respawn(provider)
+        assert 10 in provider.killed, (
+            "a supervisor that keeps respawning through kills IS the problem"
+        )
+
+    def test_explicit_never_kill_is_never_overridden(self, tmp_path):
+        actuator, provider, clients = self._setup(tmp_path, never_kill=True)
+        for _ in range(4):
+            actuator.execute(_action())
+            self._respawn(provider)
+        assert 10 not in provider.killed, (
+            "atfield_never_kill is the client's hard refusal, not a preference"
+        )
+
+    def test_owner_without_stop_channel_still_escalates(self, tmp_path):
+        """No control channel is a reason to escalate sooner, not to give up."""
+        actuator, provider, clients = self._setup(tmp_path, can_stop=False)
+        for _ in range(3):
+            actuator.execute(_action())
+            self._respawn(provider)
+        assert not list(clients.glob("*.stop"))
+        assert 10 in provider.killed
+
+
+class TestHardCeiling:
+    def test_above_ceiling_skips_the_grace_window(self):
+        """At 97% a 5-second courtesy window is most of the time remaining."""
+        provider = FakeProvider.from_tree([(10, 0, "python.exe", 1 * GB)])
+        cfg = default_config()
+        cfg = replace(cfg, kill=replace(cfg.kill, hard_ceiling_percent=96.0))
+        actuator = Actuator(cfg, provider=provider, sleep=lambda _s: None)
+        actuator.execute(_action())          # latest_value 95.0 -> below ceiling
+        assert provider.terminated == [10], "below the ceiling, still graceful"
+
+        provider2 = FakeProvider.from_tree([(20, 0, "python.exe", 1 * GB)])
+        actuator2 = Actuator(cfg, provider=provider2, sleep=lambda _s: None)
+        hot = replace(_action(), latest_value=97.3)
+        actuator2.execute(hot)
+        assert provider2.killed == [20]
+        assert provider2.terminated == [], "above the ceiling, no grace"

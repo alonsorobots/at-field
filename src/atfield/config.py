@@ -174,6 +174,26 @@ class KillConfig:
     # anything but a brief stall. Per-rule overrides can be added later.
     throttle_duration_seconds: int = 30
 
+    # A single process may not hold more than this many GB of RSS. 0 disables.
+    #
+    # The system-wide rules answer "is the MACHINE in danger", which is
+    # necessarily late: by the time RAM is 92% the memory is already committed
+    # and the guard is racing the allocator. This answers "is one process
+    # unreasonable", which is answerable while the machine is still healthy --
+    # a worker at 67 GB is wrong at 60% system RAM, not only at 97%.
+    #
+    # OFF by default and deliberately so: a legitimate trainer may hold 40 GB,
+    # and a cap is only meaningful against a known workload shape. Set it per
+    # machine, above anything you expect to run and below what would hurt.
+    max_process_rss_gb: float = 0.0
+
+    # Above this system-RAM percentage, kill IMMEDIATELY instead of granting
+    # grace_seconds. 0 disables. Graceful termination is right at the threshold
+    # and wrong near the ceiling: at 97% a 5-second courtesy window is most of
+    # the time left before the store manager fails.
+    hard_ceiling_percent: float = 0.0
+
+
 
 @dataclass(frozen=True, slots=True)
 class ApiConfig:
@@ -233,7 +253,16 @@ class AtFieldConfig:
     rules: tuple[RuleConfig, ...]
 
     def cooldown_for(self, rule: RuleConfig) -> int:
-        """Effective post-action cooldown for ``rule`` in seconds."""
+        """Effective post-action cooldown for ``rule`` in seconds.
+
+        NOT severity-scaled, deliberately. Scaling this was the obvious reading
+        of the 2026-08-30 incident -- the rule fired twelve times in four hours
+        and still lost -- but the forensics say cadence was not the binding
+        constraint: every one of those kills hit a *respawnable child* of a
+        protected runner, so the work never stopped. Killing a child every five
+        seconds instead of every sixty would only have been futile faster. The
+        fix belongs in escalation (see ``Actuator``), not in the clock.
+        """
         return rule.cooldown_s if rule.cooldown_s is not None else self.kill.post_kill_cooldown_seconds
 
 
@@ -531,7 +560,8 @@ def _parse_kill(raw: Any, base: KillConfig, source: str) -> KillConfig:
     table = _require_table(raw, "kill", source)
     _check_unknown_keys(
         table,
-        {"mode", "grace_seconds", "post_kill_cooldown_seconds", "throttle_duration_seconds"},
+        {"mode", "grace_seconds", "post_kill_cooldown_seconds", "throttle_duration_seconds",
+         "max_process_rss_gb", "hard_ceiling_percent"},
         "kill",
         source,
     )
@@ -556,6 +586,18 @@ def _parse_kill(raw: Any, base: KillConfig, source: str) -> KillConfig:
                 minimum=0,
             ),
         )
+    if "max_process_rss_gb" in table:
+        gb = _as_number(table["max_process_rss_gb"], "kill.max_process_rss_gb", source)
+        if gb < 0:
+            raise ConfigError(f"{source}: kill.max_process_rss_gb must be >= 0, got {gb}")
+        out = replace(out, max_process_rss_gb=gb)
+    if "hard_ceiling_percent" in table:
+        pct = _as_number(table["hard_ceiling_percent"], "kill.hard_ceiling_percent", source)
+        if not (0 <= pct <= 100):
+            raise ConfigError(
+                f"{source}: kill.hard_ceiling_percent must be within 0..100, got {pct}"
+            )
+        out = replace(out, hard_ceiling_percent=pct)
     if "throttle_duration_seconds" in table:
         out = replace(
             out,
