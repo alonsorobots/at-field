@@ -1114,3 +1114,49 @@ class TestHardCeiling:
         actuator2.execute(hot)
         assert provider2.killed == [20]
         assert provider2.terminated == [], "above the ceiling, no grace"
+
+
+class TestFutilityDecaysAndAppliesToBothKillPaths:
+    """Deterrence has to be general: many real jobs are self-healing pools."""
+
+    def test_stale_futility_does_not_accumulate(self, tmp_path):
+        """Two unrelated kills weeks apart are not a loop."""
+        setup = TestOwnerEscalation()
+        actuator, provider, clients = setup._setup(tmp_path)
+        actuator.execute(_action())
+        setup._respawn(provider)
+        # age the recorded episode well past the window
+        count, _at = actuator._futile_kills[10]
+        actuator._futile_kills[10] = (count, -actuator._FUTILITY_WINDOW_S * 10)
+        actuator.execute(_action())
+        assert not list(clients.glob("*.stop")), (
+            "a stale episode must not be counted toward escalation"
+        )
+        assert actuator._futile_kills[10][0] == 1, "counter should have restarted"
+
+    def test_rss_cap_kills_escalate_too(self, tmp_path):
+        """Otherwise a pool whose every respawn balloons is killed forever."""
+        setup = TestOwnerEscalation()
+        actuator, provider, clients = setup._setup(tmp_path)
+        cfg = replace(
+            actuator._cfg, kill=replace(actuator._cfg.kill, max_process_rss_gb=8.0)
+        )
+        actuator._cfg = cfg
+        for _ in range(3):
+            actuator.enforce_rss_cap()
+            setup._respawn(provider)
+        assert 10 in provider.killed, (
+            "cap kills must feed the same futility accounting as pressure kills"
+        )
+
+    def test_rss_cap_asks_before_it_shoots(self, tmp_path):
+        setup = TestOwnerEscalation()
+        actuator, provider, clients = setup._setup(tmp_path)
+        actuator._cfg = replace(
+            actuator._cfg, kill=replace(actuator._cfg.kill, max_process_rss_gb=8.0)
+        )
+        actuator.enforce_rss_cap()
+        setup._respawn(provider)
+        actuator.enforce_rss_cap()
+        assert list(clients.glob("runner-10.stop")), "ask at 2, shoot at 3"
+        assert 10 not in provider.killed

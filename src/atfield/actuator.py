@@ -573,7 +573,8 @@ class Actuator:
 
         # Escalation state: protected owner PID -> how many of its children we
         # have killed without the pressure going away. See _escalate().
-        self._futile_kills: dict[int, int] = {}
+        # owner pid -> (futile kill count, monotonic time of the last one)
+        self._futile_kills: dict[int, tuple[int, float]] = {}
         # Owners we have already asked to stop, so we ask once and then escalate
         # rather than re-dropping the same file forever.
         self._stop_requested: set[int] = set()
@@ -636,6 +637,9 @@ class Actuator:
             ]
             if not targets:
                 continue
+            # Capture the owner while the offender is still alive; psutil cannot
+            # report the parent of an exited process.
+            owner = self._provider.parent(offender.pid)
             _log.warning(
                 "process-rss-cap: pid=%s name=%s holds %.1f GB (cap %.1f GB); killing it",
                 offender.pid, offender.name, offender.rss_bytes / (1024 ** 3), cap_gb,
@@ -643,6 +647,13 @@ class Actuator:
             # Over-cap is already pathological, so do not grant a grace window
             # that lets it allocate further while we wait politely.
             results = self._kill_immediate(targets)
+            # A cap kill counts as futile too. Without this, a pool whose every
+            # respawned worker balloons past the cap is killed forever: the
+            # machine survives, the job never progresses, and nothing escalates
+            # -- a cheaper treadmill than the one that took Chronos down, but
+            # still a loop with no exit. Routing both kill paths through the
+            # same accounting is what makes the deterrence general.
+            self._escalate(offender, owner, protected, action)
             reports.append(
                 KillReport(
                     action=action,
@@ -663,6 +674,13 @@ class Actuator:
     _ESCALATE_ASK_AFTER = 2
     # After asking politely this many times over, take the owner down.
     _ESCALATE_KILL_AFTER = 3
+    # Futility is only evidence while it is RECENT. Without a window the count
+    # is cumulative over the service's whole life, so a job that legitimately
+    # lost one worker this morning and another next week would be escalated on
+    # the strength of two unrelated events. Sized against the incident it is
+    # drawn from: those kills came 6-26 minutes apart, so half an hour still
+    # sees a genuine loop as one episode.
+    _FUTILITY_WINDOW_S = 1800.0
 
     def _escalate(
         self,
@@ -700,8 +718,13 @@ class Actuator:
 
         parent = owner
         owner_pid = owner.pid
-        count = self._futile_kills.get(owner_pid, 0) + 1
-        self._futile_kills[owner_pid] = count
+        now = time.monotonic()
+        prev_count, prev_at = self._futile_kills.get(owner_pid, (0, 0.0))
+        if now - prev_at > self._FUTILITY_WINDOW_S:
+            prev_count = 0          # stale episode; this is a fresh one
+            self._stop_requested.discard(owner_pid)
+        count = prev_count + 1
+        self._futile_kills[owner_pid] = (count, now)
         client = self._clients_by_pid.get(owner_pid)
         who = f"{client.client} {client.role}" if client is not None else parent.name
 
