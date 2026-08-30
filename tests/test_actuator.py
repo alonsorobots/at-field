@@ -1160,3 +1160,48 @@ class TestFutilityDecaysAndAppliesToBothKillPaths:
         actuator.enforce_rss_cap()
         assert list(clients.glob("runner-10.stop")), "ask at 2, shoot at 3"
         assert 10 not in provider.killed
+
+
+class TestKillImmediateReportsTruthfully:
+    """A kill log that cries 'survived' when it did not is worse than none."""
+
+    def test_slow_dying_process_is_not_reported_as_survivor(self):
+        """TerminateProcess is async; a big process is not gone in 50 ms.
+
+        Observed live: the RSS cap killed a 34 GB probe, logged survived=True,
+        and the process was gone moments later.
+        """
+        provider = FakeProvider.from_tree([(10, 0, "python.exe", 60 * GB)])
+        slept = []
+
+        def fake_sleep(s):
+            slept.append(s)
+            # dies only after several polls, like a large working set
+            if len(slept) >= 4:
+                provider.procs[10].alive = False
+
+        actuator = Actuator(default_config(), provider=provider, sleep=fake_sleep)
+        results = actuator._kill_immediate([provider._to_info(provider.procs[10])])
+        assert results[0].survived is False, (
+            "must wait for the process to actually disappear before judging"
+        )
+
+    def test_a_genuine_survivor_is_still_reported(self):
+        """The wait must not turn every kill into a success."""
+        provider = FakeProvider.from_tree([(10, 0, "python.exe", 1 * GB)])
+        # a process that ignores the kill entirely -- the fake normally marks
+        # the target dead, which would make a survivor impossible to model
+        provider.kill = lambda pid: None
+        actuator = Actuator(default_config(), provider=provider, sleep=lambda _s: None)
+        results = actuator._kill_immediate([provider._to_info(provider.procs[10])])
+        assert results[0].survived is True
+
+    def test_fast_process_does_not_pay_the_full_timeout(self):
+        provider = FakeProvider.from_tree([(10, 0, "python.exe", 1 * GB)])
+        slept = []
+        actuator = Actuator(
+            default_config(), provider=provider, sleep=lambda s: slept.append(s)
+        )
+        results = actuator._kill_immediate([provider._to_info(provider.procs[10])])
+        assert results[0].survived is False
+        assert sum(slept) < actuator._REAP_TIMEOUT_S, "should exit as soon as it is gone"

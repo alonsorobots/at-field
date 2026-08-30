@@ -1164,11 +1164,41 @@ class Actuator:
                 results.append(KilledProcess(info=t, method="terminate", survived=False))
         return results
 
+    # How long to WATCH for a killed process to disappear before calling it a
+    # survivor. Not a grace period -- the kill has already been sent; this is
+    # only about observing the result honestly.
+    _REAP_TIMEOUT_S = 2.0
+    _REAP_POLL_S = 0.05
+
     def _kill_immediate(self, targets: list[ProcInfo]) -> list[KilledProcess]:
+        """Kill now, then wait long enough to report the outcome truthfully.
+
+        The old single 0.05 s check was too eager. TerminateProcess is
+        asynchronous, and tearing down a large working set is not instant, so a
+        process that was dying still read as alive. Observed live: the RSS cap
+        killed a 34 GB probe, logged ``survived=True``, and the process was
+        gone moments later.
+
+        That matters most exactly here. The cap kills processes selected FOR
+        being huge, which are the slowest to disappear, so the report would
+        have been wrong on essentially every cap kill -- and a kill log that
+        cries "survived" when it did not is how operators learn to disbelieve
+        the audit trail.
+
+        Polls instead of sleeping a flat interval so the common case (small
+        process, gone in milliseconds) stays fast.
+        """
         for t in targets:
             self._provider.kill(t.pid)
-        self._sleep(0.05)
+        pending = {t.pid: t for t in targets}
+        deadline = self._REAP_TIMEOUT_S
+        waited = 0.0
+        while pending and waited < deadline:
+            self._sleep(self._REAP_POLL_S)
+            waited += self._REAP_POLL_S
+            for pid in [p for p in pending if not self._provider.is_alive(p)]:
+                del pending[pid]
         return [
-            KilledProcess(info=t, method="kill", survived=self._provider.is_alive(t.pid))
+            KilledProcess(info=t, method="kill", survived=t.pid in pending)
             for t in targets
         ]
