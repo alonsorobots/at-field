@@ -352,6 +352,11 @@ def run_service(
 
     # Probe collectors -> negotiate signal map
     collectors, probe_results = _probe_all_collectors(audit)
+    # Which signals did NVML itself declare? A gpu.{n} index is only meaningful
+    # within its own collector, and this is what tells the dispatch loop whether
+    # an index may be carried into the NVML process map.
+    _nvml_probe = probe_results.get("nvml")
+    nvml_owned_signals = set(getattr(_nvml_probe, "signals", ()) or ())
     available_signals: set[str] = set()
     for r in probe_results.values():
         if r.available:
@@ -621,8 +626,27 @@ def run_service(
                 api_state.record_action(effective)
 
                 # Pick candidate PIDs for GPU rules from the NVML proc map.
+                #
+                # ONLY for signals NVML itself produced. The index in a signal
+                # name means nothing outside the collector that assigned it:
+                # NVML numbers GPUs by PCI order, while the LHM collector hands
+                # out gpu.{n} from a running counter in sensor-enumeration
+                # order (see lhmlib's mapping loop). Measured on a two-GPU host
+                # 2026-08-31: loading PHYSICAL gpu0 drove
+                # gpu.1.mem_junction_temp_c to 102.8 C while gpu.0's sat flat,
+                # and loading physical gpu1 did the reverse -- the two
+                # collectors' indices were exactly transposed.
+                #
+                # Taking the LHM index into the NVML map therefore selected the
+                # processes on the WRONG CARD: the innocent worker was killed
+                # while the hot card kept running. Falling back to
+                # candidate_pids=None is not a downgrade -- it is the same path
+                # taken whenever NVML is unavailable, and it picks a target by
+                # the rule's own resource axis instead of by a number that does
+                # not mean what it appears to.
                 candidate_pids = None
-                if nvml is not None and effective.signal.startswith("gpu."):
+                if (nvml is not None and effective.signal.startswith("gpu.")
+                        and effective.signal in nvml_owned_signals):
                     # Force a fresh enumeration so kill targeting uses
                     # up-to-the-moment PIDs (the hot-path map is only
                     # cadence-refreshed to keep the per-tick cost low).
@@ -633,6 +657,14 @@ def run_service(
                         candidate_pids = [pid for pid, _ in proc_map.get(idx, [])]
                     except (IndexError, ValueError):
                         candidate_pids = None
+                elif nvml is not None and effective.signal.startswith("gpu."):
+                    _log.warning(
+                        "%s is not an NVML signal, so its GPU index cannot be "
+                        "used to select processes from the NVML map -- targeting "
+                        "by resource axis instead. (Cross-collector GPU indices "
+                        "are not interchangeable; see the note above.)",
+                        effective.signal,
+                    )
 
                 report = actuator.execute(effective, candidate_pids=candidate_pids)
                 audit.write_kill_report(report)
