@@ -143,6 +143,12 @@ def _read_pause_sentinel(state_dir: Path) -> int | None:
 PRESENCE_SENTINEL_FILENAME = "presence.sentinel"
 
 
+# How long system.input_idle_s may be missing before the presence throttle is
+# withdrawn. Long enough to ride out a collector hiccup, far short of the
+# six hours a stale sentinel actually survived in the field.
+_PRESENCE_STALE_AFTER_S = 120.0
+
+
 def _write_presence_sentinel(state_dir: Path) -> None:
     """Mark the machine as "present" for external consumers. Empty file;
     existence alone is the signal (mirrors pause.sentinel's own convention
@@ -438,6 +444,10 @@ def run_service(
     ticks = 0
     exit_code = 0
     last_presence_state: bool | None = None  # None = not yet determined this run
+    # When the idle signal last arrived. Seeded to startup so a sentinel left
+    # behind by a PREVIOUS process is withdrawn on schedule rather than
+    # inherited forever.
+    last_idle_sample_ns: int = time.monotonic_ns()
 
     try:
         while not stop:
@@ -497,6 +507,7 @@ def run_service(
             if cfg.presence.enabled:
                 idle_sample = samples.get("system.input_idle_s")
                 if idle_sample is not None:
+                    last_idle_sample_ns = now_ns
                     is_present = idle_sample.value < cfg.presence.idle_threshold_s
                     if is_present != last_presence_state:
                         if is_present:
@@ -504,6 +515,31 @@ def run_service(
                         else:
                             _clear_presence_sentinel(sd)
                         last_presence_state = is_present
+                elif (now_ns - last_idle_sample_ns
+                      >= int(_PRESENCE_STALE_AFTER_S * 1_000_000_000)):
+                    # The idle signal has gone away. Presence must NOT be sticky:
+                    # this loop only ever updated the sentinel while a sample was
+                    # arriving, so an assertion written before the signal vanished
+                    # could never be withdrawn. Measured 2026-08-30: a runner sat
+                    # capped at 1 of 3 workers by a sentinel written SIX HOURS
+                    # earlier, by a previous service process, on a node reporting
+                    # no input_idle_s at all.
+                    #
+                    # The asymmetry decides the direction. A stale "present"
+                    # silently throttles a machine forever and looks like nothing
+                    # at all; a stale "absent" costs an operator some noise while
+                    # they are sitting at the keyboard, and corrects itself the
+                    # moment the signal returns. So unknown means NOT present.
+                    if last_presence_state is not False:
+                        _log.warning(
+                            "presence: system.input_idle_s has not arrived for "
+                            "%.0fs -- clearing the presence throttle. Unknown is "
+                            "not the same as present, and a stale sentinel "
+                            "throttles this host forever.",
+                            (now_ns - last_idle_sample_ns) / 1e9,
+                        )
+                        _clear_presence_sentinel(sd)
+                        last_presence_state = False
 
             # Push samples into the API state mirror BEFORE evaluation so the
             # tray dashboard can show "current value" even if the rule abstained.
