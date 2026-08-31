@@ -429,6 +429,21 @@ def offender_axis(signal: str) -> str:
 
 RSS_CAP_RULE = "process-rss-cap"
 
+# How often the per-process RSS cap may walk the process table.
+#
+# NOT every tick, which is what it used to do. list_all() builds a ProcInfo per
+# process INCLUDING cmdline, and on Windows that measured 0.70 s median / 4.32 s
+# worst over ~400 processes -- against a 1.0 s tick budget. The tick stretched
+# to ~4.7 s, and because min_samples was sized from the CONFIGURED tick rate,
+# every kill rule silently went to INSUFFICIENT and stopped guarding. A CPU then
+# ran >=90 C for an hour with a 90 C rule armed and inert (2026-08-30).
+#
+# 5 s costs nothing that matters: this cap exists to catch a process whose RSS
+# has run away, and RSS runs away over seconds-to-minutes, not milliseconds. The
+# guard it was suppressing is the one that protects the whole machine, so the
+# trade is not close.
+_RSS_CAP_MIN_INTERVAL_S = 5.0
+
 
 def processes_over_rss_cap(
     processes: Iterable[ProcInfo], cap_bytes: int
@@ -563,6 +578,9 @@ class Actuator:
         self._never_cmdline = tuple(cfg.targeting.never_kill_cmdline_patterns)
         self._protected_roles = tuple(cfg.targeting.protected_client_roles)
         self._own_pid = self._provider.own_pid()
+        # Last time the RSS cap walked the process table (see
+        # _RSS_CAP_MIN_INTERVAL_S). Monotonic ns; 0 means "never, run now".
+        self._last_rss_cap_ns = 0
 
         # Throttle action support: tracks PIDs we've suspended so we can
         # resume them on shutdown (a service crash mid-throttle would
@@ -609,6 +627,16 @@ class Actuator:
         cap_gb = self._cfg.kill.max_process_rss_gb
         if cap_gb <= 0:
             return []
+        # Rate-limit the process walk itself. The caller runs every tick; the
+        # scan must not. See _RSS_CAP_MIN_INTERVAL_S -- this is a tick-budget
+        # guard, not a debounce on the decision.
+        now_mono_ns = now_ns if now_ns is not None else int(time.monotonic_ns())
+        if self._last_rss_cap_ns and (
+            now_mono_ns - self._last_rss_cap_ns
+            < int(_RSS_CAP_MIN_INTERVAL_S * 1_000_000_000)
+        ):
+            return []
+        self._last_rss_cap_ns = now_mono_ns
         cap_bytes = int(cap_gb * (1024 ** 3))
         protected = self._protected_pids()
         candidates = [

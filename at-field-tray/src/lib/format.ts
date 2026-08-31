@@ -217,6 +217,25 @@ export function signalCategory(wire: string): SignalCategory {
   return "other";
 }
 
+/**
+ * Is this a temperature signal, wherever it lives?
+ *
+ * Deliberately NOT a `SignalCategory`. Those buckets are mutually exclusive
+ * and answer "what device is this?"; temperature cuts ACROSS them -- a GPU
+ * core temp is both GPU and temp. Modelling it as a predicate keeps
+ * `signalCategory` total and single-valued (the counts and the per-device
+ * tabs depend on that) while still letting the tab strip offer "every
+ * temperature on this box, at a glance", which is the view you want when
+ * you are asking "is anything cooking?" rather than "how is the GPU?".
+ *
+ * Matches on the unit suffix rather than a name list so a newly added
+ * sensor -- a VRM, a drive, a second CPU package -- is included the day it
+ * appears instead of the day someone remembers to update this file.
+ */
+export function isTemperatureSignal(wire: string): boolean {
+  return /_temp_c$/.test(wire);
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Signal → collector provenance (for disabled-rule remediation)
 // ─────────────────────────────────────────────────────────────────────

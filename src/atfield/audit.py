@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from atfield.actuator import KillReport, script_name_from_cmdline
-from atfield.policy import Action, DisabledRule
+from atfield.policy import Action, DisabledRule, SignalHealthChange
 
 __all__ = [
     "EVENTS_FILENAME",
@@ -189,6 +189,31 @@ class AuditWriter:
                 ],
                 "succeeded": report.succeeded,
                 "skipped_reason": report.skipped_reason,
+            }
+        )
+
+    def write_signal_health(self, change: SignalHealthChange) -> None:
+        """Record a rule's input signal going dark, or coming back.
+
+        Deliberately its own event type rather than a ``collector_health``
+        entry: collector health answers "is the source process alive?", this
+        answers "is a rule that is supposed to be guarding this machine
+        actually receiving anything?". The two diverge exactly when it matters
+        most -- a collector can report HEALTHY while the specific sensor
+        backing a thermal rule has stopped producing values.
+        """
+        self._write(
+            {
+                "type": "signal_health",
+                "state": change.state,
+                "rule": change.rule_name,
+                "base_rule": change.base_rule_name,
+                "signal": change.signal,
+                # Spelled out so a reader of events.jsonl sees the stakes
+                # without cross-referencing config.toml.
+                "unguarded_action": change.action,
+                "silent_for_s": round(change.silent_for_s, 3),
+                "ever_seen": change.ever_seen,
             }
         )
 

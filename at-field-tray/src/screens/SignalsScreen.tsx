@@ -25,6 +25,7 @@ import {
   formatValue as fmtUnit,
   isDefaultDisplaySignal,
   signalCategory,
+  isTemperatureSignal,
   signalDisplayName,
 } from "../lib/format";
 import { getPollIntervalMs } from "../lib/preferences";
@@ -156,7 +157,11 @@ export default function SignalsScreen({ rules, refreshGen, onSelectSignal }: Pro
   // reporting, minus signals outside the active category tab. `order` stays
   // the full set so the Manage panel can reveal hidden tiles and drag-reorder
   // still has stable indices regardless of the active category.
-  const inCategory = (s: string) => category === "all" || signalCategory(s) === category;
+  const inCategory = (s: string) =>
+    category === "all" ||
+    // "temp" spans devices, so it matches on the reading rather than the
+    // bucket -- a GPU core temp belongs to both GPU and Temp.
+    (category === "temp" ? isTemperatureSignal(s) : signalCategory(s) === category);
   const reporting = (s: string) => Boolean(data?.latest[s]);
   const visibleOrder = order.filter(
     (s) => !hidden.has(s) && reporting(s) && inCategory(s),
@@ -168,11 +173,16 @@ export default function SignalsScreen({ rules, refreshGen, onSelectSignal }: Pro
   // what the user will actually see when they switch tabs. The "All" tab's
   // count is the sum of every visible-eligible signal regardless of bucket.
   const categoryCounts = useMemo(() => {
-    const counts = { all: 0, gpu: 0, cpu: 0, memory: 0, other: 0 } as Record<ActiveCategory, number>;
+    const counts = {
+      all: 0, temp: 0, gpu: 0, cpu: 0, memory: 0, other: 0,
+    } as Record<ActiveCategory, number>;
     for (const sig of order) {
       if (hidden.has(sig) || !reporting(sig)) continue;
       counts.all += 1;
       counts[signalCategory(sig)] += 1;
+      // Not `else` -- a temperature is ALSO its device's signal, so it is
+      // counted in both, exactly as it appears under both tabs.
+      if (isTemperatureSignal(sig)) counts.temp += 1;
     }
     return counts;
     // `reporting` is a closure over `data`, but order/hidden change too --
@@ -212,6 +222,9 @@ export default function SignalsScreen({ rules, refreshGen, onSelectSignal }: Pro
   // actually appear under it (voltages on rigs with PSU sensors).
   const tabs: { id: ActiveCategory; label: string }[] = [
     { id: "all", label: "All" },
+    // Directly after All: "is anything cooking?" is the question this
+    // dashboard gets asked first, and it is not a per-device question.
+    { id: "temp", label: "Temp" },
     { id: "gpu", label: "GPU" },
     { id: "cpu", label: "CPU" },
     { id: "memory", label: "Memory" },

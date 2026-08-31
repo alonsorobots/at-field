@@ -1142,9 +1142,16 @@ class TestFutilityDecaysAndAppliesToBothKillPaths:
             actuator._cfg, kill=replace(actuator._cfg.kill, max_process_rss_gb=8.0)
         )
         actuator._cfg = cfg
+        # Advance the clock between scans: the cap rate-limits its process walk
+        # (a per-tick walk is what stretched the service loop to 0.22 Hz and
+        # disarmed every rule on 2026-08-30), so successive episodes must be
+        # separated in time to be separate episodes. Explicit here rather than
+        # relying on real monotonic time, which also makes this deterministic.
+        now = 10 * 1_000_000_000
         for _ in range(3):
-            actuator.enforce_rss_cap()
+            actuator.enforce_rss_cap(now_ns=now)
             setup._respawn(provider)
+            now += 10 * 1_000_000_000
         assert 10 in provider.killed, (
             "cap kills must feed the same futility accounting as pressure kills"
         )
@@ -1155,9 +1162,11 @@ class TestFutilityDecaysAndAppliesToBothKillPaths:
         actuator._cfg = replace(
             actuator._cfg, kill=replace(actuator._cfg.kill, max_process_rss_gb=8.0)
         )
-        actuator.enforce_rss_cap()
+        # See the note above: two separate scans need two separate times.
+        now = 10 * 1_000_000_000
+        actuator.enforce_rss_cap(now_ns=now)
         setup._respawn(provider)
-        actuator.enforce_rss_cap()
+        actuator.enforce_rss_cap(now_ns=now + 10 * 1_000_000_000)
         assert list(clients.glob("runner-10.stop")), "ask at 2, shoot at 3"
         assert 10 not in provider.killed
 

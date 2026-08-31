@@ -24,12 +24,24 @@ Design notes
   expose Windows perf counters) is the canonical "is it actually thrashing"
   signal. Best-effort: if the perf counter category is unavailable, this
   signal is simply omitted, never a collector failure.
+* **Input idle time must come from the interactive session, not ours.**
+  ``GetLastInputInfo`` is scoped to the *calling process's* session. AT-Field
+  normally runs as a service in session 0, which receives no keyboard or
+  mouse input ever -- so the call succeeds and returns a number that just
+  counts up from service start, forever. That is the worst possible failure
+  shape for a presence signal: it is not missing, it is confidently wrong,
+  and it always says "nobody is here". We therefore query the *active console
+  session* via ``WTSQuerySessionInformationW(WTSSessionInfoEx)`` and fall back
+  to ``GetLastInputInfo`` only when we are ourselves running interactively.
+  If neither source applies, the signal is omitted -- an absent signal makes
+  presence-gated rules abstain, a fabricated one makes them act on a lie.
 """
 
 from __future__ import annotations
 
 import ctypes
 import sys
+from collections.abc import Callable
 from ctypes import wintypes
 from typing import Final, Optional
 
@@ -82,13 +94,16 @@ class _LASTINPUTINFO(ctypes.Structure):
 
 
 def _read_input_idle_seconds_windows() -> float:
-    """Seconds since the last keyboard/mouse input, system-wide.
+    """Seconds since the last keyboard/mouse input *in our own session*.
 
     ``GetLastInputInfo`` reports the tick count of the last input event
-    (keyboard OR mouse -- Windows doesn't distinguish the two at this API),
-    which is exactly the "is anyone physically at this machine" signal:
-    session-lock and idle time both flow through it. ``GetTickCount64`` is
-    used (not ``GetTickCount``) to avoid the ~49.7-day 32-bit wraparound.
+    (keyboard OR mouse -- Windows doesn't distinguish the two at this API).
+    ``GetTickCount64`` is used (not ``GetTickCount``) to avoid the ~49.7-day
+    32-bit wraparound.
+
+    Only meaningful when this process runs *inside* the interactive session.
+    In a session-0 service it returns "time since the service started",
+    monotonically, forever -- see :func:`_resolve_input_idle_reader`.
     """
     info = _LASTINPUTINFO()
     info.cbSize = ctypes.sizeof(_LASTINPUTINFO)
@@ -101,6 +116,173 @@ def _read_input_idle_seconds_windows() -> float:
     if elapsed_ms < 0:
         elapsed_ms += 1 << 32
     return elapsed_ms / 1000.0
+
+
+# ---------------------------------------------------------------------------
+# Win32 WTS reader: idle time of the *interactive* session, from a service
+# ---------------------------------------------------------------------------
+
+# WTSQuerySessionInformationW info class. ``WTSSessionInfoEx`` (25) yields a
+# WTSINFOEXW whose Level-1 payload carries both LastInputTime and CurrentTime,
+# so idle time needs no clock of our own -- the terminal-services subsystem
+# hands us both endpoints from the same clock, immune to skew.
+_WTS_SESSION_INFO_EX: Final = 25
+_WTS_CURRENT_SERVER_HANDLE: Final = 0  # NULL == this server
+_WTS_INFO_EX_LEVEL1: Final = 1
+_WTS_NO_ACTIVE_SESSION: Final = 0xFFFFFFFF  # WTSGetActiveConsoleSessionId sentinel
+
+# String field sizes straight out of wtsapi32.h. They are load-bearing: the
+# LARGE_INTEGERs we actually want sit *after* these arrays, so an off-by-one
+# here silently shifts LastInputTime and yields garbage idle values.
+_WINSTATIONNAME_LENGTH: Final = 32
+_USERNAME_LENGTH: Final = 20
+_DOMAIN_LENGTH: Final = 17
+
+# 100-nanosecond FILETIME ticks per second.
+_FILETIME_TICKS_PER_S: Final = 10_000_000
+
+
+class _WTSINFOEX_LEVEL1_W(ctypes.Structure):
+    _fields_ = [
+        ("SessionId", wintypes.ULONG),
+        ("SessionState", ctypes.c_int),  # WTS_CONNECTSTATE_CLASS
+        ("SessionFlags", wintypes.LONG),
+        ("WinStationName", wintypes.WCHAR * (_WINSTATIONNAME_LENGTH + 1)),
+        ("UserName", wintypes.WCHAR * (_USERNAME_LENGTH + 1)),
+        ("DomainName", wintypes.WCHAR * (_DOMAIN_LENGTH + 1)),
+        ("LogonTime", ctypes.c_longlong),
+        ("ConnectTime", ctypes.c_longlong),
+        ("DisconnectTime", ctypes.c_longlong),
+        ("LastInputTime", ctypes.c_longlong),
+        ("CurrentTime", ctypes.c_longlong),
+        ("IncomingBytes", wintypes.DWORD),
+        ("OutgoingBytes", wintypes.DWORD),
+        ("IncomingFrames", wintypes.DWORD),
+        ("OutgoingFrames", wintypes.DWORD),
+        ("IncomingCompressedBytes", wintypes.DWORD),
+        ("OutgoingCompressedBytes", wintypes.DWORD),
+    ]
+
+
+class _WTSINFOEX_W(ctypes.Structure):
+    # The real type has a union for Data; only Level 1 is ever defined, so a
+    # plain struct member is equivalent. ctypes places Data at offset 8 (not 4)
+    # because the c_longlong members give the payload 8-byte alignment --
+    # matching the C layout, sizeof == 232.
+    _fields_ = [
+        ("Level", wintypes.DWORD),
+        ("Data", _WTSINFOEX_LEVEL1_W),
+    ]
+
+
+def _process_session_id() -> int | None:
+    """Session ID of the current process, or None if it can't be determined."""
+    sid = wintypes.DWORD()
+    ok = ctypes.windll.kernel32.ProcessIdToSessionId(
+        ctypes.windll.kernel32.GetCurrentProcessId(), ctypes.byref(sid)
+    )
+    return int(sid.value) if ok else None
+
+
+def _read_active_session_idle_seconds() -> float:
+    """Seconds since last input in the *active console session*.
+
+    Works from session 0, which is the whole point. Raises on any condition
+    that would otherwise force us to invent a number:
+
+    * no session currently attached to the console (nobody logged on),
+    * ``LastInputTime == 0``, which WTS reports for sessions that have not
+      registered input yet -- indistinguishable from "1601-01-01", so
+      treating it as a real timestamp would report ~13 million hours idle.
+
+    The active session is re-read on every call rather than cached: fast user
+    switching and RDP reconnects both move it, and at 1 Hz the syscall cost is
+    irrelevant next to being wrong about who is at the machine.
+    """
+    wtsapi = ctypes.windll.wtsapi32
+    session_id = ctypes.windll.kernel32.WTSGetActiveConsoleSessionId()
+    if session_id == _WTS_NO_ACTIVE_SESSION:
+        raise OSError("no active console session")
+
+    buf = ctypes.c_void_p()
+    nbytes = wintypes.DWORD()
+    ok = wtsapi.WTSQuerySessionInformationW(
+        ctypes.c_void_p(_WTS_CURRENT_SERVER_HANDLE),
+        wintypes.DWORD(session_id),
+        ctypes.c_int(_WTS_SESSION_INFO_EX),
+        ctypes.byref(buf),
+        ctypes.byref(nbytes),
+    )
+    if not ok or not buf:
+        # Read GetLastError explicitly: ctypes.windll handles are not created
+        # with use_last_error, so ctypes.get_last_error() would report 0 here.
+        raise OSError(
+            "WTSQuerySessionInformationW(WTSSessionInfoEx) failed for session "
+            f"{session_id}, GetLastError={ctypes.windll.kernel32.GetLastError()}"
+        )
+    try:
+        if nbytes.value < ctypes.sizeof(_WTSINFOEX_W):
+            raise OSError(
+                f"WTSSessionInfoEx returned {nbytes.value} bytes, "
+                f"expected >= {ctypes.sizeof(_WTSINFOEX_W)}"
+            )
+        info = ctypes.cast(buf, ctypes.POINTER(_WTSINFOEX_W)).contents
+        if info.Level != _WTS_INFO_EX_LEVEL1:
+            raise OSError(f"unexpected WTSINFOEX level {info.Level}")
+        data = info.Data
+        last_input = int(data.LastInputTime)
+        current = int(data.CurrentTime)
+        if last_input <= 0 or current <= 0:
+            raise OSError("WTS reported no LastInputTime for the active session")
+        # Clamp at zero: the two fields are sampled a hair apart, so a user
+        # typing at that instant can yield a tiny negative delta.
+        return max(0.0, (current - last_input) / _FILETIME_TICKS_PER_S)
+    finally:
+        wtsapi.WTSFreeMemory(buf)
+
+
+def _resolve_input_idle_reader() -> tuple[Callable[[], float] | None, str]:
+    """Pick the input-idle source valid for *this* process, once, at probe.
+
+    Returns ``(reader, source_description)``; ``reader`` is None when no
+    trustworthy source exists, in which case ``system.input_idle_s`` is simply
+    not published. Deciding here (rather than per sample) keeps the hot path
+    branch-free and puts the chosen source in the probe metadata, so
+    ``atf status`` can show which one is live.
+    """
+    if sys.platform != "win32":
+        return None, "unavailable (not Windows)"
+
+    session_id = _process_session_id()
+
+    # Preferred everywhere: asks the terminal-services subsystem about the
+    # console session instead of assuming ours is it.
+    try:
+        _read_active_session_idle_seconds()
+        return (
+            _read_active_session_idle_seconds,
+            "WTSQuerySessionInformationW(WTSSessionInfoEx).LastInputTime",
+        )
+    except Exception as exc:  # any failure => fall through to the fallback
+        wts_error = repr(exc)
+
+    # Fallback only when we are *in* an interactive session, where
+    # GetLastInputInfo is scoped to input we can actually observe. Session 0
+    # is explicitly excluded: there the call succeeds and lies.
+    if session_id is not None and session_id != 0:
+        try:
+            _read_input_idle_seconds_windows()
+            return (
+                _read_input_idle_seconds_windows,
+                f"GetLastInputInfo (session {session_id}); WTS unavailable: {wts_error}",
+            )
+        except Exception as exc:
+            return None, f"unavailable (WTS: {wts_error}; GetLastInputInfo: {exc!r})"
+
+    return None, (
+        f"unavailable (session {session_id} is non-interactive and "
+        f"WTS failed: {wts_error})"
+    )
 
 
 def _read_commit_percent_windows() -> float:
@@ -276,6 +458,10 @@ class SystemCollector:
         # the counter category not registered), hard_fault_rate is simply
         # omitted -- never fails the whole collector. See probe().
         self._hard_fault_reader: Optional[_HardFaultRateReader] = None
+        # Resolved at probe(): which API can honestly answer "is a human at
+        # this machine?" from the session we happen to be running in. None
+        # means nothing can, and the signal is withheld rather than faked.
+        self._input_idle_reader: Callable[[], float] | None = None
 
     def probe(self) -> ProbeResult:
         try:
@@ -303,6 +489,10 @@ class SystemCollector:
                 except Exception as exc:  # noqa: BLE001
                     self._hard_fault_reader = None
                     meta["hard_fault_rate_source"] = f"unavailable ({exc!r})"
+                # Same best-effort contract as hard_fault_rate: losing the
+                # presence signal costs exactly that signal.
+                self._input_idle_reader, idle_source = _resolve_input_idle_reader()
+                meta["input_idle_source"] = idle_source
             else:
                 reason = "psutil OK; commit_percent approximated by swap_used_percent off-Windows"
                 meta = {"commit_charge_source": "swap_memory (fallback)"}
@@ -365,31 +555,32 @@ class SystemCollector:
                     unit="percent",
                 ),
             }
-            # Presence signal: seconds since the last keyboard/mouse input,
-            # system-wide. Windows-only (no cross-platform equivalent here);
-            # omitted off-Windows rather than faked, same policy as the
-            # commit-charge fallback being an explicit approximation rather
-            # than a silent one.
-            if self._on_windows:
+            # Presence signal: seconds since the last keyboard/mouse input in
+            # the interactive session. Windows-only (no cross-platform
+            # equivalent here); omitted off-Windows rather than faked, same
+            # policy as the commit-charge fallback being an explicit
+            # approximation rather than a silent one. Also omitted when probe()
+            # found no session whose input we can legitimately observe.
+            if self._input_idle_reader is not None:
                 try:
                     out["system.input_idle_s"] = Sample(
-                        value=_read_input_idle_seconds_windows(),
+                        value=self._input_idle_reader(),
                         taken_at_ns=now,
                         source_id=_NAME,
                         unit="count",
                     )
                 except Exception:
                     pass
-                if self._hard_fault_reader is not None:
-                    # None on the priming call (first tick after probe()) or
-                    # any transient PDH hiccup -- omit the sample rather than
-                    # emit a fabricated 0, which would look like "no thrash"
-                    # instead of "no reading".
-                    rate = self._hard_fault_reader.read()
-                    if rate is not None:
-                        out["system.hard_fault_rate"] = Sample(
-                            value=rate, taken_at_ns=now, source_id=_NAME, unit="count",
-                        )
+            if self._hard_fault_reader is not None:
+                # None on the priming call (first tick after probe()) or
+                # any transient PDH hiccup -- omit the sample rather than
+                # emit a fabricated 0, which would look like "no thrash"
+                # instead of "no reading".
+                rate = self._hard_fault_reader.read()
+                if rate is not None:
+                    out["system.hard_fault_rate"] = Sample(
+                        value=rate, taken_at_ns=now, source_id=_NAME, unit="count",
+                    )
             return out
         except Exception:
             self._consecutive_failures += 1

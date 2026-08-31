@@ -391,6 +391,22 @@ class ServiceState:
             engine = self._engine
             rules_active = len(engine.effective_rules) if engine else 0
             rules_disabled = len(engine.disabled_rules) if engine else 0
+            # Enabled but receiving nothing: counted separately from `disabled`
+            # because these rules were negotiated successfully at startup and
+            # only went dark later. A non-zero value here means the machine is
+            # less protected than `rules_active` implies.
+            rules_starved = len(engine.starved_rules) if engine else 0
+            # Enabled, receiving samples, and STILL unable to fire: the
+            # service loop runs slower than the rate min_samples was sized
+            # from, so the window can never hold enough. Distinct from
+            # starved (no samples at all) and from disabled (never
+            # negotiated). Surfaced because its absence is exactly what
+            # let a 90 C rule read as "armed" for an hour while inert.
+            rules_unable = (
+                len(engine.rules_unable_to_fire)
+                if engine is not None
+                and hasattr(engine, "rules_unable_to_fire") else 0
+            )
 
             # LHM supervisor view, when one is bound. Read OUTSIDE the
             # main lock would be cleaner but the supervisor's
@@ -448,6 +464,8 @@ class ServiceState:
                 "lhm_supervisor": lhm_supervisor_view,
                 "rules_active": rules_active,
                 "rules_disabled": rules_disabled,
+                "rules_starved": rules_starved,
+                "rules_unable_to_fire": rules_unable,
                 "last_action": (
                     {
                         "at": self._last_action_at,
@@ -834,6 +852,11 @@ def _serialize_rule(rule: EffectiveRule, stats: dict[str, Any], now_ns: int) -> 
         "latest_value": stats.get("last_value"),
         "triggers": stats.get("triggers", 0),
         "cooldown_remaining_s": cooldown_remaining_s,
+        # A starved rule is enabled and looks healthy in every other field --
+        # its verdict is just INSUFFICIENT forever. Surfacing it explicitly is
+        # what lets a UI say "not guarding" instead of showing a calm green tile
+        # for a rule whose sensor died.
+        "starved": rule.starved,
         "tuning": tuning,
     }
 

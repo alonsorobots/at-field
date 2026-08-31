@@ -1,7 +1,7 @@
 /*
  * Active Signals-tab category filter, persisted to localStorage.
  *
- * The Signals screen has an "All / GPU / CPU / Memory" tab bar above
+ * The Signals screen has an "All / Temp / GPU / CPU / Memory" tab bar above
  * the existing reorder/hide UI. The selection survives reloads via the
  * `atfield.signal_category` key. Unknown / malformed values fall back
  * to "all" -- never throws.
@@ -16,10 +16,13 @@ import type { SignalCategory } from "./format";
 /** "All" is the union of every other tab; we model it as its own value
     rather than `undefined` so the filter logic and tab UI can treat it
     uniformly. */
-export type ActiveCategory = "all" | SignalCategory;
+/** The tab strip also offers "temp", a cross-cutting view that is not a
+    `SignalCategory` (see `isTemperatureSignal`) -- hence the union rather
+    than reusing SignalCategory alone. */
+export type ActiveCategory = "all" | "temp" | SignalCategory;
 
 const KEY = "atfield.signal_category";
-const VALID: readonly ActiveCategory[] = ["all", "gpu", "cpu", "memory", "other"];
+const VALID: readonly ActiveCategory[] = ["all", "temp", "gpu", "cpu", "memory", "other"];
 
 export function loadActiveCategory(): ActiveCategory {
   if (typeof window === "undefined") return "all";

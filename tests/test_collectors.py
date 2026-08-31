@@ -496,3 +496,115 @@ class TestSystemCollectorHardFaultRate:
             assert closed["n"] == 1
         else:
             c.shutdown()  # off-Windows / PDH unavailable: must not raise
+
+
+# ---------------------------------------------------------------------------
+# SystemCollector: input_idle_s must never be fabricated
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="input_idle_s is Windows-only")
+class TestSystemCollectorInputIdle:
+    """``system.input_idle_s`` has to be right or absent, never plausible-but-wrong.
+
+    Regression for a shipped bug: the service runs in session 0, where
+    ``GetLastInputInfo`` succeeds but reports input for a session that receives
+    none. The signal therefore counted up from service start forever, so
+    presence detection concluded "nobody is at this machine" at all times and
+    the presence sentinel was never written -- while the user was sitting there
+    using the machine. A missing signal makes consumers abstain; a confidently
+    wrong one makes them act on a lie.
+    """
+
+    def test_session_zero_withholds_the_signal(self, monkeypatch):
+        from atfield.collectors import system as sysmod
+
+        # Session 0 with no usable WTS source: the only remaining API is the
+        # one that lies, so nothing must be published.
+        monkeypatch.setattr(sysmod, "_process_session_id", lambda: 0)
+        monkeypatch.setattr(
+            sysmod,
+            "_read_active_session_idle_seconds",
+            lambda: (_ for _ in ()).throw(OSError("no LastInputTime")),
+        )
+        c = SystemCollector()
+        result = c.probe()
+        assert result.available and c.health() is HealthState.HEALTHY
+        assert "unavailable" in result.metadata["input_idle_source"]
+        samples = c.sample()
+        assert "system.input_idle_s" not in samples
+        assert "system.ram_used_percent" in samples  # collector otherwise intact
+
+    def test_wts_source_preferred_when_it_works(self, monkeypatch):
+        from atfield.collectors import system as sysmod
+
+        monkeypatch.setattr(sysmod, "_process_session_id", lambda: 0)
+        monkeypatch.setattr(sysmod, "_read_active_session_idle_seconds", lambda: 42.5)
+        c = SystemCollector()
+        result = c.probe()
+        assert "WTS" in result.metadata["input_idle_source"]
+        samples = c.sample()
+        assert samples["system.input_idle_s"].value == 42.5
+
+    def test_interactive_session_falls_back_to_getlastinputinfo(self, monkeypatch):
+        from atfield.collectors import system as sysmod
+
+        monkeypatch.setattr(sysmod, "_process_session_id", lambda: 1)
+        monkeypatch.setattr(
+            sysmod,
+            "_read_active_session_idle_seconds",
+            lambda: (_ for _ in ()).throw(OSError("no LastInputTime")),
+        )
+        c = SystemCollector()
+        result = c.probe()
+        assert "GetLastInputInfo" in result.metadata["input_idle_source"]
+        samples = c.sample()
+        assert samples["system.input_idle_s"].value >= 0.0
+
+    def test_wts_struct_layout_matches_win32_abi(self):
+        """The LARGE_INTEGERs sit after three WCHAR arrays, so a wrong array
+        size silently shifts LastInputTime and yields garbage idle values."""
+        import ctypes
+
+        from atfield.collectors import system as sysmod
+
+        assert ctypes.sizeof(sysmod._WTSINFOEX_LEVEL1_W) == 224
+        assert ctypes.sizeof(sysmod._WTSINFOEX_W) == 232
+        assert sysmod._WTSINFOEX_LEVEL1_W.LastInputTime.offset == 184
+        assert sysmod._WTSINFOEX_W.Data.offset == 8
+
+    def test_zero_lastinputtime_is_rejected_not_treated_as_1601(self, monkeypatch):
+        """WTS reports 0 for sessions with no recorded input (every local
+        console session on a box without Terminal Services running). Read as a
+        FILETIME that is the year 1601, i.e. ~13 million hours idle."""
+        import ctypes
+
+        from atfield.collectors import system as sysmod
+
+        info = sysmod._WTSINFOEX_W()
+        info.Level = 1
+        info.Data.LastInputTime = 0
+        info.Data.CurrentTime = 134309124973346605
+
+        class _FakeWtsApi:
+            @staticmethod
+            def WTSQuerySessionInformationW(_server, _sid, _cls, ppbuf, pbytes):
+                ppbuf._obj.value = ctypes.addressof(info)
+                pbytes._obj.value = ctypes.sizeof(info)
+                return 1
+
+            @staticmethod
+            def WTSFreeMemory(_p):
+                return None
+
+        monkeypatch.setattr(
+            sysmod.ctypes, "windll", type("W", (), {
+                "wtsapi32": _FakeWtsApi,
+                "kernel32": type("K", (), {
+                    "WTSGetActiveConsoleSessionId": staticmethod(lambda: 1),
+                    "GetLastError": staticmethod(lambda: 0),
+                }),
+            })
+        )
+        with pytest.raises(OSError, match="no LastInputTime"):
+            sysmod._read_active_session_idle_seconds()

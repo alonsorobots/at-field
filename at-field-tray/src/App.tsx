@@ -16,8 +16,8 @@ import { getPollIntervalMs } from "./lib/preferences";
 
 const TABS = [
   { id: "signals", label: "Signals" },
-  { id: "rules", label: "Rules" },
   { id: "events", label: "Events" },
+  { id: "rules", label: "Rules" },
   { id: "status", label: "Status" },
   { id: "prefs", label: "Prefs" },
 ] as const;

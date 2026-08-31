@@ -64,6 +64,7 @@ export default function Sparkline({
   const uid = useId().replace(/:/g, "");
   const gradientId = `sparkline-grad-${uid}`;
   const bloomId = `sparkline-bloom-${uid}`;
+  const breachClipId = `sparkline-breach-${uid}`;
 
   // Normalize input to Point[] internally.
   const points: Point[] =
@@ -220,6 +221,16 @@ export default function Sparkline({
               stroke color (gradient included) so the halo is automatically
               theme-aware. stdDeviation tuned small (1.6) so the line itself
               still reads sharply at 1.1px stroke width. */}
+          {/* Everything ABOVE the trigger line. Re-drawing the area and the
+              curve through this clip is what paints a breach red: the area
+              polygon runs from the curve down to the baseline, so clipping it
+              to this band leaves exactly the region BETWEEN the curve and the
+              dotted line, and only where the signal actually exceeded it. No
+              per-segment geometry, no interpolating crossing points -- the
+              clip does it, so it stays correct for any shape of curve. */}
+          <clipPath id={breachClipId}>
+            <rect x={0} y={0} width={width} height={Math.max(0, thresholdY ?? 0)} />
+          </clipPath>
           <filter id={bloomId} x="-15%" y="-15%" width="130%" height="130%">
             <feGaussianBlur in="SourceGraphic" stdDeviation="1.6" result="blur" />
             <feMerge>
@@ -237,6 +248,21 @@ export default function Sparkline({
           fillOpacity={0.16}
           stroke="none"
         />
+        {/* Breach fill: the area between the curve and the trigger line,
+            wherever the signal is over it. Deliberately much stronger than
+            the 0.16 base fill -- the whole point is that a breach is visible
+            at a glance from across the room, without reading an axis. Only
+            drawn when the line is at its true position; when it is parked at
+            the top of the frame it is not a real comparison to shade. */}
+        {thresholdY != null && !thresholdParked && (
+          <polygon
+            points={areaPoints}
+            fill={thresholdColor}
+            fillOpacity={0.38}
+            stroke="none"
+            clipPath={`url(#${breachClipId})`}
+          />
+        )}
         {thresholdY != null && (
           <line
             x1={0}
@@ -258,6 +284,21 @@ export default function Sparkline({
           strokeLinecap="round"
           filter={`url(#${bloomId})`}
         />
+        {/* The same curve again, red, clipped to the over-threshold band, so
+            the breaching SEGMENTS change colour rather than the whole line.
+            Slightly heavier than the base stroke so it reads through the
+            bloom halo underneath it. */}
+        {thresholdY != null && !thresholdParked && (
+          <polyline
+            points={polyPoints}
+            fill="none"
+            stroke={thresholdColor}
+            strokeWidth={1.6}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            clipPath={`url(#${breachClipId})`}
+          />
+        )}
         {hoverX != null && (
           <>
             <line

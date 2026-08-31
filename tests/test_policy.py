@@ -223,6 +223,138 @@ class TestPolicyEngineEndToEnd:
 
 
 # ---------------------------------------------------------------------------
+# Signal starvation (fail-loud)
+# ---------------------------------------------------------------------------
+
+
+class TestSignalStarvation:
+    """A rule whose signal dies must announce it.
+
+    Regression for a real incident: the LibreHardwareMonitor sensor helper
+    crashed inside nvml.dll and every temperature rule -- GPU core, VRAM
+    junction, CPU package -- silently stopped receiving samples. The watchdog
+    kept ticking, the rules kept evaluating to INSUFFICIENT, and nothing was
+    logged or recorded for the three minutes that followed. The machine was
+    completely unguarded and looked entirely healthy.
+    """
+
+    SIGNAL = "system.ram_used_percent"
+
+    def _make(self, **kwargs) -> PolicyEngine:
+        cfg = _cfg_with_rule(threshold=80, window_s=10, min_fraction_over=0.5)
+        return PolicyEngine(cfg, available_signals={self.SIGNAL}, **kwargs)
+
+    def _sample(self, t: int, value: float = 50.0) -> dict[str, Sample]:
+        return {self.SIGNAL: Sample(value, t * NS, "test", "percent")}
+
+    def test_healthy_stream_never_reports_starvation(self):
+        eng = self._make(starvation_after_s=10.0)
+        for t in range(60):
+            eng.tick(self._sample(t), now_ns=t * NS)
+        assert eng.drain_signal_health_changes() == []
+        assert eng.starved_rules == ()
+
+    def test_signal_loss_emits_starved_change(self):
+        eng = self._make(starvation_after_s=10.0)
+        for t in range(5):
+            eng.tick(self._sample(t), now_ns=t * NS)
+        eng.drain_signal_health_changes()  # nothing yet, but keep the queue clean
+
+        # Last sample was t=4. Silence must be tolerated up to the grace period
+        # and reported exactly once thereafter.
+        for t in range(5, 14):
+            eng.tick({}, now_ns=t * NS)
+            assert eng.drain_signal_health_changes() == [], f"premature alarm at t={t}"
+
+        eng.tick({}, now_ns=14 * NS)  # 10s since t=4
+        changes = eng.drain_signal_health_changes()
+        assert len(changes) == 1
+        c = changes[0]
+        assert c.state == "starved"
+        assert c.signal == self.SIGNAL
+        assert c.action == "kill"  # the stakes: this kill rule cannot fire
+        assert c.ever_seen is True
+        assert c.silent_for_s == pytest.approx(10.0)
+
+    def test_starvation_is_edge_triggered_not_per_tick(self):
+        """A 1 Hz alarm stream would bury the audit log it is meant to serve."""
+        eng = self._make(starvation_after_s=10.0)
+        eng.tick(self._sample(0), now_ns=0)
+        for t in range(1, 120):
+            eng.tick({}, now_ns=t * NS)
+        changes = eng.drain_signal_health_changes()
+        assert len(changes) == 1
+        assert changes[0].state == "starved"
+
+    def test_recovery_emits_change_and_clears_state(self):
+        eng = self._make(starvation_after_s=10.0)
+        eng.tick(self._sample(0), now_ns=0)
+        for t in range(1, 30):
+            eng.tick({}, now_ns=t * NS)
+        assert len(eng.starved_rules) == 1
+        eng.drain_signal_health_changes()
+
+        eng.tick(self._sample(30), now_ns=30 * NS)
+        changes = eng.drain_signal_health_changes()
+        assert len(changes) == 1
+        assert changes[0].state == "recovered"
+        assert changes[0].silent_for_s == pytest.approx(30.0)
+        assert eng.starved_rules == ()
+
+    def test_signal_that_never_arrives_is_still_reported(self):
+        """A collector can advertise a signal at probe and never produce it.
+
+        That rule is dead on arrival, so 'never seen' must alarm too -- and be
+        distinguishable from a signal that worked and then stopped.
+        """
+        eng = self._make(starvation_after_s=10.0)
+        for t in range(20):
+            eng.tick({}, now_ns=t * NS)
+        changes = eng.drain_signal_health_changes()
+        assert len(changes) == 1
+        assert changes[0].state == "starved"
+        assert changes[0].ever_seen is False
+
+    def test_drain_is_destructive(self):
+        eng = self._make(starvation_after_s=10.0)
+        eng.tick(self._sample(0), now_ns=0)
+        for t in range(1, 30):
+            eng.tick({}, now_ns=t * NS)
+        assert len(eng.drain_signal_health_changes()) == 1
+        assert eng.drain_signal_health_changes() == []
+
+    def test_grace_period_has_a_floor_relative_to_tick_rate(self):
+        """A caller asking for an absurdly short grace still can't self-flap."""
+        eng = self._make(starvation_after_s=0.0)
+        eng.tick(self._sample(0), now_ns=0)
+        # tick_hz=1 => floor of 5s, so a single missed tick stays quiet.
+        eng.tick({}, now_ns=1 * NS)
+        assert eng.drain_signal_health_changes() == []
+
+    def test_each_expanded_rule_reports_independently(self):
+        cfg = _cfg_with_rule(signal="gpu.*.core_temp_c", window_s=10)
+        eng = PolicyEngine(
+            cfg,
+            available_signals={"gpu.0.core_temp_c", "gpu.1.core_temp_c"},
+            starvation_after_s=10.0,
+        )
+        both = {
+            "gpu.0.core_temp_c": Sample(40.0, 0, "test", "celsius"),
+            "gpu.1.core_temp_c": Sample(40.0, 0, "test", "celsius"),
+        }
+        eng.tick(both, now_ns=0)
+        # Only GPU 1 keeps reporting; GPU 0's sensor dies.
+        for t in range(1, 30):
+            eng.tick(
+                {"gpu.1.core_temp_c": Sample(40.0, t * NS, "test", "celsius")},
+                now_ns=t * NS,
+            )
+        changes = eng.drain_signal_health_changes()
+        assert [c.signal for c in changes] == ["gpu.0.core_temp_c"]
+        assert [r.signal for r in eng.starved_rules] == ["gpu.0.core_temp_c"]
+
+
+# ---------------------------------------------------------------------------
 # Action shape + audit-friendly fields
 # ---------------------------------------------------------------------------
 
