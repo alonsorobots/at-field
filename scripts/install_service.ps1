@@ -246,8 +246,22 @@ Write-Host "NSSM:      $nssm"
 # with -ErrorAction SilentlyContinue is the side-effect-free way to ask.
 if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
     Write-Host "Service $ServiceName already exists -- stopping + removing for clean reinstall."
-    & $nssm stop $ServiceName confirm 2>$null | Out-Null
-    & $nssm remove $ServiceName confirm | Out-Null
+    # Save/restore ErrorActionPreference around the nssm calls. Neither
+    # `2>$null` nor $PSNativeCommandUseErrorActionPreference is enough: under
+    # 'Stop', PowerShell raises NativeCommandError from the CONTENT of a native
+    # command's stderr before the redirection applies. `nssm stop` writes
+    # "The service has not been started." when it is already stopped -- a
+    # NO-OP -- and that string alone aborted the install AFTER the stop and
+    # BEFORE the remove+re-register, leaving the machine with no watchdog
+    # (2026-09-01, twice). Only lowering the preference stops it.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        & $nssm stop $ServiceName confirm *>$null
+        & $nssm remove $ServiceName confirm *>$null
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
 }
 
 Write-Host "Registering service '$ServiceName' ..."
