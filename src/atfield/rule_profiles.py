@@ -75,6 +75,16 @@ RULE_PROFILES: Final[dict[str, RuleProfile]] = {
         min=80.0, aggressive_max=88.0, relaxed_min=98.0, max=110.0,
         aggressive_value=85.0, normal_value=92.0, relaxed_value=100.0,
     ),
+    # The hot spot is the die's hottest point, not the memory: it sits
+    # 10-25 C above the core by construction, so every band here is shifted
+    # up against vram-junction-hot. 85-95 C is ORDINARY under sustained
+    # load, which is why even the aggressive tier stays above it -- an
+    # aggressive setting should kill early, not kill constantly.
+    "gpu-hotspot-hot": RuleProfile(
+        name="gpu-hotspot-hot", unit="°C",
+        min=90.0, aggressive_max=98.0, relaxed_min=104.0, max=115.0,
+        aggressive_value=96.0, normal_value=100.0, relaxed_value=105.0,
+    ),
     # Tier bands rationale (CUDA OOM is a sharp cliff, not a slope):
     # * Aggressive 85% — kills early; useful for power users who run
     #   several training runs in parallel and want headroom for any

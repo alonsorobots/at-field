@@ -66,7 +66,11 @@ class TestTheLhmIndexIsAKnownHazard:
 
         from atfield.collectors import lhmlib
         src = inspect.getsource(lhmlib)
-        assert "gpu.{gpu_idx}.mem_junction_temp_c" in src.replace("f\"", "\"")
-        assert re.search(r"gpu_idx \+= 1", src), (
+        assert "gpu.{idx}.mem_junction_temp_c" in src.replace("f\"", "\"")
+        # The counter moved into _resolve_gpu_temps when hot spot and memory
+        # junction became separate signals, but it is still a position in
+        # sensor-enumeration order -- not anything derived from the device
+        # identifier, and so still not guaranteed to agree with NVML's.
+        assert re.search(r"for idx, hw in enumerate\(order\)", src), (
             "expected the enumeration-order counter this guard exists for"
         )

@@ -298,6 +298,15 @@ def _default_rules() -> tuple[RuleConfig, ...]:
       30s avoids fighting the per-step jitter of large model
       training. NVML's ``vram_used_percent`` is the same number
       ``nvidia-smi --query-gpu=memory.used`` reports.
+    * ``gpu-hotspot-hot`` 100°C — the hot spot is the hottest point of
+      the DIE, not the memory, and it runs 10-25°C above the core by
+      construction. 85-95°C is ordinary under sustained load and the
+      driver throttles near 110°C, so a guard belongs at 100°C. It is a
+      separate rule from ``vram-junction-hot`` because it is a separate
+      quantity: a pair of RTX 2070 SUPERs (Turing, no memory sensor at
+      all) had their hot spot published as ``mem_junction_temp_c`` and
+      judged at 90°C, which killed work 63 times in three hours while
+      ``gpu-core-hot`` fired twice. See ``collectors.lhm.synthetic_junction``.
     * ``gpu-core-hot`` 83°C — the rated junction-temp limit for
       Ada/Blackwell silicon is 90°C; we kill at 83°C to leave headroom
       for ambient swings + PSU sag amplifying load temps.
@@ -313,6 +322,14 @@ def _default_rules() -> tuple[RuleConfig, ...]:
             name="vram-junction-hot",
             signal="gpu.*.mem_junction_temp_c",
             threshold=90.0,
+            window_s=20,
+            min_fraction_over=0.67,
+            action="kill",
+        ),
+        RuleConfig(
+            name="gpu-hotspot-hot",
+            signal="gpu.*.hotspot_temp_c",
+            threshold=100.0,
             window_s=20,
             min_fraction_over=0.67,
             action="kill",

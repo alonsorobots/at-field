@@ -41,14 +41,18 @@ class TestDefaults:
         assert cfg.kill.grace_seconds == 5
         assert cfg.kill.post_kill_cooldown_seconds == 60
 
-    def test_default_rules_are_the_six_locked_in(self):
+    def test_default_rules_are_the_seven_locked_in(self):
         # vram-pressure was added in v0.3 to catch the #1 training crash
-        # cause (CUDA OOM). See _default_rules() docstring for the
-        # threshold rationale.
+        # cause (CUDA OOM). gpu-hotspot-hot was added when the hot spot
+        # stopped being published as a memory-junction reading -- the die's
+        # hottest point is a different quantity with a different limit, and
+        # it needs its own guard rather than borrowing the VRAM one. See
+        # _default_rules() docstring for the threshold rationale.
         cfg = default_config()
         names = {r.name for r in cfg.rules}
         assert names == {
             "vram-junction-hot",
+            "gpu-hotspot-hot",
             "vram-pressure",
             "gpu-core-hot",
             "ram-pressure",

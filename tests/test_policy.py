@@ -401,7 +401,9 @@ class TestDefaultConfigIntegration:
         eng = PolicyEngine(cfg, available_signals=avail)
         eff_names = {r.name for r in eng.effective_rules}
         dis_names = {d.base_rule_name for d in eng.disabled_rules}
-        assert dis_names == {"vram-junction-hot", "cpu-pkg-hot"}
+        # gpu-hotspot-hot joins the disabled set for the same reason as
+        # vram-junction-hot: both come from LHM, which is not running here.
+        assert dis_names == {"vram-junction-hot", "gpu-hotspot-hot", "cpu-pkg-hot"}
         assert "gpu-core-hot[gpu.0.core_temp_c]" in eff_names
         assert "gpu-core-hot[gpu.1.core_temp_c]" in eff_names
         assert "ram-pressure" in eff_names

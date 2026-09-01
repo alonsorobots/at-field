@@ -57,8 +57,44 @@ _DEFAULT_TIMEOUT_S: Final = 1.5
 _VRAM_JUNCTION_PATTERNS: Final = (
     re.compile(r"gpu memory junction", re.IGNORECASE),
     re.compile(r"memory junction temperature", re.IGNORECASE),
-    re.compile(r"gpu hot ?spot", re.IGNORECASE),  # last resort: hot-spot is close
 )
+# Hot spot is the hottest point of the DIE, not the memory. It is a different
+# quantity with a different limit (normal 85-95 C under load, throttle ~110 C)
+# and it gets its own signal name. This used to be the last entry of
+# _VRAM_JUNCTION_PATTERNS, commented "hot-spot is close" -- it is not close
+# enough. See _synthetic_junction() for what that cost.
+_HOTSPOT_PATTERNS: Final = (
+    re.compile(r"gpu hot ?spot", re.IGNORECASE),
+)
+def synthetic_junction(junction_c: float | None, hotspot_c: float | None) -> bool:
+    """Is this device's "memory junction" really just its hot spot?
+
+    WHY THIS EXISTS. A memory-junction sensor is physically present only on
+    GDDR6X and later (RTX 30-series onward); Turing GDDR6 has none. LHM still
+    publishes a "GPU Memory Junction" entry for those cards, copied verbatim
+    from the die hot spot. We then judged it against a VRAM threshold of 90 C
+    -- a number that sits INSIDE the hot spot's normal loaded range of 85-95 C.
+    On a pair of RTX 2070 SUPERs that fired 63 kills in three hours while the
+    cores never exceeded 83 C, and the host was written off as thermally
+    incapable when nothing was wrong with it.
+
+    The discriminator is that the two readings are bit-identical, because they
+    are one sensor read twice (measured: core 64.0, hot spot 77.188, "memory
+    junction" 77.188). A card with a real memory sensor reports a value that
+    moves independently of the die -- on an RTX 5090 the core->junction delta
+    swung from +1.3 to +12.8 C across two GPUs in a single sample, and no hot
+    spot sensor is exposed at all.
+
+    Deliberately NOT done with NVML: ``nvidia-smi --query-gpu=temperature.memory``
+    returns N/A on the RTX 5090 too, even though its memory sensor is real and
+    LHM reads it over NVAPI. Using NVML as the existence test would have
+    discarded the one guard that works.
+    """
+    if junction_c is None or hotspot_c is None:
+        return False
+    return junction_c == hotspot_c
+
+
 _CPU_PACKAGE_PATTERNS: Final = (
     re.compile(r"cpu package", re.IGNORECASE),
     re.compile(r"package temperature", re.IGNORECASE),

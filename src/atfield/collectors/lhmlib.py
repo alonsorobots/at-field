@@ -40,8 +40,10 @@ from typing import Any, Final
 from atfield.collectors import HealthState, ProbeResult
 from atfield.collectors.lhm import (
     _CPU_PACKAGE_PATTERNS,
+    _HOTSPOT_PATTERNS,
     _RAIL_VOLTAGE_PATTERNS,
     _VRAM_JUNCTION_PATTERNS,
+    synthetic_junction,
 )
 from atfield.signals import Sample, monotonic_ns
 
@@ -303,11 +305,13 @@ class LhmLibCollector:
         name patterns as the legacy HTTP collector, but keyed on the
         authoritative ``hwType`` the library reports."""
         mapping: dict[str, tuple[str, str]] = {}
-        gpu_idx = 0
         cpu_idx = 0
-        matched_gpu_hw: set[str] = set()
         matched_cpu_hw: set[str] = set()
         emitted_voltage: set[str] = set()
+        # GPU temps need a whole-list view before we can name them, because
+        # deciding whether a "memory junction" is real means comparing it with
+        # the same device's hot spot. Resolve them up front.
+        gpu_temp_metric = self._resolve_gpu_temps(sensors)
 
         for s in sensors:
             sid = s.get("id")
@@ -325,14 +329,8 @@ class LhmLibCollector:
                 value = self._usable_value(s, "celsius")
                 if value is None:
                     continue
-                if (
-                    hw_type in _GPU_HW_TYPES
-                    and hw not in matched_gpu_hw
-                    and any(p.search(name) for p in _VRAM_JUNCTION_PATTERNS)
-                ):
-                    mapping[sid] = (f"gpu.{gpu_idx}.mem_junction_temp_c", "celsius")
-                    matched_gpu_hw.add(hw)
-                    gpu_idx += 1
+                if hw_type in _GPU_HW_TYPES and sid in gpu_temp_metric:
+                    mapping[sid] = (gpu_temp_metric[sid], "celsius")
                     continue
                 if (
                     hw_type == "Cpu"
@@ -362,6 +360,67 @@ class LhmLibCollector:
                         break
 
         return mapping
+
+    def _resolve_gpu_temps(self, sensors: list[dict[str, Any]]) -> dict[str, str]:
+        """Decide what each GPU temperature sensor is actually MEASURING.
+
+        Returns sensor-id -> metric suffix. Two metrics come out of here:
+        ``mem_junction_temp_c`` (the memory dies) and ``hotspot_temp_c`` (the
+        hottest point of the GPU die). They used to be one signal, because
+        the name patterns accepted a hot spot as a stand-in for a junction.
+        They are different quantities with different limits, and conflating
+        them silently disarmed nothing -- it ARMED a kill rule at 90 C on a
+        sensor whose normal loaded range is 85-95 C.
+
+        Devices keep their previous index assignment: indices are handed out
+        in sensor-list order to each device that exposes either temperature,
+        which is what the old code did for junction-only devices.
+        """
+        per_hw: dict[str, dict[str, tuple[str, float]]] = {}
+        order: list[str] = []
+        for s in sensors:
+            sid = s.get("id")
+            if not sid or s.get("type") != "Temperature":
+                continue
+            if s.get("hwType", "") not in _GPU_HW_TYPES:
+                continue
+            value = self._usable_value(s, "celsius")
+            if value is None:
+                continue
+            name = s.get("name", "")
+            if any(p.search(name) for p in _VRAM_JUNCTION_PATTERNS):
+                kind = "junction"
+            elif any(p.search(name) for p in _HOTSPOT_PATTERNS):
+                kind = "hotspot"
+            else:
+                continue
+            hw = s.get("hwId") or _hw_prefix(sid)
+            if hw not in per_hw:
+                per_hw[hw] = {}
+                order.append(hw)
+            per_hw[hw].setdefault(kind, (sid, value))
+
+        out: dict[str, str] = {}
+        for idx, hw in enumerate(order):
+            found = per_hw[hw]
+            junction = found.get("junction")
+            hotspot = found.get("hotspot")
+            if junction and hotspot and synthetic_junction(junction[1], hotspot[1]):
+                # One physical sensor wearing two names. Publish it once, as
+                # what it is; the junction signal must NOT appear, or a rule
+                # written for VRAM would bind to a die reading.
+                _log.info(
+                    "gpu.%d: '%s' duplicates the hot spot exactly (%.3f C) -- "
+                    "this device has no memory-junction sensor; reporting hot "
+                    "spot only",
+                    idx, junction[0], junction[1],
+                )
+                junction = None
+            if junction:
+                out[junction[0]] = f"gpu.{idx}.mem_junction_temp_c"
+            if hotspot:
+                out[hotspot[0]] = f"gpu.{idx}.hotspot_temp_c"
+        return out
 
     @staticmethod
     def _usable_value(sensor: dict[str, Any], unit: str) -> float | None:
