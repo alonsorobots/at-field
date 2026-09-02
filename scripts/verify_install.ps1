@@ -19,6 +19,16 @@
       5. no gpu.N.mem_junction_temp_c on a card that has no such sensor --
          the phantom-sensor bug, which fabricated a junction reading from a hot
          spot and cost aurora 63 spurious kills
+      6. EVERY live thermal signal has a rule watching it
+
+    CHECK 6 IS THE ONE THIS SCRIPT WAS MISSING, and its absence bit immediately.
+    Deploying the phantom-sensor fix RENAMED aurora's signal from
+    gpu.N.mem_junction_temp_c to gpu.N.hotspot_temp_c. Aurora's config.toml in
+    ProgramData predates the gpu-hotspot-hot rule and overrides the code
+    defaults, so after a deploy that passed every other check the machine had:
+    the phantom rule correctly disabled, and NOTHING watching the real hot spot.
+    Idle, that is invisible; under load the hot spot runs 85-95 C unguarded.
+    Signals existing is not the same as signals being watched.
 
     Exit code is non-zero when any of those fail, so a deploy script can gate on
     it instead of hoping.
@@ -30,6 +40,7 @@
 #>
 param(
     [string]$Url         = 'http://127.0.0.1:8765/signals',
+    [string]$RulesUrl    = 'http://127.0.0.1:8765/rules',
     [string]$ServiceName = 'ATFieldWatchdog',
     [int]$MinThermal     = 3,
     [int[]]$ExpectNoJunctionGpus = @(),
@@ -73,6 +84,33 @@ if (-not $body) {
                       "the phantom-sensor bug is PRESENT (fix 04fda0d missing)")
         } else {
             "gpu.$g junction    : correctly absent"
+        }
+    }
+}
+
+# --- 6. every live thermal signal must be WATCHED -------------------------
+if ($body) {
+    try {
+        $rules = (Invoke-WebRequest -Uri $RulesUrl -TimeoutSec 10 -UseBasicParsing).Content | ConvertFrom-Json
+    } catch { $rules = $null }
+    if (-not $rules) {
+        $fail += "could not read $RulesUrl -- cannot prove the signals are watched"
+    } else {
+        $watched = @($rules.effective | ForEach-Object { $_.signal })
+        $latest2 = ($body | ConvertFrom-Json).latest
+        $thermal = @($latest2.PSObject.Properties.Name | Where-Object { $_ -like '*temp*' })
+        $unwatched = @($thermal | Where-Object { $watched -notcontains $_ })
+        ""
+        "rules watching     : $($watched.Count)"
+        if ($unwatched.Count) {
+            foreach ($u in $unwatched) {
+                $fail += "thermal signal '$u' has NO rule watching it -- it is published and unguarded"
+            }
+        } else {
+            "thermal coverage   : every thermal signal has a rule"
+        }
+        foreach ($d in @($rules.disabled)) {
+            "disabled rule      : $($d.rule) -- $($d.reason)"
         }
     }
 }
