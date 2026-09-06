@@ -84,6 +84,10 @@ def _percentile(sorted_values: list[float], pct: float) -> float:
     frac = idx - lo
     return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * frac
 
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
 __all__ = [
     "DEFAULT_API_HOST",
     "DEFAULT_API_PORT",
@@ -561,26 +565,74 @@ class ServiceState:
             ]
             return {"effective": effective, "disabled": disabled}
 
+    def _window_mean(self, signal: str, window_s: float, now: float,
+                     fallback: float) -> float:
+        """Mean of `signal` over the RULE's own window; `fallback` if no history.
+
+        Called with the lock held. Uses the same tier0 history
+        `snapshot_headroom_detail` reads, so the two endpoints describe the
+        same samples -- if they drifted apart, a dashboard would show two
+        different numbers for one machine, which is the confusion this whole
+        change exists to end.
+        """
+        hist = self._history.get(signal)
+        if hist is None:
+            return fallback
+        vals = [v for (ts, v) in hist.tier0.samples if ts >= now - window_s]
+        return _mean(vals) if vals else fallback
+
     def snapshot_headroom(self) -> dict[str, Any]:
         """Collapse every kill-action rule to one number: distance to the
         nearest danger line, in [0, 1] (0 = at the kill threshold, 1 = idle).
 
         Generic and job-agnostic on purpose -- this says nothing about what's
         consuming the resource, only "how close is THIS MACHINE to AT-Field
-        taking protective action." Any local process (Kiroshi's runner or
-        otherwise) can poll this to self-throttle before AT-Field has to.
+        taking protective action."
 
-        All current rules are upper-bound (``value > threshold`` fires), so
-        headroom = ``(threshold - latest_value) / threshold``, clamped to
-        [0, 1]. Rules with no reading yet (``latest_value is None``) or a
-        non-``kill`` action are excluded -- headroom is specifically "distance
-        to being killed," not "distance to any rule firing."
+        CLASS-AWARE, and it has to be. One formula for every rule was wrong for
+        temperatures in a way that mattered:
+
+          reservoir (percent-of-capacity) -- ``(threshold - mean) / threshold``.
+            Correct: 0% is a real zero, so the ratio means something.
+
+          thermal (degrees C) -- ``(threshold - mean) / thermal_band_c``, where
+            the band is AUTHORED PER RULE (config.RuleConfig.thermal_band_c).
+            Dividing by the threshold treats 0 C as "idle", which is not a
+            physical zero for anything. Measured consequence on the shipped
+            ``cpu-pkg-hot`` rule (wall 90 C) with a consumer that grows above
+            0.35 and cuts below 0.15:
+
+                temp   (90-T)/90   verdict      (90-T)/25   verdict
+                70 C     0.222      hold          0.800      grow
+                80 C     0.111      CUT           0.400      grow
+                84 C     0.067      CUT           0.240      hold
+
+            A loaded 32-core box runs 75-85 C, so under the old formula every
+            temperature it ever reached was "hold" or "cut" -- it could shrink
+            but never grow back. A one-way ratchet, invisible because each
+            individual decision looked locally reasonable.
+
+        MEAN OVER THE RULE'S OWN WINDOW, not ``last_value``. The kill this
+        number predicts is sustained (``min_fraction_over`` of ``window_s``
+        above the threshold), so a proxy driven by one instantaneous sample is
+        twitchier than the thing it is a proxy FOR: a lone 95 C tick inside an
+        80 C window used to read 0.0 and trigger a back-off for a kill that
+        would never have fired.
+
+        Still DESCRIPTION, not policy (see :meth:`snapshot_headroom_detail`):
+        no reservation coefficient, no AIMD, no hysteresis. The band is an
+        authored property of the hardware, like the threshold beside it.
+
+        Rules with no reading yet or a non-``kill`` action are excluded --
+        headroom is specifically "distance to being killed," not "distance to
+        any rule firing."
         """
         with self._lock:
             engine = self._engine
             if engine is None:
                 return {"min_headroom": None, "binding_rule": None, "per_rule": {}}
             stats = engine.stats_snapshot()
+            now = time.time()
             per_rule: dict[str, float] = {}
             for rule in engine.effective_rules:
                 if rule.base_rule.action != "kill":
@@ -589,7 +641,16 @@ class ServiceState:
                 threshold = rule.base_rule.threshold
                 if latest is None or not threshold:
                     continue
-                headroom = (threshold - latest) / threshold
+                # Mean over the rule's OWN window, so the proxy has the same
+                # time constant as the kill it predicts. Falls back to the
+                # latest reading when no history exists yet.
+                value = self._window_mean(
+                    rule.signal, rule.base_rule.window_s, now, latest)
+                if classify_signal(rule.signal) == "thermal":
+                    band = getattr(rule.base_rule, "thermal_band_c", 25.0) or 25.0
+                    headroom = (threshold - value) / band
+                else:
+                    headroom = (threshold - value) / threshold
                 per_rule[rule.name] = max(0.0, min(1.0, headroom))
             if not per_rule:
                 return {"min_headroom": None, "binding_rule": None, "per_rule": {}}
@@ -637,6 +698,7 @@ class ServiceState:
         with self._lock:
             now = time.time()
             thresholds: dict[str, tuple[float, str]] = {}
+            bands: dict[str, float] = {}
             engine = self._engine
             if engine is not None:
                 for rule in engine.effective_rules:
@@ -646,6 +708,9 @@ class ServiceState:
                     if not threshold:
                         continue
                     thresholds[rule.signal] = (threshold, rule.name)
+                    if classify_signal(rule.signal) == "thermal":
+                        bands[rule.signal] = float(
+                            getattr(rule.base_rule, "thermal_band_c", 25.0) or 25.0)
 
             per_signal: dict[str, Any] = {}
             for sig, (ts, value, _source, unit) in self._latest_signal.items():
@@ -682,6 +747,12 @@ class ServiceState:
                     "threshold": threshold,
                     "comparator": "upper" if threshold is not None else None,
                     "rule": rule_name,
+                    # AUTHORED, per rule -- how many degrees below the wall a
+                    # consumer should start holding. Reported so the consumer
+                    # reads the operator's number instead of inventing one
+                    # (PHASE3.5 10a: no second set of limits downstream).
+                    # None for non-thermal signals and for signals with no rule.
+                    "thermal_band_c": bands.get(sig),
                 }
             return {"per_signal": per_signal, "ts": now}
 

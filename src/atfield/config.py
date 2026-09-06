@@ -241,6 +241,19 @@ class RuleConfig:
     # Per-rule override; resolved against KillConfig.post_kill_cooldown_seconds
     # via :meth:`AtFieldConfig.cooldown_for`.
     cooldown_s: int | None = None
+    # THERMAL ONLY: how many degrees below `threshold` a consumer should start
+    # backing off. A property of THIS HARDWARE -- a box that heats 10 C/s needs
+    # more runway than one at 1 C/s -- so it is authored by the same human who
+    # authors the wall, and it lives here rather than being invented downstream.
+    #
+    # Kiroshi used to carry its own THERMAL_HEADROOM_BAND_C = 25.0, which is
+    # exactly the "second set of limits inside the consumer" that PHASE3.5 10a
+    # forbids. Reported as a fact in /headroom/detail so the consumer can read
+    # it instead of guessing.
+    #
+    # Ignored for non-thermal rules: a reservoir (percent-of-capacity) has a
+    # real zero, so distance-to-wall is already a meaningful fraction.
+    thermal_band_c: float = 25.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -691,6 +704,7 @@ def _parse_rules(raw: Any, base_rules: tuple[RuleConfig, ...], source: str) -> t
         "min_fraction_over",
         "action",
         "cooldown_s",
+        "thermal_band_c",
     }
     required_keys = {"name", "signal", "threshold", "window_s", "min_fraction_over", "action"}
 
@@ -731,6 +745,17 @@ def _parse_rules(raw: Any, base_rules: tuple[RuleConfig, ...], source: str) -> t
         if "cooldown_s" in entry:
             cooldown_s = _as_int(entry["cooldown_s"], f"{where}.cooldown_s", source, minimum=0)
 
+        # Optional, thermal-only. Must be positive: it is a divisor.
+        thermal_band_c = 25.0
+        if "thermal_band_c" in entry:
+            thermal_band_c = _as_number(
+                entry["thermal_band_c"], f"{where}.thermal_band_c", source)
+            if thermal_band_c <= 0.0:
+                raise ConfigError(
+                    f"{source}: {where}.thermal_band_c must be > 0 (it is the "
+                    f"number of degrees below the wall inside which a consumer "
+                    f"holds), got {thermal_band_c}")
+
         parsed.append(
             RuleConfig(
                 name=name,
@@ -738,6 +763,7 @@ def _parse_rules(raw: Any, base_rules: tuple[RuleConfig, ...], source: str) -> t
                 threshold=threshold,
                 window_s=window_s,
                 min_fraction_over=min_fraction,
+                thermal_band_c=thermal_band_c,
                 action=action,  # type: ignore[arg-type]
                 cooldown_s=cooldown_s,
             )
