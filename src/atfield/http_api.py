@@ -565,21 +565,24 @@ class ServiceState:
             ]
             return {"effective": effective, "disabled": disabled}
 
-    def _window_mean(self, signal: str, window_s: float, now: float,
-                     fallback: float) -> float:
-        """Mean of `signal` over the RULE's own window; `fallback` if no history.
+    def _detail_center(self, signal: str, now: float, fallback: float) -> float:
+        """The SAME centre statistic `/headroom/detail` reports for this signal.
 
-        Called with the lock held. Uses the same tier0 history
-        `snapshot_headroom_detail` reads, so the two endpoints describe the
-        same samples -- if they drifted apart, a dashboard would show two
-        different numbers for one machine, which is the confusion this whole
-        change exists to end.
+        One function, called by both endpoints, so they cannot drift. The
+        previous version took an arithmetic mean over the RULE's window while
+        detail took a 60 s median -- a difference invisible on constant data and
+        52% wide on a ramp. A drift guard written against constant input could
+        not have caught it, which is what happened.
+
+        Called with the lock held.
         """
         hist = self._history.get(signal)
         if hist is None:
             return fallback
-        vals = [v for (ts, v) in hist.tier0.samples if ts >= now - window_s]
-        return _mean(vals) if vals else fallback
+        vals = [v for (ts, v) in hist.tier0.samples if ts >= now - _DETAIL_WINDOW_S]
+        if not vals:
+            return fallback
+        return _percentile(sorted(vals), 50)
 
     def snapshot_headroom(self) -> dict[str, Any]:
         """Collapse every kill-action rule to one number: distance to the
@@ -641,11 +644,25 @@ class ServiceState:
                 threshold = rule.base_rule.threshold
                 if latest is None or not threshold:
                     continue
-                # Mean over the rule's OWN window, so the proxy has the same
-                # time constant as the kill it predicts. Falls back to the
-                # latest reading when no history exists yet.
-                value = self._window_mean(
-                    rule.signal, rule.base_rule.window_s, now, latest)
+                # THE SAME STATISTIC AND WINDOW AS /headroom/detail, and that
+                # is a deliberate choice over the more obvious one.
+                #
+                # The obvious version used the RULE's own window (30 s for
+                # cpu-pkg-hot) and an arithmetic mean, on the reasoning that a
+                # proxy should share the time constant of the kill it predicts.
+                # But the CONSUMER steers from /headroom/detail, which reports a
+                # 60 s MEDIAN -- so the two numbers diverge on any input that is
+                # not flat. Measured on a 60 s ramp from 60 to 84 C: scalar
+                # 0.468 vs detail-derived 0.712, 52% apart, on exactly the shape
+                # (a ramp) that SETTLE_S exists for.
+                #
+                # Two numbers on one dashboard that disagree is how this whole
+                # phase started, so consistency wins: the human-facing scalar
+                # now reports what the controller actually steers by. The
+                # single-sample twitchiness this replaced (a lone 95 C tick in
+                # an 80 C window reading 0.0) is fixed by ANY window; it did not
+                # require the rule's own.
+                value = self._detail_center(rule.signal, now, latest)
                 if classify_signal(rule.signal) == "thermal":
                     band = getattr(rule.base_rule, "thermal_band_c", 25.0) or 25.0
                     headroom = (threshold - value) / band

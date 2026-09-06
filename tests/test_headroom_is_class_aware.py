@@ -146,20 +146,34 @@ def test_the_danger_line_still_lands_where_the_operator_authored_it(tmp_path):
         f"{hr:.3f}, which is not DANGER. The fix disarmed the wall.")
 
 
-def test_scalar_and_detail_agree_for_a_thermal_signal(tmp_path):
-    """The bimodality: same machine, same instant, two endpoints, one answer.
+@pytest.mark.parametrize("trace,label", [
+    ([84.0] * 30, "flat"),
+    ([70.0] * 30 + [84.0] * 30, "step"),
+    ([84.0] * 59 + [70.0], "one cool sample"),
+    ([60.0 + 24.0 * i / 59.0 for i in range(60)], "ramp 60->84"),
+    ([80.0] * 29 + [95.0], "one hot spike"),
+])
+def test_scalar_and_detail_agree_for_a_thermal_signal(tmp_path, trace, label):
+    """The drift guard: one machine, one instant, two endpoints, ONE answer.
 
-    Before: 84 C read 0.067 on the scalar (cut 25%) and 0.24 on detail (hold),
-    and which one applied depended on whether /headroom/detail answered.
+    NOT PARAMETRISED ORIGINALLY, and that was the bug. The first version fed
+    `[84.0]*30` -- constant -- which is the ONE input on which an arithmetic
+    mean over the rule's 30 s window and a median over 60 s coincide. It could
+    not have failed. Measured on the ramp case before the fix: scalar 0.468 vs
+    detail-derived 0.712, 52% apart, on exactly the shape SETTLE_S exists for.
+
+    A dashboard showing a number the controller does not steer by is how this
+    phase started, so the traces below are chosen to separate the two
+    statistics: a step, an outlier in each direction, and a ramp.
     """
     st = _state(tmp_path, thermal_band_c=25.0)
-    _feed(st, CPU, [84.0] * 30)
+    _feed(st, CPU, trace)
     scalar = st.snapshot_headroom()["min_headroom"]
     detail = st.snapshot_headroom_detail()["per_signal"][CPU]
     expected = (CPU_THRESHOLD - detail["mean"]) / 25.0
     assert scalar == pytest.approx(expected, abs=1e-9), (
-        f"scalar {scalar:.3f} vs detail-derived {expected:.3f} -- the control "
-        f"law is bimodal on endpoint availability")
+        f"[{label}] scalar {scalar:.4f} vs detail-derived {expected:.4f} -- "
+        f"the operator's number and the controller's have drifted apart")
 
 
 def test_a_single_hot_sample_does_not_trip_a_sustained_rule(tmp_path):
