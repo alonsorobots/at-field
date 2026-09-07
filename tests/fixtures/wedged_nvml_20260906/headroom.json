@@ -1,0 +1,1 @@
+{"min_headroom":0.31527777777777777,"binding_rule":"cpu-pkg-hot","per_rule":{"vram-junction-hot[gpu.0.mem_junction_temp_c]":0.62,"vram-junction-hot[gpu.1.mem_junction_temp_c]":0.58,"gpu-core-hot[gpu.0.core_temp_c]":1.0,"ram-pressure":0.7206521739130435,"pagefile-pressure":0.789285875000978,"cpu-pkg-hot":0.31527777777777777}}
