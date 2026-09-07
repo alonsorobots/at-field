@@ -7,6 +7,36 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.13] — 2026-09-07 — What the liveness review found
+
+An adversarial review of 0.4.12 ran seven mutations against the suite; five
+survived it green. Two were real holes, not just missing tests.
+
+### Fixed
+
+- **`/health.signals_not_live` could not name a signal that never arrived.**
+  It iterated the state mirror, and a never-seen signal is not in the mirror —
+  so `rules_starved` said 1 while the list that exists so a reader need not
+  act on a bare count was empty. A service restarted into a wedged card lands
+  in that state and stays there, because a rule with no first sample has
+  nothing to go stale.
+- **The loop deleted impossible readings instead of marking them.** They were
+  popped before the mirror, the forensic stream and the credibility split ever
+  saw them, so a stream of them produced no forensic file at all — the 0.4.12
+  changelog claim that the stream preserves suspect samples was false of the
+  shipped code. The split now happens at the plausibility gate: an impossible
+  reading still makes its rule abstain, by being withheld from the engine
+  rather than erased.
+- **Signal age is measured on the monotonic clock.** A backward wall-clock step
+  (NTP, DST, VM resume) made one `/rules` payload report a rule `starved` and
+  its signal `live` at once; a forward step flushed a healthy machine to
+  `stale` and emptied `/headroom`. The engine already measured starvation
+  monotonically, so the two now agree by construction.
+- `is_credible`'s docstring inverted its code. Behaviour is unchanged and now
+  stated as one principle: **absent** information is trusted (an unknown
+  `source_id` defaults to healthy, so a bookkeeping gap cannot mute a rule),
+  **present but unrecognised** is not.
+
 ## [0.4.12] — 2026-09-07 — One liveness verdict
 
 ### Fixed
