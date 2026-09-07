@@ -7,6 +7,47 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.11] — 2026-09-07 — Surviving a driver swap, and one honest headroom
+
+The release that carries the two 2026-09-05 headroom fixes to the fleet. They
+had been committed and pushed for two days while every host ran the 09-02
+build, which is its own lesson: committed is not deployed.
+
+### Fixed
+
+- **A boot-start service outlived the driver it opened NVML against.** Chronos
+  booted, AT-Field started 25 s later against driver 610.88, and Windows PnP
+  installed 616.56 ten minutes after that. The session held dead handles for
+  4.2 days: GPU 1's calls raised (six signals frozen), GPU 0's returned
+  NVML_SUCCESS with `core_temp_c = 0.0` and `power_w = 0.041`. Both GPU
+  core-temp kill rules were inert and `/headroom` published 1.0 for one of
+  them. The collector now rebuilds its session on sustained DEGRADED (with
+  monotonic backoff), watches the installed driver version out-of-band via
+  `nvml.dll`'s FileVersion, and — bounded to once per process, above a 120 s
+  uptime floor, and only on the driver-swap witness — exits 3 so NSSM can hand
+  it a fresh process, which is the documented cure for a library/kernel-module
+  mismatch.
+- **One failed session rebuild permanently blinded the NVML collector.**
+  `_reinit_session()` clears `_handles` on failure and `sample()` returned `{}`
+  for an empty handle list, short-circuiting the health accounting and every
+  recovery path. A collector publishing nothing looks exactly like a quiet one,
+  so nothing noticed.
+- **`is_plausible` accepted 0.0 °C.** The celsius floor moves from −50 to 5.
+  Powered silicon sits above ambient; a running machine reporting 0 °C is
+  reporting nothing. The trade, stated plainly: a machine booted in a
+  sub-freezing room has its first samples rejected and its thermal rules starve
+  until the silicon passes 5 °C — loud, visible and self-correcting, in place of
+  a silent four-day outage.
+- **`/headroom` was a one-way ratchet for any thermal rule** (`4a7e799`, from
+  2026-09-05). `(threshold − latest)/threshold` treats 0 °C as idle, so a 90 °C
+  wall put SAFE at ≤58.5 °C and a loaded 32-core box could only ever shrink.
+  Thermal headroom is now `(threshold − mean)/thermal_band_c` with the band
+  authored per rule and published as a fact, which also lets the consumer delete
+  its own private copy of that limit.
+- **The two headroom endpoints described the same machine with different
+  arithmetic** (`c79d1c3`, from 2026-09-05) — a 60 s median against a per-rule
+  mean, 52% apart on a ramp. One `_detail_center` now backs both.
+
 ## [0.4.4] — 2026-06-28 — Reliable in-place upgrades
 
 ### Fixed
