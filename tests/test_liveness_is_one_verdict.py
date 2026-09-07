@@ -32,6 +32,7 @@ a DEGRADED collector separates them.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -473,3 +474,35 @@ def test_the_forensic_stream_keeps_the_suspect_reading(tmp_path):
     assert lines[0]["suspect"] == ["b"]
     # An ordinary tick's line is unchanged -- no key, no churn in the stream.
     assert "suspect" not in lines[1]
+
+
+def test_every_collector_name_matches_the_source_id_it_stamps():
+    """The credibility gate looks a sample's collector up BY `source_id`.
+
+    `split_by_credibility` does `health_by_source.get(sample.source_id,
+    "HEALTHY")` -- and that default is a deliberate fail-safe, so a collector
+    whose `name` ever stopped matching the `source_id` it stamps would have
+    every one of its samples treated as healthy. The gate would switch itself
+    off for that collector, silently, which is the exact class of failure this
+    whole change exists to remove.
+
+    Cheap to assert, impossible to notice by hand.
+    """
+    import inspect
+    from atfield.collectors.lhmlib import LhmLibCollector
+    from atfield.collectors.nvml import NvmlCollector
+    from atfield.collectors.system import SystemCollector
+
+    for cls in (SystemCollector, NvmlCollector, LhmLibCollector):
+        src = inspect.getsource(inspect.getmodule(cls))
+        # Every Sample built in the module stamps the module's own _NAME.
+        # The alternation matching a STRING LITERAL is load-bearing: with an
+        # identifier-only pattern this assertion could never fail, because a
+        # hardcoded `source_id="nvidia"` simply would not be matched. Verified
+        # by mutation -- the identifier-only version stayed green.
+        stamped = set(re.findall(
+            r"""source_id=("[^"]*"|'[^']*'|[A-Za-z_][A-Za-z0-9_]*)""", src))
+        assert stamped <= {"_NAME"}, (
+            f"{cls.__name__} stamps source_id from {stamped - {'_NAME'}}, which "
+            f"may not equal its .name ({cls.name!r}) -- the credibility gate "
+            f"keys on source_id and would silently pass everything from it")
