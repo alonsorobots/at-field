@@ -269,8 +269,24 @@ def test_implausible_gpu_temp_is_rejected():
     from atfield.signals import is_plausible
     assert not is_plausible(885510.0, "celsius")
     assert is_plausible(72.0, "celsius")      # a normal GPU temp still passes
-    assert is_plausible(-10.0, "celsius")     # cold but possible
     assert not is_plausible(1000.0, "celsius")
+
+    # The FLOOR moved from -50 to 5 on 2026-09-07, and this line used to read
+    # `assert is_plausible(-10.0, "celsius")  # cold but possible`. That bound
+    # was invented, not measured -- nothing in this repo has ever recorded a
+    # sub-zero reading -- and it was the gap a wedged NVML session published
+    # 0.0 C through for four days while the card sat at 26 C and its 88 C kill
+    # rule read BELOW.
+    #
+    # What we gave up, stated plainly: a machine booted in a genuinely
+    # sub-freezing room would have its first few temperature samples rejected,
+    # and its thermal rules would starve until the silicon warmed past 5 C.
+    # That is a loud, visible failure (the rule reports starved) and it
+    # self-corrects within seconds of any load. The failure it replaces was
+    # silent and lasted four days. See _PLAUSIBLE_RANGE in signals.py.
+    assert not is_plausible(-10.0, "celsius")
+    assert not is_plausible(0.0, "celsius")   # the wedged session's constant
+    assert is_plausible(5.0, "celsius")       # the boundary itself
 
 
 def test_percent_and_watts_bounds():

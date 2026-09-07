@@ -118,7 +118,25 @@ class Sample:
 # stay unbounded (``system.input_idle_s`` is a seconds counter that grows
 # without limit); unknown units are never rejected (fail-safe).
 _PLAUSIBLE_RANGE: Final[dict[str, tuple[float, float]]] = {
-    "celsius": (-50.0, 150.0),      # any silicon temp outside this is bogus
+    # The FLOOR is load-bearing, and it is the only value claim made anywhere
+    # in the liveness work. Powered silicon sits above ambient by construction;
+    # a running machine reporting 0 C is reporting nothing.
+    #
+    # It was -50 until 2026-09-07, and that is how a wedged NVML session
+    # published gpu.0.core_temp_c = 0.0 for four days -- 2393/2393 identical
+    # samples over 24 h, "plausible" every time, while the real card sat at
+    # 26 C and its 88 C kill rule read BELOW and could never fire.
+    #
+    # Deliberately physical, not statistical. "Constant for N samples" would
+    # also have caught it, and would eventually call a REAL idle sensor
+    # garbage -- which is exactly the mistake 04fda0d had to undo on Aurora,
+    # where a sensor was declared bogus on an inference and a hardware guard
+    # was disabled. A rig in a freezer is out of scope; a rig at 0 C is broken.
+    #
+    # Only three sites emit this unit (nvml core temp, LHM CPU package and GPU
+    # junction/hotspot) and all three are die temperatures -- checked, because
+    # a floor applied to an ambient or coolant sensor would be wrong.
+    "celsius": (5.0, 150.0),
     "percent": (0.0, 100.5),        # small epsilon for rounding overshoot
     "watts": (0.0, 2000.0),
 }

@@ -30,6 +30,8 @@ from __future__ import annotations
 from typing import Any, Final
 
 import logging
+import os
+import sys
 
 from atfield.collectors import HealthState, ProbeResult
 from atfield.signals import Sample, is_plausible, monotonic_ns
@@ -42,7 +44,44 @@ _log = logging.getLogger("atfield.collectors.nvml")
 # 8 hours the 2026-07-23 incident actually took.
 _MAX_IMPLAUSIBLE_BEFORE_REINIT: Final = 3
 
-__all__ = ["PER_PROCESS_VRAM_KEY", "NvmlCollector"]
+# Wait after a FAILED rebuild, in seconds. The first attempt is immediate --
+# _next_reinit_ns starts at 0 -- and these are the gaps between retries after
+# that, because a genuinely dead or removed GPU will never come back and the
+# watchdog has other work to do. Do not put a 0.0 at the front: that makes the
+# first retry immediate too and the collector rebuilds on every single tick.
+_REINIT_BACKOFF_S: Final = (10.0, 30.0, 60.0, 120.0, 300.0)
+
+# How often to read the installed driver version off disk. A version-resource
+# read is far more expensive than the metric calls (which total ~0.016 ms), so
+# it does not belong on every tick -- and a driver swap that goes unnoticed for
+# a minute is not the failure we are preventing. The one on Chronos went
+# unnoticed for four days.
+_DRIVER_CHECK_INTERVAL_NS: Final = 60_000_000_000
+
+# Rebuild attempts, and the time they must span, before a driver swap is
+# escalated to a process restart. Two attempts over a minute is enough to
+# distinguish "the rebuild fixed it" from "this process cannot be fixed".
+_REINIT_ATTEMPTS_BEFORE_ESCALATION: Final = 2
+_MIN_ESCALATION_SPAN_NS: Final = 60_000_000_000
+
+__all__ = ["PER_PROCESS_VRAM_KEY", "NvmlCollector", "encode_driver_version"]
+
+
+def encode_driver_version(a: int, b: int, c: int, d: int) -> str:
+    """Turn a Windows 4-part driver version into NVIDIA's own ``MMM.mm`` form.
+
+    NVIDIA hides the driver number in the LAST TWO groups, and Windows shows
+    two different prefixes for the same driver -- MEASURED on Chronos, both
+    naming 616.56 on the same day:
+
+        nvml.dll FileVersion            8.17.16.1656
+        Win32_PnPSignedDriver           32.0.16.1656
+        nvmlSystemGetDriverVersion()    "616.56"
+
+    so the prefix is discarded and only ``(c, d)`` decide: last digit of ``c``,
+    then ``d`` split into hundreds and remainder.
+    """
+    return f"{c % 10}{d // 100}.{d % 100:02d}"
 
 
 _NAME: Final = "nvml"
@@ -98,6 +137,30 @@ class NvmlCollector:
         # Consecutive ticks where NVML returned SUCCESS but with impossible
         # values -- the only detector we have for that mode (see sample()).
         self._implausible_streak = 0
+        # --- surviving a driver swap under a live session ---------------
+        # A boot-start service can open NVML against one driver and be handed
+        # another ten minutes later (Chronos 2026-09-02: UserPnp event 20003
+        # replaced nvlddmkm 610.88 with 616.56 while this process held its
+        # handles). Recovery is attempted on two independent witnesses, and
+        # escalated to a process restart if neither cures it.
+        #
+        # Backoff is in MONOTONIC TIME, not tick counts: the service loop runs
+        # at 2.7-6.7 s per tick on this fleet, not the configured 1 Hz, so a
+        # tick-counted backoff would mean something different on every host.
+        self._next_reinit_ns = 0
+        self._reinit_backoff_idx = 0
+        self._reinit_attempts_since_swap = 0
+        self._first_swap_seen_ns = 0
+        self._last_driver_check_ns: int | None = None
+        #: True while the installed driver differs from the one this session
+        #: opened against. Cleared only by a rebuild that succeeds AND re-reads
+        #: the version -- at which point the session is genuinely current
+        #: again. Never cleared by the reading merely looking reasonable.
+        self.driver_replaced = False
+        #: Set to a human-readable reason when in-process recovery has been
+        #: tried and failed after a driver swap. The service loop reads it and
+        #: exits so NSSM can hand us a fresh process (AppExit=Restart).
+        self.wants_process_restart: str | None = None
         # Live per-GPU process map. Keyed by gpu_idx; value is a list of
         # (pid, used_vram_bytes) tuples. Refreshed on a slow cadence from
         # sample() (cheap dashboard count) and force-refreshed at kill time.
@@ -207,13 +270,20 @@ class NvmlCollector:
     # -- Sample ------------------------------------------------------------
 
     def sample(self) -> dict[str, Sample]:
-        if not self._health.is_pollable or not self._handles:
+        if not self._health.is_pollable:
             return {}
 
         pynvml = self._pynvml
         out: dict[str, Sample] = {}
         now = monotonic_ns()
-        any_failure = False
+        # An empty handle list is a FAILING tick, not a quiet one. `sample()`
+        # used to return {} for it, which turned one failed rebuild into a
+        # permanent blind spot: _reinit_session() clears _handles when it
+        # fails, so the very next tick returned early -- before the health
+        # accounting and before every recovery path -- and the collector could
+        # never try again or even degrade. Nothing observed that, because a
+        # collector publishing nothing looks exactly like a quiet one.
+        any_failure = not self._handles
 
         for i, handle in enumerate(self._handles):
             try:
@@ -304,15 +374,158 @@ class NvmlCollector:
         else:
             self._implausible_streak = 0
 
+        # --- WITNESS B: the driver was swapped under us --------------------
+        # Checked every tick (rate-limited inside) because it is the ONLY
+        # route that sees a session whose calls all still succeed. On Chronos
+        # that shape published a constant 0.0 C for four days with health
+        # reading HEALTHY the whole time.
+        if self._check_driver_swap(now):
+            self._try_reinit(now, force=True)
+
         if any_failure:
             self._consecutive_failures += 1
             if self._consecutive_failures >= self._max_consecutive:
                 self._health = HealthState.DEGRADED
+                # --- WITNESS C: sustained failure cures itself -------------
+                # Until 2026-09-07 nothing acted on DEGRADED at all. A session
+                # that failed by RAISING -- the GPU 1 shape -- could not reach
+                # _reinit_session(), whose only caller was the implausibility
+                # branch above, so it degraded and stayed degraded for 4.2
+                # days. DEGRADED is a state fact, so acting on it needs no
+                # judgement about any value; the backoff is what keeps a
+                # genuinely dead card from spinning.
+                self._try_reinit(now)
         else:
             self._consecutive_failures = 0
+            self._reinit_backoff_idx = 0
             self._health = HealthState.HEALTHY
 
         return out
+
+    def _installed_driver_version(self) -> str | None:
+        """The driver version currently ON DISK, read WITHOUT touching NVML.
+
+        This is the only witness that can see the silent shape. When a session
+        goes stale, every call it makes may still return NVML_SUCCESS with a
+        plausible number (Chronos: 0.0 C and 0.041 W, for four days) -- so the
+        session cannot be asked whether it is stale. Something outside it has
+        to say so.
+
+        ``nvmlSystemGetDriverVersion()`` was the obvious candidate and is NOT
+        used, because it is unproven: the value we compared against was
+        captured at probe time and never re-read on the wedged session, so
+        whether a stale session reports the old or the new string is unknown.
+        A detector that might be comparing a constant to itself is not a
+        detector. The file on disk is not in doubt.
+
+        Returns None on non-Windows, a missing DLL, or any read failure --
+        never a guess. A wrong answer here would force a service restart, so
+        "I cannot tell" must be distinguishable from "it changed".
+        """
+        if sys.platform != "win32":
+            return None
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            path = os.path.join(
+                os.environ.get("SystemRoot", r"C:\Windows"), "System32", "nvml.dll")
+            if not os.path.exists(path):
+                return None
+
+            ver = ctypes.WinDLL("version")
+            size = ver.GetFileVersionInfoSizeW(ctypes.c_wchar_p(path), None)
+            if not size:
+                return None
+            buf = ctypes.create_string_buffer(size)
+            if not ver.GetFileVersionInfoW(ctypes.c_wchar_p(path), 0, size, buf):
+                return None
+
+            block = ctypes.c_void_p()
+            length = wintypes.UINT()
+            if not ver.VerQueryValueW(buf, ctypes.c_wchar_p("\\"),
+                                      ctypes.byref(block), ctypes.byref(length)):
+                return None
+
+            class _FFI(ctypes.Structure):
+                _fields_ = [("dwSignature", wintypes.DWORD),
+                            ("dwStrucVersion", wintypes.DWORD),
+                            ("dwFileVersionMS", wintypes.DWORD),
+                            ("dwFileVersionLS", wintypes.DWORD)]
+
+            ffi = ctypes.cast(block, ctypes.POINTER(_FFI)).contents
+            return encode_driver_version(ffi.dwFileVersionMS >> 16,
+                                         ffi.dwFileVersionMS & 0xFFFF,
+                                         ffi.dwFileVersionLS >> 16,
+                                         ffi.dwFileVersionLS & 0xFFFF)
+        except Exception:  # noqa: BLE001 - fail safe, never fire on a bad read
+            _log.debug("could not read nvml.dll file version", exc_info=True)
+            return None
+
+    def _check_driver_swap(self, now_ns: int) -> bool:
+        """Witness B. True if the installed driver no longer matches ours."""
+        if not self._driver_version:
+            # Probe never recorded one; there is nothing to compare against.
+            return self.driver_replaced
+        if (self._last_driver_check_ns is not None
+                and now_ns - self._last_driver_check_ns < _DRIVER_CHECK_INTERVAL_NS):
+            return self.driver_replaced
+        self._last_driver_check_ns = now_ns
+        installed = self._installed_driver_version()
+        if installed is None:
+            return self.driver_replaced
+        if installed != self._driver_version:
+            if not self.driver_replaced:
+                _log.error(
+                    "NVIDIA driver was REPLACED under this session: it was opened "
+                    "against %s and %s is now installed. Every reading from these "
+                    "handles is suspect -- rebuilding the NVML session.",
+                    self._driver_version, installed)
+                self._first_swap_seen_ns = now_ns
+            self.driver_replaced = True
+        return self.driver_replaced
+
+    def _try_reinit(self, now_ns: int, *, force: bool = False) -> None:
+        """Rebuild the session, at most as often as the backoff allows.
+
+        ``force`` skips the wait for witness B, whose evidence is conclusive:
+        the driver we were talking to is gone.
+        """
+        if not force and now_ns < self._next_reinit_ns:
+            return
+        self._reinit_attempts_since_swap += 1
+        ok = self._reinit_session()
+        if ok:
+            self._reinit_backoff_idx = 0
+            self._next_reinit_ns = now_ns
+            # /health must stop advertising a driver this session no longer
+            # talks to -- that string is what a human compares against
+            # nvidia-smi at deploy time.
+            fresh = self._installed_driver_version()
+            if fresh:
+                self._driver_version = fresh
+                self.driver_replaced = False
+                self._reinit_attempts_since_swap = 0
+            return
+        wait = _REINIT_BACKOFF_S[min(self._reinit_backoff_idx,
+                                     len(_REINIT_BACKOFF_S) - 1)]
+        self._reinit_backoff_idx += 1
+        self._next_reinit_ns = now_ns + int(wait * 1e9)
+
+        # Escalate ONLY on witness B. A rebuild that cannot fix a replaced
+        # driver is the documented mismatch case: the process still has the old
+        # nvml.dll mapped, and only a fresh process maps the new one. Scoped
+        # this narrowly on purpose -- escalating on DEGRADED alone would let a
+        # dead GPU restart the watchdog forever.
+        if (self.driver_replaced
+                and self.wants_process_restart is None
+                and self._reinit_attempts_since_swap >= _REINIT_ATTEMPTS_BEFORE_ESCALATION
+                and now_ns - self._first_swap_seen_ns >= _MIN_ESCALATION_SPAN_NS):
+            installed = self._installed_driver_version() or "a different version"
+            self.wants_process_restart = (
+                f"NVML session was opened against driver {self._driver_version} "
+                f"but {installed} is installed, and {self._reinit_attempts_since_swap} "
+                f"in-process rebuilds did not recover it")
 
     def _reinit_session(self) -> bool:
         """Tear down and rebuild the NVML session + device handles in-process.

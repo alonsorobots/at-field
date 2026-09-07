@@ -74,6 +74,14 @@ DEFAULT_CONFIG_PATH = "config.toml"
 
 _HEARTBEAT_INTERVAL_S = 10.0
 
+# Exit code meaning "I cannot fix this in-process; hand me a fresh one".
+# Distinct from 0 (clean stop) and 1 (crash) so a supervisor log says which.
+_EXIT_WANTS_RESTART = 3
+# A restart request is ignored below this uptime. Belt-and-braces against a
+# boot-time condition that would otherwise restart the service in a tight
+# loop; NSSM's own AppThrottle (1500 ms) is the other half.
+_RESTART_UPTIME_FLOOR_S = 120.0
+
 
 # ---------------------------------------------------------------------------
 # Config loading with safe-mode fallback (PLANNING.md §5.4)
@@ -444,6 +452,8 @@ def run_service(
 
     tick_period_s = 1.0 / max(cfg.general.tick_hz, 1)
     last_heartbeat_ns = 0
+    service_started_at = time.monotonic()
+    restart_reason: str | None = None
     last_pause_check_ns = 0
     pause_check_interval_ns = 5_000_000_000  # 5 s
     ticks = 0
@@ -693,6 +703,41 @@ def run_service(
             if now_ns - last_heartbeat_ns >= int(_HEARTBEAT_INTERVAL_S * 1_000_000_000):
                 _write_heartbeat(sd, observe_only=observe_only)
                 last_heartbeat_ns = now_ns
+
+            # A collector may conclude that it cannot fix itself in this
+            # process. Today only nvml does, and only on conclusive evidence:
+            # the driver it opened its session against has been replaced on
+            # disk AND in-process rebuilds did not recover it. That is the
+            # documented library/kernel-module mismatch, whose cure is a fresh
+            # process -- NSSM is configured AppExit=Restart, so exiting IS the
+            # cure and not an outage.
+            #
+            # Bounded three ways so a broken GPU can never crash-loop the
+            # watchdog: once per process, only above an uptime floor, and only
+            # on that exact witness. Without it a card simply degrades and its
+            # rules starve, loudly -- which is the correct outcome for hardware
+            # that is actually gone.
+            if restart_reason is None:
+                for c in collectors:
+                    reason = getattr(c, "wants_process_restart", None)
+                    if reason:
+                        uptime_s = time.monotonic() - service_started_at
+                        if uptime_s < _RESTART_UPTIME_FLOOR_S:
+                            _log.warning(
+                                "collector %s wants a restart (%s) but this process "
+                                "is only %.0fs old; deferring", c.name, reason, uptime_s)
+                            break
+                        restart_reason = f"{c.name}: {reason}"
+                        _log.error(
+                            "restarting the service so a fresh process maps the "
+                            "replaced driver (%s). The supervisor will bring it "
+                            "straight back.", restart_reason)
+                        audit.write_collector_health(
+                            c.name, "wants_process_restart", reason)
+                        exit_code = _EXIT_WANTS_RESTART
+                        break
+                if restart_reason is not None:
+                    break
 
             ticks += 1
             if max_ticks is not None and ticks >= max_ticks:
