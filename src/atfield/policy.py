@@ -576,6 +576,17 @@ class PolicyEngine:
         return out
 
     @property
+    def starvation_after_s(self) -> float:
+        """How long a signal may go missing before its rule is called starved.
+
+        Exposed so the API layer can compute signal liveness from the SAME
+        number rather than a second constant beside it. Two thresholds for one
+        idea drift, and the drift would show up as a rule reporting starved
+        while the endpoint still called its signal live.
+        """
+        return self._starvation_after_s
+
+    @property
     def starved_rules(self) -> tuple[EffectiveRule, ...]:
         """Rules currently receiving no samples -- i.e. not actually guarding."""
         return tuple(r for r in self._effective if r.starved)

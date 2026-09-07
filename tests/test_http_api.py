@@ -440,18 +440,32 @@ class TestRules:
 # ---------------------------------------------------------------------------
 
 
+def _record(state, samples):
+    """Feed the state mirror the way the service loop does."""
+    state.record_tick(now_unix=time.time(), samples=samples)
+
+
 class TestHeadroom:
     def test_headroom_empty_before_any_tick(self, server):
         _, host, port = server
         status, data = _get(host, port, "/headroom")
         assert status == 200
-        assert data == {"min_headroom": None, "binding_rule": None, "per_rule": {}}
+        # `excluded` is additive (2026-09-07): a kill rule now lands in
+        # exactly one of per_rule / excluded, so a rule that leaves the fold
+        # says WHY instead of silently vanishing.
+        assert data == {"min_headroom": None, "binding_rule": None,
+                        "per_rule": {}, "excluded": {"ram-pressure": "never"}}
 
     def test_headroom_reflects_latest_value(self, server):
         state, host, port = server
         engine = _make_engine()
         state.attach_engine(engine)
         # threshold=85.0, value=68.0 -> headroom = (85-68)/85 = 0.2
+        # Mirror what run_service does: the state mirror is fed the SAME tick
+        # the engine is, always, and /headroom renders the liveness verdict
+        # that comes from it. Driving the engine alone is a state the service
+        # cannot produce.
+        _record(state, {"system.ram_used_percent": _make_sample(68.0)})
         engine.tick({"system.ram_used_percent": _make_sample(68.0)}, now_ns=time.monotonic_ns())
         status, data = _get(host, port, "/headroom")
         assert status == 200
@@ -466,6 +480,7 @@ class TestHeadroom:
         state, host, port = server
         engine = _make_engine()
         state.attach_engine(engine)
+        _record(state, {"system.ram_used_percent": _make_sample(99.0)})
         engine.tick({"system.ram_used_percent": _make_sample(99.0)}, now_ns=time.monotonic_ns())
         _, data = _get(host, port, "/headroom")
         assert data["min_headroom"] == 0.0
@@ -484,10 +499,12 @@ class TestHeadroom:
         )
         engine = PolicyEngine(cfg, available_signals={"system.ram_used_percent", "system.commit_percent"})
         state.attach_engine(engine)
-        engine.tick({
+        both = {
             "system.ram_used_percent": _make_sample(68.0),   # headroom 0.2
             "system.commit_percent": _make_sample(85.5, signal="system.commit_percent"),  # headroom 0.05
-        }, now_ns=time.monotonic_ns())
+        }
+        _record(state, both)
+        engine.tick(both, now_ns=time.monotonic_ns())
         _, data = _get(host, port, "/headroom")
         assert data["binding_rule"] == "commit-pressure"
         assert data["min_headroom"] == pytest.approx(0.05, abs=1e-6)
@@ -612,7 +629,8 @@ class TestHeadroomDetail:
         state.attach_engine(engine)
         engine.tick({"system.ram_used_percent": _make_sample(68.0)}, now_ns=time.monotonic_ns())
         _, data = _get(host, port, "/headroom")
-        assert set(data.keys()) == {"min_headroom", "binding_rule", "per_rule"}
+        assert set(data.keys()) == {"min_headroom", "binding_rule", "per_rule",
+                                    "excluded"}
         assert data["binding_rule"] == "ram-pressure"
 
 

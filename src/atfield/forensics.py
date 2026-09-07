@@ -218,7 +218,8 @@ class ForensicBuffer:
         # Final drain in case the flusher missed it.
         self._flush_now()
 
-    def record(self, samples: Mapping[str, object], *, ts: float | None = None) -> None:
+    def record(self, samples: Mapping[str, object], *, ts: float | None = None,
+               suspect: set[str] | None = None) -> None:
         """Stage one tick's sample bundle for the next flush.
 
         Non-blocking. The actual disk write happens up to ``flush_interval_s``
@@ -228,6 +229,13 @@ class ForensicBuffer:
         ``samples`` accepts the raw signal->Sample map from collectors OR
         a flat signal->value dict; values that aren't JSON-serializable
         (Sample objects) are unwrapped to their numeric ``value`` field.
+
+        ``suspect`` names the signals whose values arrived but were not
+        believable, so the engine never saw them. They are still WRITTEN --
+        a suspect reading is the evidence of what went wrong, and a stream
+        that quietly omits it cannot answer "what was the sensor saying while
+        the guard was off". The key is emitted only when non-empty, so an
+        ordinary tick's line is unchanged.
         """
         if not samples:
             return
@@ -238,10 +246,14 @@ class ForensicBuffer:
                 flat[name] = value
         if not flat:
             return
-        payload = {
+        payload: dict[str, object] = {
             "ts": ts if ts is not None else time.time(),
             "samples": flat,
         }
+        if suspect:
+            marked = sorted(s for s in suspect if s in flat)
+            if marked:
+                payload["suspect"] = marked
         line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
         with self._pending_lock:
             self._pending.append(line)

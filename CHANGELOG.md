@@ -7,6 +7,58 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.12] — 2026-09-07 — One liveness verdict
+
+### Fixed
+
+- **A correct alarm retracted itself.** `PolicyEngine._track_starvation` cleared
+  `rule.starved` on ANY arriving sample, with no test of whether the sample
+  meant anything. On 2026-09-03 at 12:46:48, 17.5 hours after both GPU
+  core-temp rules were correctly starved, the wedged NVML session began
+  publishing a constant `0.0 °C` — and the engine logged `state: recovered`,
+  "rule is guarding again". `/health` dropped from 2 starved rules to 1 and
+  `/headroom` began publishing **1.0**, perfect headroom, for a rule that could
+  never fire. That is worse than never alarming, because it manufactures
+  confidence.
+- **Liveness is now decided once and rendered everywhere.** Four places
+  answered "is this signal trustworthy" and gave four answers: the engine
+  (`starved`), `/headroom` (dropped starved rules implicitly), and
+  `/headroom/detail` and `/signals` (which included frozen values with no
+  mark at all). `ServiceState.liveness()` is the single verdict —
+  `never` / `suspect` / `stale` / `live` — computed from two facts that are not
+  judgement calls: the sample's age, and the health of the collector that
+  produced it.
+- **The engine now receives only credible samples**
+  (`service.split_by_credibility`). Fixing it at that shared entrance means
+  "any arriving sample clears starvation" becomes true again, so the pure
+  engine and its tests are untouched. Note this matters for exactly one
+  collector: nvml is the only one that returns partial samples while DEGRADED
+  (system and lhmlib return `{}`, amd goes FAILED) — and those partials were
+  the wedge.
+- **`/headroom` now accounts for every kill rule**, in exactly one of
+  `per_rule` or the new `excluded` map. Previously a starved rule vanished from
+  the payload with no record of why — it had no `last_value`, so it hit an
+  early `continue` — while a rule reading a fresh garbage zero stayed in the
+  fold at 1.0. That is how the two headroom endpoints came to describe
+  different machines.
+
+### Added
+
+- `signals.is_credible(sample, collector_health_name)` — the pure predicate.
+- `liveness` and `age_s` on every signal in `/signals` and `/headroom/detail`,
+  and `liveness` on every rule in `/rules`. Non-live signals are **marked, never
+  removed**: a consumer has to be able to see and name a dead signal, and
+  dropping it is precisely how a partial failure becomes invisible downstream.
+- `/health.signals_not_live` — the count was already there and was not enough;
+  a reader cannot act on "1". Each entry names the signal, its verdict, its age
+  and the rule it leaves unguarded.
+- The forensic stream marks suspect samples rather than dropping them. "What
+  was the sensor saying while the guard was off" is the question that file
+  exists to answer.
+
+All wire additions are additive; a consumer that does not know the fields is
+unaffected, and Kiroshi already honours `liveness` when it appears.
+
 ## [0.4.11] — 2026-09-07 — Surviving a driver swap, and one honest headroom
 
 The release that carries the two 2026-09-05 headroom fixes to the fleet. They

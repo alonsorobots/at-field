@@ -53,7 +53,7 @@ from atfield.forensics import rotate_on_startup as rotate_forensics_on_startup
 from atfield.http_api import ApiServer, ServiceState, collector_view_from_probe
 from atfield.policy import PolicyEngine
 from atfield.reporter import report_kill
-from atfield.signals import Sample, is_plausible
+from atfield.signals import Sample, is_credible, is_plausible
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
@@ -62,6 +62,7 @@ __all__ = [
     "PRESENCE_SENTINEL_FILENAME",
     "main",
     "run_service",
+    "split_by_credibility",
 ]
 
 
@@ -86,6 +87,35 @@ _RESTART_UPTIME_FLOOR_S = 120.0
 # ---------------------------------------------------------------------------
 # Config loading with safe-mode fallback (PLANNING.md §5.4)
 # ---------------------------------------------------------------------------
+
+
+def split_by_credibility(
+    samples: dict[str, Sample],
+    health_by_source: dict[str, str],
+) -> tuple[dict[str, Sample], dict[str, Sample]]:
+    """Split a tick's samples into ``(credible, suspect)``.
+
+    The engine is fed ONLY the credible half. That placement is the whole
+    point: ``PolicyEngine._track_starvation`` clears ``rule.starved`` on any
+    arriving sample, which is CORRECT once only believable samples arrive, and
+    was the bug when anything could. Fixing it at this shared entrance leaves
+    the pure engine and its tests untouched, and fixes it for every consumer
+    at once rather than at one call site.
+
+    Both halves still reach the API mirror and the forensic stream -- a
+    suspect sample is evidence, and dropping it is how a partial failure
+    becomes invisible.
+
+    A module-level function rather than a closure so it can be tested
+    directly; a harness that hands samples straight to ``engine.tick`` would
+    bypass this and pass whether or not it exists.
+    """
+    credible: dict[str, Sample] = {}
+    suspect: dict[str, Sample] = {}
+    for name, sample in samples.items():
+        health = health_by_source.get(sample.source_id, "HEALTHY")
+        (credible if is_credible(sample, health) else suspect)[name] = sample
+    return credible, suspect
 
 
 def _load_config_safe(config_path: Path | None) -> tuple[AtFieldConfig, bool]:
@@ -454,6 +484,8 @@ def run_service(
     last_heartbeat_ns = 0
     service_started_at = time.monotonic()
     restart_reason: str | None = None
+    # Edge-triggered: log a suspect set when it CHANGES, not every tick.
+    last_suspect: set[str] = set()
     last_pause_check_ns = 0
     pause_check_interval_ns = 5_000_000_000  # 5 s
     ticks = 0
@@ -559,14 +591,40 @@ def run_service(
             # Push samples into the API state mirror BEFORE evaluation so the
             # tray dashboard can show "current value" even if the rule abstained.
             tick_unix = time.time()
-            api_state.record_tick(now_unix=tick_unix, samples=samples)
+            # ONE liveness verdict, decided here and rendered everywhere.
+            # A sample is believable only if its collector says it is working
+            # AND the value is physically possible; neither fact alone is
+            # enough (see signals.is_credible). Only the believable half
+            # reaches the engine, so "any arriving sample clears starvation"
+            # becomes true again instead of being the bug that retracted a
+            # correct alarm on 2026-09-03.
+            health_by_source = {
+                c.name: c.health().name for c in collectors  # type: ignore[attr-defined]
+            }
+            credible_samples, suspect_samples = split_by_credibility(
+                samples, health_by_source)
+            if set(suspect_samples) != last_suspect:
+                if suspect_samples:
+                    _log.warning(
+                        "SUSPECT SAMPLES: %s -- arriving but not believable "
+                        "(collector unhealthy, or value impossible). Their rules "
+                        "will starve rather than read from them.",
+                        ", ".join(f"{k}={s.value:g}" for k, s in sorted(suspect_samples.items())))
+                elif last_suspect:
+                    _log.warning("suspect samples cleared: %s are believable again",
+                                 ", ".join(sorted(last_suspect)))
+                last_suspect = set(suspect_samples)
+
+            api_state.record_tick(now_unix=tick_unix, samples=samples,
+                                  credible=set(credible_samples))
             # Stage this tick for the on-disk forensic stream. Non-blocking;
             # the actual write happens in the flusher thread.
-            forensics.record(samples, ts=tick_unix)
+            forensics.record(samples, ts=tick_unix,
+                             suspect=set(suspect_samples))
 
             # Evaluate
             try:
-                actions = engine.tick(samples, now_ns=now_ns)
+                actions = engine.tick(credible_samples, now_ns=now_ns)
             except Exception:
                 _log.exception("policy tick raised; skipping action dispatch this tick")
                 actions = []

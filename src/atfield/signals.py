@@ -45,6 +45,7 @@ __all__ = [
     "Verdict",
     "evaluate_window",
     "fraction_over_threshold",
+    "is_credible",
     "is_plausible",
     "monotonic_ns",
 ]
@@ -159,6 +160,33 @@ def is_plausible(value: float, unit: str) -> bool:
     if unit in _NON_NEGATIVE_UNITS:
         return value >= 0.0
     return True
+
+
+def is_credible(sample: "Sample", collector_health_name: str) -> bool:
+    """Is this reading worth acting on -- from BOTH available facts?
+
+    Two questions, neither of them a judgement about how the number looks:
+
+    * is the value physically possible (:func:`is_plausible`), and
+    * did the collector that produced it say it is working?
+
+    Either alone leaves a hole, and the 2026-09-02 wedge went through both:
+
+    * GPU 0 returned ``0.0`` C with NVML_SUCCESS. Nothing raised, so the
+      collector read HEALTHY -- health alone would have accepted it.
+    * A collector can also be visibly broken while still emitting readings
+      that look ordinary; NVML is the only one in this codebase that returns
+      partial samples while DEGRADED, and those partials are exactly the
+      wedge. Plausibility alone would have accepted those.
+
+    ``collector_health_name`` is the string form (``HealthState.name``) rather
+    than the enum, so this stays a pure function over data that has already
+    crossed a snapshot boundary. An unrecognised name is treated as healthy:
+    a bookkeeping gap must not silently mute a rule.
+    """
+    if collector_health_name and collector_health_name != "HEALTHY":
+        return False
+    return is_plausible(sample.value, sample.unit)
 
 
 # ---------------------------------------------------------------------------

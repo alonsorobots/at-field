@@ -266,6 +266,11 @@ class ServiceState:
         # Latest sample per signal, with wall-clock when the tick loop saw it.
         # value: (unix_ts: float, value: float, source_id: str, unit: str)
         self._latest_signal: dict[str, tuple[float, float, str, str]] = {}
+        # Whether the LATEST sample for each signal was believable. Kept
+        # beside _latest_signal rather than folded into its tuple so the
+        # existing unpackers stay unchanged; the pairing is maintained by
+        # record_tick, which is the sole writer of both.
+        self._credible: dict[str, bool] = {}
         # Per-signal multi-resolution history. Tier 0 backs /signals (last
         # hour of raw samples); slice() backs /signals/history (up to 24h
         # of mixed-resolution samples).
@@ -324,14 +329,25 @@ class ServiceState:
                     cv.health = health_name
                     return
 
-    def record_tick(self, *, now_unix: float, samples: dict[str, Any]) -> None:
-        """Called after each policy tick. ``samples`` is ``{signal: Sample}``."""
+    def record_tick(self, *, now_unix: float, samples: dict[str, Any],
+                    credible: set[str] | None = None) -> None:
+        """Called after each policy tick. ``samples`` is ``{signal: Sample}``.
+
+        ``credible`` is the subset the engine was actually allowed to see (see
+        :func:`atfield.service.split_by_credibility`). ALL samples are stored
+        either way -- a suspect reading is evidence, and hiding it is how a
+        partial failure becomes invisible -- but the ones outside this set are
+        marked so no endpoint reports them as though current. ``None`` means
+        "caller did not classify", which is treated as all-credible so an
+        older caller keeps working.
+        """
         with self._lock:
             self._last_tick_at = now_unix
             self._tick_count += 1
             for sig, sample in samples.items():
                 value = float(sample.value)
                 self._latest_signal[sig] = (now_unix, value, sample.source_id, sample.unit)
+                self._credible[sig] = credible is None or sig in credible
                 hist = self._history.get(sig)
                 if hist is None:
                     hist = _MultiResHistory()
@@ -376,6 +392,58 @@ class ServiceState:
     # ------------------------------------------------------------------
     # Read snapshots (called by the HTTP handler)
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Liveness -- ONE verdict, rendered by every endpoint
+    # ------------------------------------------------------------------
+
+    def grace_s(self) -> float:
+        """How long a signal may be silent before it is stale.
+
+        The ENGINE's own starvation threshold, deliberately not a second
+        constant beside it. Two numbers for one idea drift, and the drift
+        would surface as a rule reporting ``starved`` while an endpoint still
+        called its signal ``live`` -- exactly the kind of disagreement this
+        whole phase exists to remove.
+        """
+        engine = self._engine
+        return float(getattr(engine, "starvation_after_s", 10.0)) if engine else 10.0
+
+    def liveness(self, signal: str, now: float | None = None) -> str:
+        """``never`` | ``suspect`` | ``stale`` | ``live`` for one signal.
+
+        Computed at READ time, not at tick time, because age advances without
+        ticks: a service whose loop has stopped entirely must go stale on its
+        own, with nothing left running to mark it.
+
+        Order matters. ``suspect`` is checked before ``stale`` so a signal
+        that is arriving on time with an unbelievable value is named for what
+        it is. That is the shape an age-only check cannot see, and the one
+        that published 0.0 C on a current timestamp for four days.
+        """
+        latest = self._latest_signal.get(signal)
+        if latest is None:
+            return "never"
+        if not self._credible.get(signal, True):
+            return "suspect"
+        now = time.time() if now is None else now
+        return "stale" if (now - latest[0]) > self.grace_s() else "live"
+
+    def _not_live(self, now: float) -> list[dict[str, Any]]:
+        """Every signal that is not live, with the rule it leaves unguarded."""
+        rules_by_signal: dict[str, str] = {}
+        engine = self._engine
+        if engine is not None:
+            for r in engine.effective_rules:
+                rules_by_signal.setdefault(r.signal, r.name)
+        out = []
+        for sig, (ts, _v, _src, _u) in self._latest_signal.items():
+            verdict = self.liveness(sig, now)
+            if verdict != "live":
+                out.append({"signal": sig, "liveness": verdict,
+                            "age_s": max(0.0, now - ts),
+                            "rule": rules_by_signal.get(sig)})
+        return sorted(out, key=lambda e: -e["age_s"])
 
     def snapshot_health(self) -> dict[str, Any]:
         with self._lock:
@@ -469,6 +537,10 @@ class ServiceState:
                 "rules_active": rules_active,
                 "rules_disabled": rules_disabled,
                 "rules_starved": rules_starved,
+                # The COUNT was already here and was not enough: a reader
+                # cannot act on "1". These name the signals and the rule each
+                # one leaves unguarded.
+                "signals_not_live": self._not_live(now),
                 "rules_unable_to_fire": rules_unable,
                 "last_action": (
                     {
@@ -495,12 +567,18 @@ class ServiceState:
         views, see :meth:`snapshot_signal_history`.
         """
         with self._lock:
+            now = time.time()
             latest = {
                 sig: {
                     "value": value,
                     "ts": ts,
                     "source": source,
                     "unit": unit,
+                    # Rendered, never re-decided. A tile that shows `value`
+                    # without this reports a four-day-old number as current,
+                    # which is how the operator found the 2026-09-02 wedge.
+                    "liveness": self.liveness(sig, now),
+                    "age_s": max(0.0, now - ts),
                 }
                 for sig, (ts, value, source, unit) in self._latest_signal.items()
             }
@@ -554,7 +632,12 @@ class ServiceState:
                 return {"effective": [], "disabled": []}
             stats = engine.stats_snapshot()
             now_ns = time.monotonic_ns()
-            effective = [_serialize_rule(r, stats.get(r.name, {}), now_ns) for r in engine.effective_rules]
+            now_wall = time.time()
+            effective = [
+                _serialize_rule(r, stats.get(r.name, {}), now_ns,
+                                self.liveness(r.signal, now_wall))
+                for r in engine.effective_rules
+            ]
             disabled = [
                 {
                     "rule": d.base_rule_name,
@@ -633,16 +716,34 @@ class ServiceState:
         with self._lock:
             engine = self._engine
             if engine is None:
-                return {"min_headroom": None, "binding_rule": None, "per_rule": {}}
+                return {"min_headroom": None, "binding_rule": None,
+                        "per_rule": {}, "excluded": {}}
             stats = engine.stats_snapshot()
             now = time.time()
             per_rule: dict[str, float] = {}
+            excluded: dict[str, str] = {}
             for rule in engine.effective_rules:
                 if rule.base_rule.action != "kill":
                     continue
-                latest = stats.get(rule.name, {}).get("last_value")
+                # Every kill rule ends up in EXACTLY ONE of per_rule or
+                # excluded. Order matters: the liveness verdict is checked
+                # FIRST, because a rule whose signal died also has no
+                # last_value, and the old `latest is None -> continue` made it
+                # vanish from both -- silently, which is the behaviour this
+                # endpoint pair was disagreeing through. Meanwhile a rule
+                # reading a fresh garbage zero DID have a last_value and stayed
+                # in the fold at 1.0.
                 threshold = rule.base_rule.threshold
-                if latest is None or not threshold:
+                verdict = self.liveness(rule.signal, now)
+                if verdict != "live":
+                    excluded[rule.name] = verdict
+                    continue
+                latest = stats.get(rule.name, {}).get("last_value")
+                if latest is None:
+                    excluded[rule.name] = "no_reading"
+                    continue
+                if not threshold:
+                    excluded[rule.name] = "no_threshold"
                     continue
                 # THE SAME STATISTIC AND WINDOW AS /headroom/detail, and that
                 # is a deliberate choice over the more obvious one.
@@ -670,12 +771,14 @@ class ServiceState:
                     headroom = (threshold - value) / threshold
                 per_rule[rule.name] = max(0.0, min(1.0, headroom))
             if not per_rule:
-                return {"min_headroom": None, "binding_rule": None, "per_rule": {}}
+                return {"min_headroom": None, "binding_rule": None,
+                        "per_rule": {}, "excluded": excluded}
             binding_rule = min(per_rule, key=per_rule.get)
             return {
                 "min_headroom": per_rule[binding_rule],
                 "binding_rule": binding_rule,
                 "per_rule": per_rule,
+                "excluded": excluded,
             }
 
     def snapshot_headroom_detail(self) -> dict[str, Any]:
@@ -770,6 +873,11 @@ class ServiceState:
                     # (PHASE3.5 10a: no second set of limits downstream).
                     # None for non-thermal signals and for signals with no rule.
                     "thermal_band_c": bands.get(sig),
+                    # Marked, NOT removed. A consumer has to be able to see
+                    # and name a dead signal; dropping it here is precisely
+                    # how a partial failure becomes invisible downstream.
+                    "liveness": self.liveness(sig, now),
+                    "age_s": max(0.0, now - ts),
                 }
             return {"per_signal": per_signal, "ts": now}
 
@@ -899,7 +1007,8 @@ class ServiceState:
         return applied
 
 
-def _serialize_rule(rule: EffectiveRule, stats: dict[str, Any], now_ns: int) -> dict[str, Any]:
+def _serialize_rule(rule: EffectiveRule, stats: dict[str, Any], now_ns: int,
+                    liveness: str = "live") -> dict[str, Any]:
     cooldown_remaining_s = max(0.0, (rule.cooldown_until_ns - now_ns) / 1_000_000_000)
     base_name = rule.base_rule.name
     threshold = rule.base_rule.threshold
@@ -945,6 +1054,7 @@ def _serialize_rule(rule: EffectiveRule, stats: dict[str, Any], now_ns: int) -> 
         # what lets a UI say "not guarding" instead of showing a calm green tile
         # for a rule whose sensor died.
         "starved": rule.starved,
+        "liveness": liveness,
         "tuning": tuning,
     }
 
