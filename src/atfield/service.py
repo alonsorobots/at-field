@@ -539,20 +539,45 @@ def run_service(
                 api_state.update_collector_health(c.name, c.health().name)  # type: ignore[attr-defined]
             samples.pop(PER_PROCESS_VRAM_KEY, None)
 
-            # Drop physically-impossible readings BEFORE anything consumes them
-            # (api mirror, forensics, policy evaluation, /headroom). A garbage
-            # sample must look like MISSING data so its rule abstains -- never
-            # like "far over threshold", which fails open in the dangerous
-            # direction. See signals.is_plausible for the 885510 C incident.
-            implausible = [k for k, s in samples.items() if not is_plausible(s.value, s.unit)]
-            for k in implausible:
-                bad = samples.pop(k)
-                _warn_implausible_once(k, bad.value, bad.unit)
+            # ONE liveness verdict, decided HERE -- the single place that
+            # already knew which readings to distrust -- and rendered
+            # everywhere downstream. A sample is believable only if its
+            # collector reports healthy AND the value is physically possible.
+            #
+            # A physically-impossible reading must still make its rule ABSTAIN
+            # rather than read "far over threshold", which fails open in the
+            # dangerous direction (signals.is_plausible, the 885510 C
+            # incident). It gets there by being withheld from the engine --
+            # NOT by being deleted. Until 2026-09-07 it was `samples.pop`-ed
+            # before the mirror and the forensic stream ever saw it, so the
+            # wedged card's 2393 zeros were never written down and /health
+            # could not name the signal they came from: `rules_starved` said
+            # 1 while `signals_not_live` was empty, because the signal was
+            # absent from the mirror rather than marked in it.
+            health_by_source = {
+                c.name: c.health().name for c in collectors  # type: ignore[attr-defined]
+            }
+            credible_samples, suspect_samples = split_by_credibility(
+                samples, health_by_source)
+            for k, bad in suspect_samples.items():
+                if not is_plausible(bad.value, bad.unit):
+                    _warn_implausible_once(k, bad.value, bad.unit)
+            if set(suspect_samples) != last_suspect:
+                if suspect_samples:
+                    _log.warning(
+                        "SUSPECT SAMPLES: %s -- arriving but not believable "
+                        "(collector unhealthy, or value impossible). Their rules "
+                        "will starve rather than read from them.",
+                        ", ".join(f"{k}={s.value:g}" for k, s in sorted(suspect_samples.items())))
+                elif last_suspect:
+                    _log.warning("suspect samples cleared: %s are believable again",
+                                 ", ".join(sorted(last_suspect)))
+                last_suspect = set(suspect_samples)
 
             # Presence: write/clear presence.sentinel on state transitions only
             # (not every tick) to avoid needless filesystem churn at 1Hz+.
             if cfg.presence.enabled:
-                idle_sample = samples.get("system.input_idle_s")
+                idle_sample = credible_samples.get("system.input_idle_s")
                 if idle_sample is not None:
                     last_idle_sample_ns = now_ns
                     is_present = idle_sample.value < cfg.presence.idle_threshold_s
@@ -591,30 +616,6 @@ def run_service(
             # Push samples into the API state mirror BEFORE evaluation so the
             # tray dashboard can show "current value" even if the rule abstained.
             tick_unix = time.time()
-            # ONE liveness verdict, decided here and rendered everywhere.
-            # A sample is believable only if its collector says it is working
-            # AND the value is physically possible; neither fact alone is
-            # enough (see signals.is_credible). Only the believable half
-            # reaches the engine, so "any arriving sample clears starvation"
-            # becomes true again instead of being the bug that retracted a
-            # correct alarm on 2026-09-03.
-            health_by_source = {
-                c.name: c.health().name for c in collectors  # type: ignore[attr-defined]
-            }
-            credible_samples, suspect_samples = split_by_credibility(
-                samples, health_by_source)
-            if set(suspect_samples) != last_suspect:
-                if suspect_samples:
-                    _log.warning(
-                        "SUSPECT SAMPLES: %s -- arriving but not believable "
-                        "(collector unhealthy, or value impossible). Their rules "
-                        "will starve rather than read from them.",
-                        ", ".join(f"{k}={s.value:g}" for k, s in sorted(suspect_samples.items())))
-                elif last_suspect:
-                    _log.warning("suspect samples cleared: %s are believable again",
-                                 ", ".join(sorted(last_suspect)))
-                last_suspect = set(suspect_samples)
-
             api_state.record_tick(now_unix=tick_unix, samples=samples,
                                   credible=set(credible_samples))
             # Stage this tick for the on-disk forensic stream. Non-blocking;

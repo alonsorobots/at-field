@@ -181,8 +181,25 @@ def is_credible(sample: "Sample", collector_health_name: str) -> bool:
 
     ``collector_health_name`` is the string form (``HealthState.name``) rather
     than the enum, so this stays a pure function over data that has already
-    crossed a snapshot boundary. An unrecognised name is treated as healthy:
-    a bookkeeping gap must not silently mute a rule.
+    crossed a snapshot boundary.
+
+    ONE principle decides the two "I do not recognise this" cases, and they
+    resolve OPPOSITE ways on purpose:
+
+    * **Absent information -> trust.** A sample whose collector we have no
+      health entry for at all is credible (handled in
+      :func:`atfield.service.split_by_credibility`, which defaults an unknown
+      ``source_id`` to healthy). A bookkeeping gap must not silently mute a
+      rule.
+    * **Present but unrecognised -> distrust.** A health string that is not
+      exactly ``"HEALTHY"`` -- including a misspelling, a lowercased
+      ``"healthy"``, or a state added later -- is NOT credible. The collector
+      answered, and the answer was not "I am fine".
+
+    So a spelling drift here makes rules starve loudly rather than quietly
+    trusting a broken collector, which is the right direction for a watchdog.
+    An earlier version of this docstring claimed the opposite of what the code
+    does; the code was right.
     """
     if collector_health_name and collector_health_name != "HEALTHY":
         return False

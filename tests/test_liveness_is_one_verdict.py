@@ -143,7 +143,11 @@ class _Replay:
         -- the engine owns that one.
         """
         def __init__(self, owner): self._owner = owner
-        def time(self): return self._owner.now
+        # wall_step models an NTP correction / DST jump / VM resume: it moves
+        # time.time() and leaves time.monotonic() exactly where it was, which
+        # is the whole distinction under test.
+        def time(self): return self._owner.now + self._owner.wall_step
+        def monotonic(self): return self._owner.now
         def monotonic_ns(self): return int(self._owner.now * 1e9)
 
     def __init__(self, tmp_path: Path):
@@ -151,7 +155,11 @@ class _Replay:
         cfg_path.write_text(CONFIG, encoding="utf-8")
         from atfield.config import load_config
         cfg = load_config(cfg_path)
-        self.engine = PolicyEngine(cfg, available_signals=(GPU0,))
+        # 17.0, deliberately NOT the 10.0 default: with the default a
+        # hard-coded grace_s() of 10.0 would agree by coincidence and
+        # the "one number" test could not fail. Verified by mutation.
+        self.engine = PolicyEngine(cfg, available_signals=(GPU0,),
+                                   starvation_after_s=17.0)
         self.state = ServiceState(
             version="test", observe_only=True,
             events_path=tmp_path / "events.jsonl",
@@ -160,6 +168,7 @@ class _Replay:
         )
         self.state.attach_engine(self.engine)
         self.now = 1_000_000.0
+        self.wall_step = 0.0
         import atfield.http_api as _api
         self._mp = pytest.MonkeyPatch()
         self._mp.setattr(_api, "time", _Replay._Clock(self))
@@ -494,7 +503,16 @@ def test_every_collector_name_matches_the_source_id_it_stamps():
     from atfield.collectors.system import SystemCollector
 
     for cls in (SystemCollector, NvmlCollector, LhmLibCollector):
-        src = inspect.getsource(inspect.getmodule(cls))
+        mod = inspect.getmodule(cls)
+        # THE HALF THAT WAS MISSING. The first version of this test only
+        # checked what the module STAMPS and never compared it to the
+        # collector's `.name` -- so setting NvmlCollector.name = "nvidia"
+        # left it green, which is precisely the failure described above.
+        assert cls.name == mod._NAME, (
+            f"{cls.__name__}.name is {cls.name!r} but its samples are stamped "
+            f"{mod._NAME!r}; health_by_source is keyed by .name and looked up "
+            f"by source_id, so every sample from it would default to HEALTHY")
+        src = inspect.getsource(mod)
         # Every Sample built in the module stamps the module's own _NAME.
         # The alternation matching a STRING LITERAL is load-bearing: with an
         # identifier-only pattern this assertion could never fail, because a
@@ -506,3 +524,173 @@ def test_every_collector_name_matches_the_source_id_it_stamps():
             f"{cls.__name__} stamps source_id from {stamped - {'_NAME'}}, which "
             f"may not equal its .name ({cls.name!r}) -- the credibility gate "
             f"keys on source_id and would silently pass everything from it")
+
+
+# ---------------------------------------------------------------------------
+# Findings from the Phase 3 review, each with the test that was missing
+# ---------------------------------------------------------------------------
+
+
+def test_a_never_arriving_signal_is_NAMED_not_just_counted(tmp_path):
+    """F1. `_not_live` iterated the mirror, and a signal that never arrived is
+    not IN the mirror -- so `rules_starved` counted it while the list that
+    exists precisely so a reader need not act on a bare count named nothing.
+
+    This is the state a service restarted into a wedged card lands in and
+    stays in: the rule never gets a first sample, so there is nothing to go
+    stale.
+    """
+    class _Silent(_DegradedButTalkative):
+        def sample(self):
+            self.samples_taken += 1
+            return {}
+
+    cap = _run_loop(tmp_path, _Silent(HealthState.HEALTHY), ticks=4)
+    st = cap["state"]
+    named = {e["signal"]: e for e in st.snapshot_health()["signals_not_live"]}
+    assert LOOP_SIGNAL in named
+    assert named[LOOP_SIGNAL]["liveness"] == "never"
+    assert named[LOOP_SIGNAL]["rule"], "the rule it leaves unguarded must be named"
+    assert named[LOOP_SIGNAL]["age_s"] is None, "never-seen has no age, and must not fake one"
+
+
+def test_an_impossible_value_is_MARKED_not_deleted(tmp_path):
+    """F2. The loop used to `samples.pop()` implausible readings before the
+    mirror and the forensic stream ever saw them.
+
+    So the wedged card's 2393 zeros were never written down, and /health could
+    not name the signal they came from -- it was absent from the mirror rather
+    than marked in it. Withholding it from the ENGINE is what makes the rule
+    abstain; deleting it is what made the failure unexplainable afterwards.
+    """
+    class _Zero(_DegradedButTalkative):
+        def sample(self):
+            self.samples_taken += 1
+            return {LOOP_SIGNAL: _s(WEDGED_ZERO, source="nvml")}
+
+    cap = _run_loop(tmp_path, _Zero(HealthState.HEALTHY), ticks=6)
+    st = cap["state"]
+
+    # Withheld from the engine...
+    er = next(r for r in cap["engine"].effective_rules if r.signal == LOOP_SIGNAL)
+    assert len(er.window) == 0
+    # ...but visible, marked, and attributable everywhere else.
+    latest = st.snapshot_signals(since=None)["latest"][LOOP_SIGNAL]
+    assert latest["value"] == WEDGED_ZERO
+    assert latest["liveness"] == "suspect"
+    assert LOOP_SIGNAL in {e["signal"] for e in st.snapshot_health()["signals_not_live"]}
+    # ...and the evidence survives on disk.
+    from atfield.forensics import FORENSICS_FILENAME
+    lines = [json.loads(l) for l in
+             (tmp_path / FORENSICS_FILENAME).read_text(encoding="utf-8").splitlines() if l]
+    assert lines, "the forensic stream dropped the reading entirely"
+    assert lines[0]["samples"][LOOP_SIGNAL] == WEDGED_ZERO
+    assert lines[0]["suspect"] == [LOOP_SIGNAL]
+
+
+def test_a_signal_stale_but_INSIDE_its_rule_window_still_leaves_the_fold(replay):
+    """F3. The band where the liveness exclusion is the ONLY thing acting.
+
+    Past `grace_s` the rule is starved, but until the rule's own window
+    (30 s here) evicts the last sample, the engine still reports a
+    `last_value` -- so `/headroom` would happily publish a number for a rule
+    that has already stopped guarding. The long-dark tests do not enter this
+    band: after 63,106 s the window has emptied and `last_value` is None, so
+    they pass for a different reason and deleting the exclusion leaves them
+    green.
+    """
+    for _ in range(25):
+        replay.tick(32.0)
+    replay.dark(replay.engine.starvation_after_s + 5.0)   # 22 s: > grace, < window
+
+    stats = replay.engine.stats_snapshot()[RULE0]
+    assert stats["last_value"] is not None, (
+        "this test only means something while the engine STILL has a reading; "
+        "if the window has emptied it is testing the same thing as the long-dark one")
+    hr = replay.state.snapshot_headroom()
+    assert RULE0 not in hr["per_rule"]
+    assert hr["excluded"][RULE0] == "stale"
+
+
+def test_a_rule_with_no_reading_yet_is_reported_not_dropped(replay):
+    """F5c. `no_reading` is a real state -- a rule still filling its first
+    window, or one just re-expanded after a config reload -- and it must be
+    accounted for rather than silently absent, same as any other exclusion."""
+    # The mirror is fed but the engine has evaluated nothing -- the shape a
+    # config reload leaves behind when rules are re-expanded against a mirror
+    # that is already warm. (One ordinary tick does NOT reproduce it: the
+    # engine records a last_value on its first evaluation, not after
+    # min_samples, so the rule goes straight into the fold.)
+    replay.state.record_tick(now_unix=replay.now,
+                             samples={GPU0: _s(32.0, taken_at_ns=int(replay.now * 1e9))},
+                             credible={GPU0})
+    assert replay.engine.stats_snapshot()[RULE0]["last_value"] is None
+    hr = replay.state.snapshot_headroom()
+    assert RULE0 not in hr["per_rule"]
+    assert hr["excluded"][RULE0] == "no_reading"
+
+
+def test_suspect_outranks_stale_and_the_age_is_still_carried(replay):
+    """F5d. Pins the ORDER inside liveness(), which nothing did before.
+
+    A signal that is both unbelievable and ancient reports `suspect` -- the
+    more specific fault, and the one an age check cannot find. Swapping the
+    order would report `stale` and send the reader looking for a stopped
+    sampler instead of a broken one. `age_s` is carried alongside, so naming
+    the more specific fault costs the consumer nothing.
+    """
+    replay.tick(PLAUSIBLE_FROM_A_BROKEN_COLLECTOR, health="DEGRADED")
+    replay.now += 4 * 86400
+    assert replay.state.liveness(GPU0, now=replay.now) == "suspect"
+    entry = next(e for e in replay.state.snapshot_health()["signals_not_live"]
+                 if e["signal"] == GPU0)
+    assert entry["liveness"] == "suspect"
+    assert entry["age_s"] > 3 * 86400, "the age must survive being outranked"
+
+
+def test_an_unrecognised_health_string_is_NOT_trusted():
+    """F6. Present-but-unrecognised resolves the opposite way to absent.
+
+    A misspelling makes rules starve loudly rather than quietly trusting a
+    collector that did not say it was fine. Nothing pinned this, and the
+    docstring used to claim the reverse.
+    """
+    for bogus in ("healthy", "Healthy", "UNPROBED", "bogus", "DEGRADED", "FAILED"):
+        assert not is_credible(_s(REAL_TEMP), bogus), bogus
+    # ...while genuinely absent information is trusted.
+    assert is_credible(_s(REAL_TEMP), "")
+    # and the one spelling that counts is the enum's own .name
+    assert is_credible(_s(REAL_TEMP), HealthState.HEALTHY.name)
+
+
+def test_a_wall_clock_step_cannot_change_a_verdict(replay):
+    """F4. Age is measured on the MONOTONIC clock, so NTP cannot lie about it.
+
+    Measured before the fix: a backward wall step larger than a signal's age
+    made `liveness` read `live` while the engine already had the rule
+    `starved` -- one `/rules` payload asserting both at once. A forward step
+    did the reverse, flushing every signal to `stale` and emptying
+    `/headroom` for a tick while `rules_starved` was still 0.
+
+    NOTE the calls below pass NO `now`. An earlier version of this test passed
+    one explicitly, which meant `liveness` never consulted a clock and the
+    test could not fail -- reverting the implementation to wall-clock ages
+    left it green. Caught by mutation.
+    """
+    for _ in range(25):
+        replay.tick(32.0)
+    assert replay.state.liveness(GPU0) == "live"
+
+    # A day BACKWARD. Under wall-clock ages this reads as a negative age.
+    replay.wall_step = -86400.0
+    assert replay.state.liveness(GPU0) == "live"
+    r = replay.rule()
+    assert not (r["starved"] and r["liveness"] == "live"), (
+        "a payload cannot say a rule is starved AND its signal is live")
+
+    # A day FORWARD. Under wall-clock ages every signal flushes to stale and
+    # /headroom empties, for a machine that is perfectly healthy.
+    replay.wall_step = 86400.0
+    assert replay.state.liveness(GPU0) == "live"
+    assert replay.state.snapshot_headroom()["excluded"] == {}
+    assert replay.state.snapshot_health()["signals_not_live"] == []

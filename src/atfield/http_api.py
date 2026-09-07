@@ -271,6 +271,14 @@ class ServiceState:
         # existing unpackers stay unchanged; the pairing is maintained by
         # record_tick, which is the sole writer of both.
         self._credible: dict[str, bool] = {}
+        # Monotonic stamp per signal, beside the wall-clock one in
+        # _latest_signal. AGE is measured from this; the wall clock is kept
+        # only for display. A wall clock can step (NTP, DST, a VM resuming),
+        # and a backward step made a signal read `live` while its rule was
+        # already `starved` -- one /rules payload asserting both. Monotonic
+        # cannot step, and the engine already measures starvation with it, so
+        # this also makes the two agree by construction rather than by luck.
+        self._mono: dict[str, float] = {}
         # Per-signal multi-resolution history. Tier 0 backs /signals (last
         # hour of raw samples); slice() backs /signals/history (up to 24h
         # of mixed-resolution samples).
@@ -348,6 +356,7 @@ class ServiceState:
                 value = float(sample.value)
                 self._latest_signal[sig] = (now_unix, value, sample.source_id, sample.unit)
                 self._credible[sig] = credible is None or sig in credible
+                self._mono[sig] = time.monotonic()
                 hist = self._history.get(sig)
                 if hist is None:
                     hist = _MultiResHistory()
@@ -409,6 +418,10 @@ class ServiceState:
         engine = self._engine
         return float(getattr(engine, "starvation_after_s", 10.0)) if engine else 10.0
 
+    def _age_s(self, signal: str, now_mono: float) -> float:
+        """Seconds since this signal last arrived, on the MONOTONIC clock."""
+        return max(0.0, now_mono - self._mono.get(signal, now_mono))
+
     def liveness(self, signal: str, now: float | None = None) -> str:
         """``never`` | ``suspect`` | ``stale`` | ``live`` for one signal.
 
@@ -426,24 +439,36 @@ class ServiceState:
             return "never"
         if not self._credible.get(signal, True):
             return "suspect"
-        now = time.time() if now is None else now
-        return "stale" if (now - latest[0]) > self.grace_s() else "live"
+        now = time.monotonic() if now is None else now
+        return "stale" if self._age_s(signal, now) > self.grace_s() else "live"
 
-    def _not_live(self, now: float) -> list[dict[str, Any]]:
+    def _not_live(self, now_mono: float) -> list[dict[str, Any]]:
         """Every signal that is not live, with the rule it leaves unguarded."""
+        now = now_mono
         rules_by_signal: dict[str, str] = {}
         engine = self._engine
         if engine is not None:
             for r in engine.effective_rules:
                 rules_by_signal.setdefault(r.signal, r.name)
         out = []
-        for sig, (ts, _v, _src, _u) in self._latest_signal.items():
+        for sig in self._latest_signal:
             verdict = self.liveness(sig, now)
             if verdict != "live":
                 out.append({"signal": sig, "liveness": verdict,
-                            "age_s": max(0.0, now - ts),
+                            "age_s": self._age_s(sig, now),
                             "rule": rules_by_signal.get(sig)})
-        return sorted(out, key=lambda e: -e["age_s"])
+        # A signal that has NEVER arrived is not in the mirror at all, so
+        # iterating the mirror cannot see it -- and that is exactly the state a
+        # service restarted into a wedged card lands in permanently: the rule
+        # starves, `rules_starved` counts it, and this list stayed EMPTY. The
+        # count then said "1" while the list that exists so a reader need not
+        # act on a bare count named nothing. Rule-bearing signals are the ones
+        # worth reporting: a signal with no rule guards nothing.
+        for sig, rule_name in rules_by_signal.items():
+            if sig not in self._latest_signal:
+                out.append({"signal": sig, "liveness": "never",
+                            "age_s": None, "rule": rule_name})
+        return sorted(out, key=lambda e: (e["age_s"] is not None, -(e["age_s"] or 0.0)))
 
     def snapshot_health(self) -> dict[str, Any]:
         with self._lock:
@@ -540,7 +565,7 @@ class ServiceState:
                 # The COUNT was already here and was not enough: a reader
                 # cannot act on "1". These name the signals and the rule each
                 # one leaves unguarded.
-                "signals_not_live": self._not_live(now),
+                "signals_not_live": self._not_live(time.monotonic()),
                 "rules_unable_to_fire": rules_unable,
                 "last_action": (
                     {
@@ -568,6 +593,7 @@ class ServiceState:
         """
         with self._lock:
             now = time.time()
+            now_mono = time.monotonic()
             latest = {
                 sig: {
                     "value": value,
@@ -577,8 +603,8 @@ class ServiceState:
                     # Rendered, never re-decided. A tile that shows `value`
                     # without this reports a four-day-old number as current,
                     # which is how the operator found the 2026-09-02 wedge.
-                    "liveness": self.liveness(sig, now),
-                    "age_s": max(0.0, now - ts),
+                    "liveness": self.liveness(sig, now_mono),
+                    "age_s": self._age_s(sig, now_mono),
                 }
                 for sig, (ts, value, source, unit) in self._latest_signal.items()
             }
@@ -635,7 +661,7 @@ class ServiceState:
             now_wall = time.time()
             effective = [
                 _serialize_rule(r, stats.get(r.name, {}), now_ns,
-                                self.liveness(r.signal, now_wall))
+                                self.liveness(r.signal, time.monotonic()))
                 for r in engine.effective_rules
             ]
             disabled = [
@@ -720,6 +746,7 @@ class ServiceState:
                         "per_rule": {}, "excluded": {}}
             stats = engine.stats_snapshot()
             now = time.time()
+            now_mono = time.monotonic()
             per_rule: dict[str, float] = {}
             excluded: dict[str, str] = {}
             for rule in engine.effective_rules:
@@ -734,7 +761,7 @@ class ServiceState:
                 # reading a fresh garbage zero DID have a last_value and stayed
                 # in the fold at 1.0.
                 threshold = rule.base_rule.threshold
-                verdict = self.liveness(rule.signal, now)
+                verdict = self.liveness(rule.signal, now_mono)
                 if verdict != "live":
                     excluded[rule.name] = verdict
                     continue
@@ -832,6 +859,7 @@ class ServiceState:
                         bands[rule.signal] = float(
                             getattr(rule.base_rule, "thermal_band_c", 25.0) or 25.0)
 
+            _now_mono = time.monotonic()
             per_signal: dict[str, Any] = {}
             for sig, (ts, value, _source, unit) in self._latest_signal.items():
                 hist = self._history.get(sig)
@@ -876,8 +904,8 @@ class ServiceState:
                     # Marked, NOT removed. A consumer has to be able to see
                     # and name a dead signal; dropping it here is precisely
                     # how a partial failure becomes invisible downstream.
-                    "liveness": self.liveness(sig, now),
-                    "age_s": max(0.0, now - ts),
+                    "liveness": self.liveness(sig, _now_mono),
+                    "age_s": self._age_s(sig, _now_mono),
                 }
             return {"per_signal": per_signal, "ts": now}
 
