@@ -40,6 +40,7 @@ from typing import Any, Final
 from atfield.collectors import HealthState, ProbeResult
 from atfield.collectors.lhm import (
     _CPU_PACKAGE_PATTERNS,
+    _CPU_PACKAGE_POWER_PATTERNS,
     _HOTSPOT_PATTERNS,
     _RAIL_VOLTAGE_PATTERNS,
     _VRAM_JUNCTION_PATTERNS,
@@ -307,6 +308,8 @@ class LhmLibCollector:
         mapping: dict[str, tuple[str, str]] = {}
         cpu_idx = 0
         matched_cpu_hw: set[str] = set()
+        cpu_power_idx = 0
+        matched_cpu_power_hw: set[str] = set()
         emitted_voltage: set[str] = set()
         # GPU temps need a whole-list view before we can name them, because
         # deciding whether a "memory junction" is real means comparing it with
@@ -346,6 +349,29 @@ class LhmLibCollector:
                     matched_cpu_hw.add(hw)
                     cpu_idx += 1
                     continue
+
+            elif stype == "Power":
+                # Diagnostic only. Temperature tracks POWER, not utilization --
+                # a 9950X3D pulls 80-126 W at 11-27% "usage" -- and the absence
+                # of this channel is why a healthy cooler was once diagnosed as
+                # a failing pump. See tests/test_cpu_package_power.py.
+                value = self._usable_value(s, "watts")
+                if value is None:
+                    continue
+                if (
+                    hw_type == "Cpu"
+                    and hw not in matched_cpu_power_hw
+                    and any(p.search(name) for p in _CPU_PACKAGE_POWER_PATTERNS)
+                ):
+                    sig = (
+                        "system.cpu_package_power_w"
+                        if cpu_power_idx == 0
+                        else f"system.cpu{cpu_power_idx}_package_power_w"
+                    )
+                    mapping[sid] = (sig, "watts")
+                    matched_cpu_power_hw.add(hw)
+                    cpu_power_idx += 1
+                continue
 
             elif stype == "Voltage":
                 value = self._usable_value(s, "volts")

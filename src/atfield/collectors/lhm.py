@@ -69,6 +69,18 @@ _VRAM_JUNCTION_PATTERNS: Final = (
 # and it gets its own signal name. This used to be the last entry of
 # _VRAM_JUNCTION_PATTERNS, commented "hot-spot is close" -- it is not close
 # enough. See _synthetic_junction() for what that cost.
+# CPU package POWER -- the variable that actually explains CPU temperature.
+# Published as a DIAGNOSTIC, never as a guard: there is no operator-authored
+# wall for watts, and inventing one would be a second set of limits.
+#
+# Matched narrowly. On a 9950X3D the same hwType/type pair also carries 16
+# "Core #N (SMU)" sensors at ~0.1-6 W each; publishing one of those as package
+# power would understate the real 77 W by ~85x. GPU package power is a
+# different hwType and already arrives from NVML.
+_CPU_PACKAGE_POWER_PATTERNS: Final = (
+    re.compile(r"^package$", re.IGNORECASE),
+    re.compile(r"^cpu package$", re.IGNORECASE),
+)
 _HOTSPOT_PATTERNS: Final = (
     re.compile(r"gpu hot ?spot", re.IGNORECASE),
 )
