@@ -52,7 +52,7 @@ from atfield.forensics import ForensicBuffer
 from atfield.forensics import rotate_on_startup as rotate_forensics_on_startup
 from atfield.http_api import ApiServer, ServiceState, collector_view_from_probe
 from atfield.policy import PolicyEngine
-from atfield.reporter import report_kill
+from atfield.reporter import report_guard_health, report_kill
 from atfield.signals import Sample, is_credible, is_plausible
 
 __all__ = [
@@ -694,6 +694,21 @@ def run_service(
             for change in engine.drain_signal_health_changes():
                 audit.write_signal_health(change)
                 if change.state == "starved":
+                    # Leave the machine. Every other channel for this is local:
+                    # the ERROR below, events.jsonl, and a count in /health.
+                    # All three fired correctly on 2026-09-02 and the guard
+                    # stayed dead for 4.2 days, because the loudest thing a
+                    # human could see was a tray tooltip. The subscriber
+                    # surfaces this with no worker running on this host.
+                    try:
+                        report_guard_health(
+                            sd, rule=change.rule_name, signal=change.signal,
+                            action=change.action,
+                            detail=(f"signal silent for {change.silent_for_s:.0f}s"
+                                    + ("" if change.ever_seen
+                                       else " (never arrived this run)")))
+                    except Exception:  # noqa: BLE001 - never break the tick loop
+                        _log.debug("guard_health report failed", exc_info=True)
                     _log.error(
                         "SIGNAL LOST: rule=%s signal=%s has produced nothing for %.1fs "
                         "-- this rule is NOT guarding (action=%s would never fire)%s",

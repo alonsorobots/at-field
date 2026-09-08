@@ -149,3 +149,61 @@ def report_kill(state_dir: Path, *, action: Any, report: Any) -> None:
             # Subscriber persistently unreachable and events piling up: drop
             # the newest rather than block the tick loop or grow unbounded.
             _log.debug("reporter queue full; dropping event for %s", url)
+
+
+def report_guard_health(
+    state_dir: Path, *, rule: str, signal: str, action: str, detail: str
+) -> None:
+    """POST a "this rule has gone INERT" event to every registered subscriber.
+
+    The counterpart to :func:`report_kill`, and the more important one. A kill
+    is loud by construction -- work dies and somebody notices. A guard that
+    stops guarding is silent: the rule reports ``INSUFFICIENT``, which is also
+    what a freshly-started rule reports, and ``/health`` goes on saying
+    ``armed``.
+
+    On 2026-09-02 a wedged NVML session left both GPU core-temp rules inert for
+    **4.2 days**. Detection was never the problem -- ``SIGNAL LOST`` was logged
+    at ERROR within 10.6 s, written to ``events.jsonl``, and counted in
+    ``/health`` -- but every one of those channels is local to the machine, and
+    the loudest thing a human could actually see was a tray tooltip. On
+    2026-09-03 a slow tick loop did the same to all seven rules at once and the
+    machine ran an hour at Tjmax.
+
+    So this leaves the host. The subscriber (Kiroshi's coordinator) records it
+    in ``atfield_events``, which its ``status`` surfaces **whether or not any
+    worker is running on this host** -- the previous route out went through a
+    worker's tuner snapshot, so an idle machine with a dead guard told nobody.
+
+    ``type``/``kind`` is ``guard_health``, and that discriminator is
+    load-bearing: the same stream feeds a thermal-hold policy that bans hosts,
+    and this event names the same ``rule`` as a kill while meaning the
+    opposite. See kiroshi ``tests/test_guard_health_events_never_ban_a_host.py``.
+
+    Best-effort and non-blocking, like every other path in this module: a
+    subscriber that is down must never slow the tick loop that also handles
+    thermal emergencies.
+    """
+    webhooks = _webhooks(state_dir)
+    if not webhooks:
+        return
+
+    payload = {
+        "type": "guard_health",
+        "kind": "guard_health",
+        "host": _HOSTNAME,
+        "rule": rule,
+        "signal": signal,
+        # The action that WOULD have fired and now cannot -- the reason this
+        # matters. A "log" rule going inert is a nuisance; a "kill" rule going
+        # inert is an unguarded machine.
+        "action": action,
+        "detail": detail,
+        "ts": time.time(),
+    }
+    _ensure_worker()
+    for url in webhooks:
+        try:
+            _send_queue.put_nowait((url, payload))
+        except queue.Full:
+            _log.debug("reporter queue full; dropping guard_health for %s", url)
