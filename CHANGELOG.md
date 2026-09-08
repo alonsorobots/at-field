@@ -7,6 +7,30 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.14] — 2026-09-08 — Say what is eating the tick, and what is heating the chip
+
+### Added
+
+- **A slow tick now names the phase that ate it.** Per-phase wall-clock across
+  the loop (pause / collect / credibility / presence / mirror / forensics /
+  engine / rss_cap / dispatch / heartbeat), and one WARNING when a tick exceeds
+  twice its period, naming the slowest phase with its cost and the full
+  breakdown. Pure observation — no threshold that changes behaviour.
+
+  This is the diagnostic that was missing on 2026-09-03, when a per-tick RSS cap
+  added as a *safety feature* drove the loop to 0.22 Hz and left every rule
+  mathematically unable to fire while  reported . The machine
+  ran an hour at Tjmax.  now adapts to the observed cadence and
+   reports the symptom — but nothing said what was
+  consuming the tick, and Chronos still runs at 0.36 Hz with 18
+   events while  accounts for 0.18 ms of a
+  2,770 ms tick.
+- **** — the variable that actually explains CPU
+  temperature. Its absence is why a healthy cooler was once diagnosed as a
+  failing pump: the chip pulls 80–126 W at 11–27% usage, so utilization is
+  the wrong variable. Diagnostic only; it is not a guard and does not classify
+  as thermal.
+
 ## [0.4.13] — 2026-09-07 — What the liveness review found
 
 An adversarial review of 0.4.12 ran seven mutations against the suite; five
