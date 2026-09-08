@@ -212,6 +212,19 @@ class ProcessProvider(Protocol):
         """Return a snapshot of every process visible to the service."""
         ...
 
+    def list_all_lean(self) -> list[ProcInfo]:
+        """Like :meth:`list_all` but WITHOUT cmdline -- entries carry ``()``.
+
+        MEASURED on a 466-process box, ELEVATED (how the service runs):
+        cmdline() is 2,060 ms of a 2,091 ms walk; without it, 32.7 ms.
+        Unelevated the numbers invert, so measure in the right context.
+
+        Callers MUST NOT make a kill decision from these entries: cmdline is a
+        safety filter (``never_kill_cmdline_patterns``). Re-fetch the full
+        record with :meth:`get` for the few processes that matter.
+        """
+        ...
+
     def get(self, pid: int) -> ProcInfo | None:
         """Return ProcInfo for ``pid``, or None if it no longer exists."""
         ...
@@ -305,6 +318,29 @@ class PsutilProvider:
             info = self._to_info(p)
             if info is not None:
                 out.append(info)
+        return out
+
+    def list_all_lean(self) -> list[ProcInfo]:
+        """Every process, minus the one field that costs 98.5% of the walk."""
+        out: list[ProcInfo] = []
+        for p in self._psutil.process_iter(attrs=None):
+            try:
+                with p.oneshot():
+                    name = p.name()
+                    ppid = p.ppid()
+                    try:
+                        rss = int(p.memory_info().rss)
+                    except Exception:
+                        rss = 0
+                    try:
+                        created = float(p.create_time())
+                    except Exception:
+                        created = 0.0
+                out.append(ProcInfo(pid=p.pid, ppid=ppid, name=name,
+                                    cmdline=(), rss_bytes=rss,
+                                    created_at=created))
+            except Exception:
+                continue
         return out
 
     def get(self, pid: int) -> ProcInfo | None:
@@ -638,13 +674,45 @@ class Actuator:
             return []
         self._last_rss_cap_ns = now_mono_ns
         cap_bytes = int(cap_gb * (1024 ** 3))
+
+        # THREE THINGS ARE EXPENSIVE HERE, AND A HEALTHY MACHINE PAYS FOR NONE.
+        #
+        # `_protected_pids()` calls the FULL list_all() -- with cmdline --
+        # whenever never_kill_cmdline_patterns is configured, and the candidate
+        # scan called it again. On Chronos, which HAS those patterns set, that
+        # is two 2-second walks per run: measured `SLOW TICK: 4367.0ms against
+        # a 1000.0ms budget -- rss_cap 4364.6ms`, 6,557 times, holding the loop
+        # at 0.36 Hz and its thermal rules at 2.4x margin. DEMETER and Aurora
+        # configure no patterns, pay one walk, and sit at 0.78 Hz -- which is
+        # the entire reason Chronos looked uniquely slow.
+        #
+        # This is the same component that starved the loop to 0.22 Hz on
+        # 2026-09-03 and let the machine run an hour at Tjmax.
+        #
+        # So: sweep cheap FIRST (no cmdline, 33 ms), and reach for the
+        # expensive facts only if something is actually over the cap. In 1,812
+        # recorded events across three hosts, nothing real ever has been.
+        scan = getattr(self._provider, "list_all_lean", self._provider.list_all)
+        lean = [p for p in scan() if p.name.lower() in self._killable]
+        over = processes_over_rss_cap(lean, cap_bytes)
+        if not over:
+            return []
+
+        # Something IS oversized: now pay for the facts a kill needs. The lean
+        # entries carry no cmdline, so deciding from them would make the scan
+        # fast by making it BLIND -- and this path kills a process AND every
+        # descendant.
         protected = self._protected_pids()
-        candidates = [
-            p for p in self._provider.list_all()
-            if p.name.lower() in self._killable
-            and p.pid not in protected
-            and self._is_killable(p)
-        ]
+        candidates: list[ProcInfo] = []
+        for lean_hit in over:
+            if lean_hit.pid in protected:
+                continue
+            full = self._provider.get(lean_hit.pid)
+            if full is None:
+                continue        # exited between the sweep and the fetch
+            if self._is_killable(full):
+                candidates.append(full)
+
         reports: list[KillReport] = []
         for offender in processes_over_rss_cap(candidates, cap_bytes):
             action = Action(

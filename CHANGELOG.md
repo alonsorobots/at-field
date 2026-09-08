@@ -7,6 +7,38 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.15] — 2026-09-08 — The RSS cap stops starving the tick loop
+
+### Fixed
+
+- **`enforce_rss_cap` was 99.94% of Chronos's tick.** Measured live:
+  `SLOW TICK: 4367.0ms against a 1000.0ms budget -- slowest phase rss_cap at
+  4364.6ms`, 6,557 times, holding the loop at 0.36 Hz against a configured
+  1 Hz and leaving its thermal rules at 2.4x margin. This is the same
+  component that starved the loop to 0.22 Hz on 2026-09-03 and let the machine
+  run an hour at Tjmax; it was rate-limited then rather than made cheap, and
+  the limit was not enough.
+
+  The cost is `cmdline()`: on a 466-process box, ELEVATED (how the service
+  runs), it is 2,060 ms of a 2,091 ms walk, and without it the walk is 32.7 ms.
+  It was paid TWICE per run — once in `_protected_pids()`, which does a full
+  `list_all()` whenever `never_kill_cmdline_patterns` is configured, and once
+  in the candidate scan. Chronos has those patterns set; DEMETER and Aurora do
+  not, pay one walk, and run at 0.78 Hz. That asymmetry was the whole mystery.
+
+  Now the sweep is cheap first (`list_all_lean()`, no cmdline) and the
+  expensive facts — protected pids, cmdline, the never-kill filter — are
+  fetched only if something is actually over the cap. In 1,812 recorded events
+  across three hosts, nothing real ever has been.
+
+  **Safety is unchanged and tested:** a process matching
+  `never_kill_cmdline_patterns` and over the cap is still spared, and that test
+  goes red only when *both* independent never-kill layers are removed.
+
+  Privilege level inverts these numbers — unelevated, `cmdline()` costs 12.6 ms
+  and `memory_info()` costs 1,098 ms — so a fix designed from an ordinary
+  shell would have removed the wrong call and made the walk 23x worse.
+
 ## [0.4.14] — 2026-09-08 — Say what is eating the tick, and what is heating the chip
 
 ### Added
