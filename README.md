@@ -30,6 +30,11 @@ that intercepts the jobs trying to melt your rig.
 > watchdog, or grab the one-click installer for the watchdog + tray dashboard in a
 > single `.exe`. See [CHANGELOG.md](CHANGELOG.md) and
 > [docs/sensors.md](docs/sensors.md) for the full layered sensor strategy.
+>
+> **Changing a GPU temperature rule?** Read
+> [docs/AURORA_THERMALS.md](docs/AURORA_THERMALS.md) first — GPU sensor sets
+> differ by architecture, LHM fabricates the missing one, and that cost a
+> healthy machine 63 spurious hard-kills.
 
 ## Two pieces, one tool
 

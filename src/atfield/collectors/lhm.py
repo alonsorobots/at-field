@@ -52,6 +52,12 @@ _DEFAULT_URL: Final = "http://127.0.0.1:8085/data.json"
 _DEFAULT_TIMEOUT_S: Final = 1.5
 
 # Patterns ordered by preference. First match per device wins.
+# BEFORE EDITING THESE PATTERNS: read docs/AURORA_THERMALS.md. Getting this
+# wrong hard-killed a healthy machine 63 times in three hours, and the two
+# "obvious" diagnoses of that were both wrong. Turing has a hot spot and NO
+# memory junction; Blackwell has a memory junction and NO hot spot; LHM
+# fabricates whichever one is missing by copying the one that exists.
+#
 # These are case-insensitive substring matches against the sensor's full
 # path text (parent + sensor name) -- LHM nests sensors deeply.
 _VRAM_JUNCTION_PATTERNS: Final = (

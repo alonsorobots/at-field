@@ -1,5 +1,17 @@
 # Sensor coverage strategy
 
+> ### ⚠ Before changing a GPU temperature rule, read [AURORA_THERMALS.md](AURORA_THERMALS.md)
+>
+> Turing and Blackwell have **exactly complementary** GPU sensor sets — a hot
+> spot on one, a memory junction on the other, never both. LibreHardwareMonitor
+> invents the missing one by copying the one that exists. That fabricated
+> sensor hard-killed a healthy machine **63 times in three hours**, and the
+> "obvious" diagnosis of it was wrong twice in a row.
+>
+> NVML and LHM also index GPUs differently and **have been observed transposed
+> on this fleet**, so pairing a number from one with a number from the other is
+> unsound.
+
 > **TL;DR.** AT-Field reads the most reliable sensor source available on each system, in this order: NVML (NVIDIA), ROCm-SMI (AMD), psutil (always), LibreHardwareMonitor (bundled, MPL-2.0). LHM is consumed **headlessly via its library** (a tiny bundled `atfield-sensors.exe` that loads `LibreHardwareMonitorLib.dll`), not via its GUI web server. We always ship LHM.
 
 This document explains why, what each tool gives us, and what's still on the
