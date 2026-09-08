@@ -89,6 +89,55 @@ _RESTART_UPTIME_FLOOR_S = 120.0
 # ---------------------------------------------------------------------------
 
 
+class _PhaseTimer:
+    """Per-phase wall-clock for one tick, and the report when it overruns.
+
+    THE REASON THIS EXISTS. On 2026-09-03 a per-tick RSS cap added as a safety
+    feature walked 402 processes including cmdline -- 0.70 s median, 4.32 s
+    worst, against a 1 s budget. The tick fell to 0.22 Hz, every rule's window
+    stopped holding enough samples, and all seven returned INSUFFICIENT
+    forever while /health reported `armed, rules_active: 7, rules_starved: 0`.
+    The machine ran an hour at Tjmax.
+
+    Two fixes followed -- min_samples adapts to the observed cadence, and
+    rules_unable_to_fire reports a rule that cannot fire -- and both describe
+    the SYMPTOM. Neither says what is eating the tick. As of 2026-09-08 Chronos
+    runs at 0.36 Hz while bench_tick.py accounts for 0.18 ms of a 2,770 ms
+    tick, so the time is outside every component anyone has profiled.
+
+    Deliberately just a measurement: no threshold that changes behaviour, no
+    new decision, nothing that can itself starve the loop. A dict of floats and
+    one log line on overrun. The last well-meant addition to this function is
+    the reason the rest of this docstring exists.
+    """
+
+    __slots__ = ("_phases", "_t0", "_mark")
+
+    def __init__(self) -> None:
+        self._phases: dict[str, float] = {}
+        self._t0 = time.perf_counter()
+        self._mark = self._t0
+
+    def phase(self, name: str) -> None:
+        """Close the current phase and attribute its elapsed time to ``name``."""
+        now = time.perf_counter()
+        self._phases[name] = self._phases.get(name, 0.0) + (now - self._mark)
+        self._mark = now
+
+    def total_s(self) -> float:
+        return time.perf_counter() - self._t0
+
+    def report(self) -> str:
+        """`collect 302.1ms, engine 0.4ms, ...` -- worst first."""
+        ordered = sorted(self._phases.items(), key=lambda kv: -kv[1])
+        return ", ".join(f"{n} {s * 1000:.1f}ms" for n, s in ordered if s * 1000 >= 0.05)
+
+    def slowest(self) -> tuple[str, float]:
+        if not self._phases:
+            return ("unknown", 0.0)
+        return max(self._phases.items(), key=lambda kv: kv[1])
+
+
 def split_by_credibility(
     samples: dict[str, Sample],
     health_by_source: dict[str, str],
@@ -499,6 +548,7 @@ def run_service(
     try:
         while not stop:
             tick_started_at = time.monotonic()
+            timer = _PhaseTimer()
 
             # Handle reload requests from the HTTP API before doing anything
             # else this tick: rebuild engine + actuator from a fresh config.
@@ -527,6 +577,7 @@ def run_service(
                 last_pause_check_ns = now_ns
 
             # Sample every healthy collector
+            timer.phase("pause")
             samples: dict[str, Sample] = {}
             for c in collectors:
                 if c.health() is HealthState.FAILED:
@@ -538,6 +589,7 @@ def run_service(
                 # Reflect health state changes into the API mirror.
                 api_state.update_collector_health(c.name, c.health().name)  # type: ignore[attr-defined]
             samples.pop(PER_PROCESS_VRAM_KEY, None)
+            timer.phase("collect")
 
             # ONE liveness verdict, decided HERE -- the single place that
             # already knew which readings to distrust -- and rendered
@@ -559,6 +611,7 @@ def run_service(
             }
             credible_samples, suspect_samples = split_by_credibility(
                 samples, health_by_source)
+            timer.phase("credibility")
             for k, bad in suspect_samples.items():
                 if not is_plausible(bad.value, bad.unit):
                     _warn_implausible_once(k, bad.value, bad.unit)
@@ -616,12 +669,15 @@ def run_service(
             # Push samples into the API state mirror BEFORE evaluation so the
             # tray dashboard can show "current value" even if the rule abstained.
             tick_unix = time.time()
+            timer.phase("presence")
             api_state.record_tick(now_unix=tick_unix, samples=samples,
                                   credible=set(credible_samples))
+            timer.phase("mirror")
             # Stage this tick for the on-disk forensic stream. Non-blocking;
             # the actual write happens in the flusher thread.
             forensics.record(samples, ts=tick_unix,
                              suspect=set(suspect_samples))
+            timer.phase("forensics")
 
             # Evaluate
             try:
@@ -629,6 +685,7 @@ def run_service(
             except Exception:
                 _log.exception("policy tick raised; skipping action dispatch this tick")
                 actions = []
+            timer.phase("engine")
 
             # A rule whose signal died is not "quiet", it is BLIND -- it will sit
             # at INSUFFICIENT forever and never fire, no matter how hot the
@@ -672,6 +729,7 @@ def run_service(
                     # A bookkeeping failure here must never stop the tick loop
                     # that also handles thermal emergencies.
                     _log.exception("process RSS cap enforcement failed")
+                timer.phase("rss_cap")
 
             # Dispatch
             for action in actions:
@@ -758,6 +816,7 @@ def run_service(
                         sum(1 for k in report.killed if k.survived),
                     )
 
+            timer.phase("dispatch")
             # Heartbeat
             if now_ns - last_heartbeat_ns >= int(_HEARTBEAT_INTERVAL_S * 1_000_000_000):
                 _write_heartbeat(sd, observe_only=observe_only)
@@ -801,6 +860,22 @@ def run_service(
             ticks += 1
             if max_ticks is not None and ticks >= max_ticks:
                 break
+
+            # A tick that overruns its period must say WHICH PHASE ate it.
+            # Observation only -- see _PhaseTimer for the incident this exists
+            # for. Threshold is 2x the period so ordinary jitter stays silent;
+            # a diagnostic that fires every tick is noise, and noise is how the
+            # last thermal signal went unread for four days.
+            timer.phase("heartbeat")
+            tick_total = timer.total_s()
+            if tick_total > 2.0 * tick_period_s:
+                worst, worst_s = timer.slowest()
+                _log.warning(
+                    "SLOW TICK: %.1fms against a %.1fms budget -- slowest phase "
+                    "%s at %.1fms. Full breakdown: %s. A tick this slow shrinks "
+                    "every rule's window; check /health rules_unable_to_fire.",
+                    tick_total * 1000, tick_period_s * 1000,
+                    worst, worst_s * 1000, timer.report())
 
             # Sleep the remainder of the tick period.
             elapsed = time.monotonic() - tick_started_at
