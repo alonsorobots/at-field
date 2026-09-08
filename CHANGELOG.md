@@ -15,21 +15,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   the loop (pause / collect / credibility / presence / mirror / forensics /
   engine / rss_cap / dispatch / heartbeat), and one WARNING when a tick exceeds
   twice its period, naming the slowest phase with its cost and the full
-  breakdown. Pure observation — no threshold that changes behaviour.
+  breakdown. Pure observation — no threshold that changes behaviour, nothing
+  that can itself starve the loop.
 
   This is the diagnostic that was missing on 2026-09-03, when a per-tick RSS cap
   added as a *safety feature* drove the loop to 0.22 Hz and left every rule
-  mathematically unable to fire while  reported . The machine
-  ran an hour at Tjmax.  now adapts to the observed cadence and
-   reports the symptom — but nothing said what was
-  consuming the tick, and Chronos still runs at 0.36 Hz with 18
-   events while  accounts for 0.18 ms of a
-  2,770 ms tick.
-- **** — the variable that actually explains CPU
+  mathematically unable to fire while `/health` still reported
+  `armed, rules_active: 7, rules_starved: 0`. Chronos then ran 719 of 766
+  samples in one hour at or above 90 °C, peaking 95.62 °C. `min_samples` now
+  adapts to the observed cadence and `rules_unable_to_fire` reports the
+  symptom — but nothing said what was *consuming* the tick, and Chronos still
+  runs at 0.36 Hz with 18 `RULE CANNOT FIRE` events logged while
+  `bench_tick.py` accounts for 0.18 ms of a 2,770 ms tick.
+
+- **`system.cpu_package_power_w`** — the variable that actually explains CPU
   temperature. Its absence is why a healthy cooler was once diagnosed as a
-  failing pump: the chip pulls 80–126 W at 11–27% usage, so utilization is
-  the wrong variable. Diagnostic only; it is not a guard and does not classify
-  as thermal.
+  failing pump and the user was advised to service it: the chip pulls
+  80–126 W at 11–27% "usage", so utilization is the wrong variable.
+  Measured on Chronos at idle: **77.4 W**. Diagnostic only — it is not a guard,
+  has no authored wall, and a test pins that it does not classify as thermal.
 
 ## [0.4.13] — 2026-09-07 — What the liveness review found
 
