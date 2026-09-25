@@ -62,7 +62,13 @@ def _sample(monkeypatch, paging, *, ram_gb, limit_gb, committed_gb, file_gb, fre
     monkeypatch.setitem(sys.modules, "winreg", _FakeReg(paging))
     monkeypatch.setattr(os.path, "getsize", lambda _p: file_gb * GiB)
     du = namedtuple("du", "total used free")
-    monkeypatch.setattr(shutil, "disk_usage", lambda _d: du(0, 0, free_gb * GiB))
+
+    def disk_usage(drive):  # only the volume that really holds the page file
+        if drive.upper() != "C:\\":
+            raise OSError(f"no such volume: {drive!r}")
+        return du(0, 0, free_gb * GiB)
+
+    monkeypatch.setattr(shutil, "disk_usage", disk_usage)
     c = sysmod.SystemCollector()
     s = c.sample()
     now = s.get("system.commit_percent_current_limit")
@@ -80,6 +86,17 @@ def test_system_managed_page_file_is_judged_against_what_it_can_grow_to(monkeypa
     ceiling = 125.6 + 3 * 125.6                                    # RAM + max(3 x RAM, 4 GB)
     assert pct == pytest.approx(121.0 / ceiling * 100) and "system-managed" in basis
     assert now_pct == pytest.approx(121.0 / 133.6 * 100) and now_pct > THRESHOLD  # 90.6 %, kept
+
+
+def test_demeter_literal_registry_value_is_bounded_by_the_drive_holding_the_file(monkeypatch):
+    # DEMETER, read 2026-09-24: PagingFiles = "?:\pagefile.sys" (automatic on
+    # every drive); the file lives on C: (ExistingPageFiles \??\C:\pagefile.sys,
+    # 8192 MB), C: free 3341.8 GB. '?:' must resolve to C:, not fall back.
+    pct, now_pct, basis = _sample(monkeypatch, ["?:\\pagefile.sys"], committed_gb=121.0,
+                                  free_gb=3341.8, **DEMETER)
+    assert "current_limit" not in basis and basis.startswith("C:\\pagefile.sys system-managed")
+    assert pct == pytest.approx(121.0 / (133.6 + min(3 * 125.6 - 8.0, 3341.8)) * 100), basis
+    assert pct < THRESHOLD and now_pct > THRESHOLD
 
 
 def test_system_managed_on_a_full_volume_can_only_grow_by_the_free_space(monkeypatch):
