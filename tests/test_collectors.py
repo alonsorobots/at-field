@@ -266,7 +266,7 @@ class TestHardFaultRateReader:
 
     Mocking note: production code calls PDH with ctypes.byref(...) output
     params (matching the rest of this file's style, e.g.
-    _read_commit_percent_windows). A byref() result can be recovered with
+    _read_commit_windows). A byref() result can be recovered with
     ctypes.cast(pvalue, POINTER(T)).contents inside a fake function to mutate
     the caller's struct in place -- verified directly against CPython's
     ctypes before relying on it here.

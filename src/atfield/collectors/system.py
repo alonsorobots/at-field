@@ -40,6 +40,8 @@ Design notes
 from __future__ import annotations
 
 import ctypes
+import os
+import shutil
 import sys
 from collections.abc import Callable
 from ctypes import wintypes
@@ -61,6 +63,7 @@ _SIGNALS: Final = (
     "system.ram_used_percent",
     "system.swap_used_percent",
     "system.commit_percent",
+    "system.commit_percent_current_limit",
     "system.cpu_used_percent",
     "system.input_idle_s",
     "system.hard_fault_rate",
@@ -285,8 +288,60 @@ def _resolve_input_idle_reader() -> tuple[Callable[[], float] | None, str]:
     )
 
 
-def _read_commit_percent_windows() -> float:
-    """Return Windows commit-charge usage as a percentage.
+_GIB: Final = 1024 ** 3
+
+
+def _commit_growth_room_gb(ram_gb: float, limit_now_gb: float) -> tuple[float, str]:
+    r"""(GB the commit limit can still grow by, basis). Reads only, no subprocess.
+
+    Same method and semantics as kiroshi ``hostsample._commit_ceiling_gb``
+    (branch hz/w8d @ 89775d9), expressed as growth ON TOP OF today's limit so a
+    page file that cannot grow yields exactly today's number. From
+    ``HKLM\...\Memory Management\PagingFiles``:
+      "?:\pagefile.sys" / "C:\pagefile.sys 0 0"  system-managed: may reach
+          max(3 x RAM, 4 GB) (Microsoft's documented maximum)
+      "C:\pagefile.sys MIN MAX"                   custom: may reach MAX MB
+    each bounded by the free space on its volume. Unreadable -> 0 growth.
+    """
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management") as k:
+            entries = [e for e in (winreg.QueryValueEx(k, "PagingFiles")[0] or []) if e.strip()]
+            try:
+                existing = [e.replace("\\??\\", "") for e in
+                            winreg.QueryValueEx(k, "ExistingPageFiles")[0] or []]
+            except OSError:
+                existing = []
+    except Exception:  # not Windows, or unreadable
+        return 0.0, "current_limit (page-file policy unreadable)"
+    if not entries:
+        return 0.0, "current_limit (no page file)"
+    grow, why = 0.0, []
+    for e in entries:
+        parts = e.split()
+        path = parts[0]
+        if path.startswith("?:"):
+            path = existing[0] if existing else os.environ.get("SYSTEMDRIVE", "C:") + "\\pagefile.sys"
+        max_mb = int(parts[2]) if len(parts) >= 3 else 0
+        drive = os.path.splitdrive(path)[0] + "\\"
+        try:
+            size_gb = os.path.getsize(path) / _GIB
+        except OSError:
+            size_gb = max(limit_now_gb - ram_gb, 0.0) / len(entries)
+        try:
+            free_gb = shutil.disk_usage(drive).free / _GIB
+        except OSError:
+            free_gb = 0.0
+        cap_gb = max_mb / 1024.0 if max_mb > 0 else max(3.0 * ram_gb, 4.0)
+        grow += max(0.0, min(cap_gb - size_gb, free_gb))
+        why.append(f"{path} custom max {max_mb} MB" if max_mb > 0 else
+                   f"{path} system-managed: max(3 x RAM, 4 GB) bounded by free {drive}")
+    return grow, "; ".join(why)
+
+
+def _read_commit_windows() -> tuple[float, float, str]:
+    """(commit % of the reachable limit, commit % of today's limit, basis).
 
     Commit charge = total committed virtual memory (RAM + pagefile-backed).
     The fields here are ``ullTotalPageFile`` and ``ullAvailPageFile``, which
@@ -294,16 +349,23 @@ def _read_commit_percent_windows() -> float:
     available commit, *not* the pagefile alone. (See MSDN
     ``MEMORYSTATUSEX``.) This is the canonical way to read commit charge
     without spawning ``perfmon``.
+
+    Today's limit is NOT the ceiling when the page file can grow: measured
+    2026-09-24, DEMETER (system-managed, 8 GB allocated, limit 133.6 GB) lost
+    14 slots to pagefile-pressure at 90 % of a limit Windows would have
+    raised. The rule therefore reads the reachable basis; today's-limit
+    percent is still published as ``system.commit_percent_current_limit``.
     """
     mem = _MEMORYSTATUSEX()
     mem.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
     if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(mem)):
         raise OSError("GlobalMemoryStatusEx returned 0")
     total = mem.ullTotalPageFile
-    avail = mem.ullAvailPageFile
+    used = total - mem.ullAvailPageFile
     if total == 0:
-        return 0.0
-    return ((total - avail) / total) * 100.0
+        return 0.0, 0.0, "current_limit (zero commit limit)"
+    grow_gb, basis = _commit_growth_room_gb(mem.ullTotalPhys / _GIB, total / _GIB)
+    return used / (total + grow_gb * _GIB) * 100.0, used / total * 100.0, basis
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +524,9 @@ class SystemCollector:
         # this machine?" from the session we happen to be running in. None
         # means nothing can, and the signal is withheld rather than faked.
         self._input_idle_reader: Callable[[], float] | None = None
+        # Which commit limit system.commit_percent was divided by (see
+        # _read_commit_windows); also in probe metadata for `atf doctor`.
+        self.commit_limit_basis = "swap_memory (fallback)"
 
     def probe(self) -> ProbeResult:
         try:
@@ -474,9 +539,10 @@ class SystemCollector:
             # that's just an artifact of the probe ordering).
             psutil.cpu_percent(interval=None)
             if self._on_windows:
-                _read_commit_percent_windows()
+                self.commit_limit_basis = _read_commit_windows()[2]
                 reason = "psutil + Win32 GlobalMemoryStatusEx OK"
-                meta = {"commit_charge_source": "GlobalMemoryStatusEx"}
+                meta = {"commit_charge_source": "GlobalMemoryStatusEx",
+                        "commit_limit_basis": self.commit_limit_basis}
                 # Best-effort: hard_fault_rate is a bonus signal, never a
                 # reason to fail this collector. A box with the Memory perf
                 # counter category unregistered (rare, e.g. `lodctr /R`
@@ -518,7 +584,10 @@ class SystemCollector:
             now = monotonic_ns()
             vm = psutil.virtual_memory()
             sw = psutil.swap_memory()
-            commit = _read_commit_percent_windows() if self._on_windows else float(sw.percent)
+            if self._on_windows:
+                commit, commit_now, self.commit_limit_basis = _read_commit_windows()
+            else:
+                commit = commit_now = float(sw.percent)
             # Non-blocking: returns % busy averaged over interval since the
             # last call (or since probe() primed the ticker). Cheap -- no
             # interval sleep, no subprocess. System-wide aggregate; per-core
@@ -544,6 +613,12 @@ class SystemCollector:
                 ),
                 "system.commit_percent": Sample(
                     value=commit,
+                    taken_at_ns=now,
+                    source_id=_NAME,
+                    unit="percent",
+                ),
+                "system.commit_percent_current_limit": Sample(
+                    value=commit_now,
                     taken_at_ns=now,
                     source_id=_NAME,
                     unit="percent",
