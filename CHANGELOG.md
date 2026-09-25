@@ -7,6 +7,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.16] — 2026-09-25 — pagefile-pressure divides by the limit the host can reach
+
+### Fixed
+
+- **`pagefile-pressure` fired at 90 % of a commit limit Windows would have
+  raised.** DEMETER (125.6 GB RAM, system-managed page file, commit limit
+  133.6 GB on the day) lost 14 slots on 2026-09-24 and was paused. A
+  system-managed page file grows as commit nears today's limit, so today's
+  limit is not the ceiling.
+
+  `system.commit_percent` now divides commit by the limit the host can
+  **reach**, read from `HKLM\...\Memory Management\PagingFiles`:
+  a system-managed file (`?:\pagefile.sys`, or `X:\pagefile.sys 0 0`) may grow
+  to `max(3 x RAM, 4 GB)`, a custom file to its configured MAX MB, each bounded
+  by the free space on the page file's drive. A literal `?:` is resolved through
+  `ExistingPageFiles` (DEMETER: `C:`), never left as a `?:\` fallback. If the
+  policy can't be read, the old today's-limit behaviour is used unchanged. A fixed
+  custom file (Chronos, 131072 MB) gives exactly the old number.
+
+### Added
+
+- `system.commit_percent_current_limit`: the old today's-limit percent, still
+  published so the difference stays visible.
+- `commit_limit_basis` in the system collector's probe metadata (and so in
+  `atf doctor`): shows which limit the percent is divided by.
+
 ## [0.4.15] — 2026-09-08 — The RSS cap stops starving the tick loop
 
 ### Fixed
