@@ -136,6 +136,10 @@ class GeneralConfig:
     tick_hz: int = 1
     log_level: str = "INFO"
     state_dir: Path = field(default_factory=default_state_dir)
+    # Seconds between compact telemetry rows (thermal + percent-reservoir
+    # signals) posted to the newest registered event webhook, so a hub can show
+    # an IDLE host's temperatures (0.4.17). 0 = off. No webhook = no post.
+    telemetry_interval_s: int = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,7 +525,8 @@ def _parse_general(raw: Any, base: GeneralConfig, source: str) -> GeneralConfig:
     if raw is None:
         return base
     table = _require_table(raw, "general", source)
-    _check_unknown_keys(table, {"tick_hz", "log_level", "state_dir"}, "general", source)
+    _check_unknown_keys(table, {"tick_hz", "log_level", "state_dir", "telemetry_interval_s"},
+                        "general", source)
 
     out = base
     if "tick_hz" in table:
@@ -535,6 +540,9 @@ def _parse_general(raw: Any, base: GeneralConfig, source: str) -> GeneralConfig:
         out = replace(out, log_level=level)
     if "state_dir" in table:
         out = replace(out, state_dir=Path(_as_str(table["state_dir"], "general.state_dir", source)))
+    if "telemetry_interval_s" in table:
+        out = replace(out, telemetry_interval_s=_as_int(
+            table["telemetry_interval_s"], "general.telemetry_interval_s", source, minimum=0))
     return out
 
 

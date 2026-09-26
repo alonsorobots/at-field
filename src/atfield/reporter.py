@@ -207,3 +207,126 @@ def report_guard_health(
             _send_queue.put_nowait((url, payload))
         except queue.Full:
             _log.debug("reporter queue full; dropping guard_health for %s", url)
+
+
+# ---------------------------------------------------------------------------
+# Periodic host telemetry (0.4.17)
+# ---------------------------------------------------------------------------
+#
+# Everything above leaves the machine only when something HAPPENS. A hub that
+# wants to show an IDLE host's temperatures had nothing to show: they reached
+# it only inside a worker's heartbeat, and an idle host has no worker. So once
+# every ``general.telemetry_interval_s`` this posts ONE compact row to the same
+# kind of webhook, typed ``telemetry`` so no consumer reads it as a kill.
+#
+# ``rule`` is ``atfield.telemetry`` and deliberately NOT ``fleet.*``: Kiroshi's
+# hub reads ``fleet.*`` rows as posted ABOUT a host by its liveness probe; this
+# row is the host itself speaking, so it is a sign of life from that host.
+
+TELEMETRY_KIND = "telemetry"
+TELEMETRY_RULE = "atfield.telemetry"
+TELEMETRY_SIGNAL = "host"
+
+
+def telemetry_signals(samples: dict[str, Any], *, credible: set[str],
+                      now_unix: float) -> dict[str, list[float]]:
+    """``{signal: [value, unix_ts]}`` for every BELIEVABLE thermal signal and
+    every percent-unit reservoir (RAM, commit, swap, VRAM %).
+
+    A reading the tick loop withheld from the rules as unbelievable (a wedged
+    NVML session's constant 0.0 C) is withheld here too: the hub would show it
+    as the host's temperature. Each value carries the unix time it was READ
+    (from its monotonic ``taken_at_ns``), not when this row was built.
+    """
+    from atfield.signal_class import classify_signal
+    from atfield.signals import monotonic_ns
+
+    now_ns = monotonic_ns()
+    out: dict[str, list[float]] = {}
+    for name, s in samples.items():
+        if name not in credible:
+            continue
+        cls = classify_signal(name)
+        if not (cls == "thermal" or (cls == "reservoir" and s.unit == "percent")):
+            continue
+        read_at = now_unix - max(0, now_ns - int(s.taken_at_ns)) / 1e9
+        out[name] = [round(float(s.value), 1), round(read_at, 1)]
+    return out
+
+
+def _newest_webhook(state_dir: Path) -> str | None:
+    """The webhook of the most recently written manifest that carries one.
+
+    Kill events go to every registered URL; a once-a-minute ping must not.
+    Manifests of long-dead processes stay on disk (DEMETER held 116, naming two
+    hubs), and the newest is the hub this host most recently worked for.
+    """
+    best: tuple[float, str] | None = None
+    try:
+        for p in state_dir.glob(_MANIFEST_GLOB):
+            try:
+                url = json.loads(p.read_text(encoding="utf-8")).get(_WEBHOOK_FIELD)
+                mtime = p.stat().st_mtime
+            except (OSError, ValueError, AttributeError):
+                continue
+            if url and (best is None or mtime > best[0]):
+                best = (mtime, url)
+    except OSError:
+        _log.debug("failed to glob %s for the telemetry webhook", state_dir, exc_info=True)
+    return best[1] if best else None
+
+
+def report_telemetry(state_dir: Path, samples: dict[str, Any], *, credible: set[str],
+                     now_unix: float) -> bool:
+    """Queue ONE telemetry row for the newest subscriber. True if queued.
+
+    Non-blocking like every path here: discovery is a glob of a small
+    directory, delivery is the background thread.
+    """
+    url = _newest_webhook(state_dir)
+    if not url:
+        return False
+    payload = {
+        "type": TELEMETRY_KIND,
+        "kind": TELEMETRY_KIND,
+        "host": _HOSTNAME,
+        "rule": TELEMETRY_RULE,
+        "signal": TELEMETRY_SIGNAL,
+        "detail": json.dumps({
+            "v": 1, "ts": round(now_unix, 1),
+            "signals": telemetry_signals(samples, credible=credible, now_unix=now_unix),
+        }, separators=(",", ":"), sort_keys=True),
+        "ts": now_unix,
+    }
+    _ensure_worker()
+    try:
+        _send_queue.put_nowait((url, payload))
+    except queue.Full:
+        _log.debug("reporter queue full; dropping telemetry for %s", url)
+        return False
+    return True
+
+
+class TelemetryPinger:
+    """Rate-limits :func:`report_telemetry` to one row per ``interval_s``.
+
+    The FIRST call sends, so a restarted service is visible at once rather than
+    a minute later. ``interval_s <= 0`` is off.
+    """
+
+    def __init__(self, interval_s: float) -> None:
+        self.interval_s = float(interval_s or 0)
+        self._last: float | None = None
+
+    def maybe_report(self, state_dir: Path, samples: dict[str, Any], *,
+                     credible: set[str], now_unix: float) -> bool:
+        if self.interval_s <= 0:
+            return False
+        if self._last is not None and now_unix - self._last < self.interval_s:
+            return False
+        self._last = now_unix
+        try:
+            return report_telemetry(state_dir, samples, credible=credible, now_unix=now_unix)
+        except Exception:                                   # noqa: BLE001
+            _log.debug("telemetry report failed", exc_info=True)
+            return False

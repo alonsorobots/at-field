@@ -52,7 +52,7 @@ from atfield.forensics import ForensicBuffer
 from atfield.forensics import rotate_on_startup as rotate_forensics_on_startup
 from atfield.http_api import ApiServer, ServiceState, collector_view_from_probe
 from atfield.policy import PolicyEngine
-from atfield.reporter import report_guard_health, report_kill
+from atfield.reporter import TelemetryPinger, report_guard_health, report_kill
 from atfield.signals import Sample, is_credible, is_plausible
 
 __all__ = [
@@ -539,6 +539,8 @@ def run_service(
     pause_check_interval_ns = 5_000_000_000  # 5 s
     ticks = 0
     exit_code = 0
+    # An idle host's temperatures reach the hub only this way (0.4.17).
+    telemetry = TelemetryPinger(cfg.general.telemetry_interval_s)
     last_presence_state: bool | None = None  # None = not yet determined this run
     # When the idle signal last arrived. Seeded to startup so a sentinel left
     # behind by a PREVIOUS process is withdrawn on schedule rather than
@@ -561,6 +563,7 @@ def run_service(
                     observe_only = new_observe_only
                     api_state._observe_only = observe_only
                     api_state.attach_engine(engine)
+                    telemetry.interval_s = float(cfg.general.telemetry_interval_s or 0)
                     _log.info("config reloaded; engine rebuilt (rules=%d disabled=%d)",
                               len(engine.effective_rules), len(engine.disabled_rules))
                 except Exception:
@@ -678,6 +681,9 @@ def run_service(
             forensics.record(samples, ts=tick_unix,
                              suspect=set(suspect_samples))
             timer.phase("forensics")
+            telemetry.maybe_report(sd, samples, credible=set(credible_samples),
+                                   now_unix=tick_unix)
+            timer.phase("telemetry")
 
             # Evaluate
             try:

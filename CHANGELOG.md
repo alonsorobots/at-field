@@ -7,6 +7,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.17] — 2026-09-26 — an idle host's temperatures reach the hub
+
+### Added
+
+- **Periodic host telemetry.** Until now AT-Field pushed only EVENTS off the
+  machine (a kill, a guard gone inert), so a hub learned a host's temperatures
+  only from a worker's heartbeat, and the Kiroshi dashboard card for an IDLE
+  host showed none. Every `general.telemetry_interval_s` seconds (default 60;
+  `0` = off) AT-Field now posts ONE compact row to the newest registered
+  `atfield_event_webhook` (the same field kill events use; no new endpoint):
+  `kind`/`type` `telemetry`, `rule` `atfield.telemetry`, `signal` `host`, and
+  in `detail` a JSON `{"v":1,"ts":…,"signals":{name:[value, unix_ts]}}` of
+  every believable thermal signal and every percent-unit reservoir (RAM,
+  commit, swap, VRAM %). The first row goes on the first tick.
+- The rule is deliberately not `fleet.*`: Kiroshi reads `fleet.*` rows as
+  posted ABOUT a host by its liveness probe; this one is the host speaking.
+- Only the NEWEST manifest's webhook gets it. Kill events still go to every
+  registered URL, but stale manifests stay on disk (DEMETER had 116, naming
+  two hubs), and a once-a-minute ping to each would feed dead or wrong hubs.
+- A reading the tick loop withholds from the rules as unbelievable is withheld
+  from the row too. No webhook registered: no post, no delivery thread.
+
 ## [0.4.16] — 2026-09-25 — pagefile-pressure divides by the limit the host can reach
 
 ### Fixed
