@@ -907,9 +907,8 @@ def run_service(
                         _record_restart(sd, past, time.time())
                         restart_reason = f"{c.name}: {reason}"
                         _log.error(
-                            "restarting the service so a fresh process maps the "
-                            "replaced driver (%s). The supervisor will bring it "
-                            "straight back.", restart_reason)
+                            "restarting the service so a fresh process can recover "
+                            "(%s). The supervisor will bring it straight back.", restart_reason)
                         audit.write_collector_health(
                             c.name, "wants_process_restart", reason)
                         exit_code = _EXIT_WANTS_RESTART

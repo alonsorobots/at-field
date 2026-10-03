@@ -16,9 +16,9 @@ restarts itself on a condition that does not clear is worse than one that
 degrades. So the request is bounded three ways, and each bound is tested for
 REFUSING, not just for firing:
 
-  * only on the driver-swap witness -- never on DEGRADED alone, so a card
-    that is genuinely dead or removed starves its rules loudly instead of
-    cycling the service;
+  * only when the collector asks (a replaced driver, or NVML failing
+    continuously for minutes) -- see the budget below for a card that is
+    genuinely dead or removed;
   * at most once per process;
   * never below an uptime floor, so a condition present at boot cannot
     produce a tight loop;
@@ -62,8 +62,8 @@ min_fraction_over = 0.67
 action = "log"
 """
 
-REASON = ("NVML session was opened against driver 610.88 but 616.56 is "
-          "installed, and 2 in-process rebuilds did not recover it")
+REASON = ("NVML session was opened against driver 610.88 but 616.56 has been "
+          "installed for over a minute; only a fresh process maps the new nvml.dll")
 
 
 class _FakeCollector:
@@ -185,7 +185,10 @@ class TestTheBudgetAcrossLifetimes:
         code = _run(env, c, ticks=6)
         assert code == 0
         assert c.samples_taken == 6, "refusing must not stop the loop"
-        assert any("restart_budget_spent" in e for e in _events(sd))
+        spent = [e for e in _events(sd) if "restart_budget_spent" in e]
+        assert len(spent) == 1, (
+            f"the refusal must be said ONCE, not every tick for the life of the "
+            f"process: {len(spent)} events in 6 ticks")
 
     def test_restarts_outside_the_window_do_not_count(self, env):
         cfg, sd = env

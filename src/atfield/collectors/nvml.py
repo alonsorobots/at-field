@@ -46,7 +46,9 @@ _log = logging.getLogger("atfield.collectors.nvml")
 # 2026-10-02 sleep/resume probe on Aurora (tools/nvml_resume_probe.py, 4 long-lived
 # processes, SYSTEM and user) showed that an in-process rebuild can CAUSE the fault:
 #   * entering sleep, every call returns garbage for a few seconds;
-#   * a session left alone was fully healthy 1-2 s after resume;
+#   * a session left alone healed by itself: temperature/util/power 1 s after
+#     resume, VRAM within (1 s, 62 s] (the wrapped value arrives as NVML_SUCCESS,
+#     so the probe saw its heal only at the next 60-s heartbeat);
 #   * a session that ran nvmlShutdown+nvmlInit during that garbage could never read
 #     GetMemoryInfo again (v1 or v2, handles by index or by PCI id) -- while
 #     temperature/utilisation/power came back -- because nvml.dll is PINNED in the
@@ -60,8 +62,8 @@ _log = logging.getLogger("atfield.collectors.nvml")
 # bounded by the service's restart budget so a genuinely dead GPU cannot loop it.
 
 # Continuous failure (exceptions or impossible values) before asking for a fresh
-# process. Sleep-entry garbage lasts seconds and resume heals within ~2 s, so a
-# minute-scale threshold never fires on a power transition; a poisoned or replaced
+# process. Sleep-entry garbage lasts seconds and an untouched session healed within
+# 62 s of resume (VRAM; 1 s for the rest), so the margin is >= 58 s -- about 2x; a poisoned or replaced
 # session is cured a couple of minutes after it breaks instead of six days later.
 _PERSISTENT_FAILURE_S: Final = 120.0
 
@@ -175,6 +177,10 @@ class NvmlCollector:
         self._last_wall_s: float | None = None
         self._last_failures: dict[str, str] = {}
         self._last_driver_check_ns: int | None = None
+        # The replaced driver's version and when it was first seen -- a restart is
+        # asked for only once the SAME version has stood for a check interval.
+        self._swap_version: str | None = None
+        self._swap_seen_ns: int | None = None
         #: True once the installed driver differs from the one this session
         #: opened against. Never cleared in-process: only a fresh process maps
         #: the new nvml.dll.
@@ -404,11 +410,21 @@ class NvmlCollector:
         # that sees a session whose calls all still succeed (Chronos 2026-09-02:
         # a constant 0.0 C for four days, health HEALTHY). Its cure is a fresh
         # process: this one keeps the old nvml.dll mapped.
-        if self._check_driver_swap(now) and self.wants_process_restart is None:
-            installed = self._installed_driver_version() or "a different version"
+        #
+        # STABLE FOR ONE FULL CHECK INTERVAL before asking (review 2026-10-02,
+        # F1): a driver install is not instant (Chronos 09-02: 19:14:55 ->
+        # 19:15:38). A fresh process started mid-install can hit the library /
+        # kernel-module mismatch in probe(), go FAILED, and is then never polled
+        # again -- so it could never ask for the restart that would cure it. The
+        # same new version on two checks >= _DRIVER_CHECK_INTERVAL_NS apart means
+        # the install has settled.
+        if (self._check_driver_swap(now) and self.wants_process_restart is None
+                and self._swap_seen_ns is not None
+                and now - self._swap_seen_ns >= _DRIVER_CHECK_INTERVAL_NS):
             self.wants_process_restart = (
                 f"NVML session was opened against driver {self._driver_version} but "
-                f"{installed} is installed; only a fresh process maps the new nvml.dll")
+                f"{self._swap_version} has been installed for over a minute; only a "
+                f"fresh process maps the new nvml.dll")
 
         if any_failure:
             if self._failing_since_ns is None:
@@ -516,12 +532,16 @@ class NvmlCollector:
         if installed is None:
             return self.driver_replaced
         if installed != self._driver_version:
-            if not self.driver_replaced:
+            if installed != self._swap_version:
+                # first sighting of THIS version (or the install moved on):
+                # the stability clock starts here
                 _log.error(
                     "NVIDIA driver was REPLACED under this session: it was opened "
                     "against %s and %s is now installed. Every reading from these "
-                    "handles is suspect -- asking for a fresh process.",
+                    "handles is suspect -- asking for a fresh process once the "
+                    "install has been stable for a check interval.",
                     self._driver_version, installed)
+                self._swap_version, self._swap_seen_ns = installed, now_ns
             self.driver_replaced = True
         return self.driver_replaced
 

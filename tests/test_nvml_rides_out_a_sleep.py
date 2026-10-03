@@ -11,7 +11,10 @@ identical in all four:
             jump across it).
   16:50:26  awake: GPU 0 still garbage, GPU 1 fine.
   16:50:27  temps/util/power fine, GPU 0 VRAM still the wrapped value.
-  16:50:28  everything fine -- in the processes that had NOT touched NVML.
+  by 16:51:29 everything fine -- in the processes that had NOT touched NVML
+            (temp/util/power at +1 s; the VRAM heal is bounded to (1 s, 62 s]
+            because the wrapped value is NVML_SUCCESS and the probe logged only
+            outcome changes and a 60-s heartbeat). The replay heals it at +2 s.
   The processes that ran nvmlShutdown+nvmlInit during the garbage could never
   read VRAM again (nvml.dll is pinned; a fresh process read it fine).
 

@@ -289,16 +289,40 @@ def test_a_replaced_driver_asks_for_a_fresh_process_even_when_nothing_raises(mon
 
     Every call returns NVML_SUCCESS with a plausible number, so C never fires
     -- health is HEALTHY. Only the out-of-band read knows the session is
-    talking to a driver that is gone, and only a fresh process maps the new one.
+    talking to a driver that is gone, and only a fresh process maps the new
+    one -- asked for once the new version has STOOD for a check interval, so a
+    restart cannot land mid-install (review 2026-10-02, F1).
     """
     fake = FakePynvml([FakeHandle(REAL_TEMP_C, 4, 4627042304, REAL_POWER_W)])
     c = _collector(fake, driver=SESSION_DRIVER)
     monkeypatch.setattr(NvmlCollector, "_installed_driver_version",
                         lambda self: INSTALLED_DRIVER)
+    advance = _clock(monkeypatch)
     c.sample()
     assert c.driver_replaced is True
+    assert c.wants_process_restart is None, "first sighting: the install may still be running"
+    for _ in range(61):
+        advance(1)
+        c.sample()
     assert c.wants_process_restart and INSTALLED_DRIVER in c.wants_process_restart
     assert fake.init_calls == 0 and fake.shutdown_calls == 0
+
+
+def test_a_driver_still_changing_does_not_ask_yet(monkeypatch):
+    """Mid-install the on-disk version can move again: the clock restarts."""
+    fake = FakePynvml([FakeHandle(REAL_TEMP_C, 4, 4627042304, REAL_POWER_W)])
+    c = _collector(fake, driver=SESSION_DRIVER)
+    on_disk = {"v": "615.00"}
+    monkeypatch.setattr(NvmlCollector, "_installed_driver_version",
+                        lambda self: on_disk["v"])
+    advance = _clock(monkeypatch)
+    c.sample()
+    for _ in range(61):
+        advance(1)
+        if _ == 30:
+            on_disk["v"] = INSTALLED_DRIVER
+        c.sample()
+    assert c.wants_process_restart is None, "the version moved: not yet stable"
 
 
 def test_a_matching_driver_does_nothing(monkeypatch):

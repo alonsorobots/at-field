@@ -7,6 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Changed -- NVML is never rebuilt in-process (2026-10-02)
+
+- **Inverts 0.4.13's "rebuild the session on sustained DEGRADED".** Measured on Aurora
+  with `tools/nvml_resume_probe.py` across a real sleep: a session left alone heals by
+  itself; one rebuilt (`nvmlShutdown`+`nvmlInit`) during the sleep-entry garbage can
+  never read `GetMemoryInfo` again, because `nvml.dll` is pinned in the process. 0.4.17
+  did exactly that on Aurora's 2026-09-26 sleep and rebuilt every second for six days,
+  holding the collector DEGRADED and its GPU core-temperature rules suspect.
+- A wall-clock gap > 30 s (sleep, hibernate, Fast Startup "shut down") restarts the
+  failure clock. Failure persisting 120 s, or a replaced driver stable for a check
+  interval, asks for a FRESH PROCESS (exit 3; NSSM restarts it).
+- Restart budget across lifetimes: at most 3 per 6 h (`restart_budget.json` in the
+  state dir); past it the service stays up and the collector's rules starve loudly.
+- VRAM used > total is withheld (a wrapped uint64 passed the bytes plausibility check).
+- NVML error codes are logged when the failing set changes (they were swallowed).
+
 ## [0.4.17] — 2026-09-26 — an idle host's temperatures reach the hub
 
 ### Added
