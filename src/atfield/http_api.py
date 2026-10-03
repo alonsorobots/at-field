@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -384,7 +385,9 @@ class ServiceState:
                 "at": time.time(),
                 "rule": action.base_rule_name,
                 "signal": action.signal,
-                "value": action.latest_value,
+                # None when not finite: /health is plain json.dumps, and a NaN here
+                # would make the tray's strict parser drop the whole snapshot.
+                "value": action.latest_value if math.isfinite(action.latest_value) else None,
                 "threshold": action.threshold,
                 "kill_rule": kill_rule,
                 "kill_threshold": kill_threshold,

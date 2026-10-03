@@ -142,3 +142,94 @@ def test_the_warning_names_the_nearest_kill_line_on_its_own_signal():
     eng = PolicyEngine(cfg, available_signals={CPU, RAM})
     assert kill_line_for(eng.effective_rules, CPU, 86.0) == ("cpu-pkg-hot", 90.0)
     assert kill_line_for(eng.effective_rules, RAM, 95.0) == (None, None)
+
+LOOP_CONFIG = """
+[general]
+tick_hz = 10
+
+[api]
+enabled = false
+
+[[rules]]
+name = "cpu-pkg-hot"
+signal = "system.cpu_package_temp_c"
+threshold = 90.0
+window_s = 1
+min_fraction_over = 0.5
+action = "kill"
+
+[[rules]]
+name = "cpu-pkg-warm"
+signal = "system.cpu_package_temp_c"
+threshold = 86.0
+window_s = 1
+min_fraction_over = 0.5
+action = "log"
+notify = true
+"""
+
+
+def test_the_real_service_loop_keeps_the_kill_on_health(tmp_path, monkeypatch):
+    """Through run_service itself: the masking tests above call record_on_health
+    directly, so reverting the dispatch loop to 0.4.18's record_action left them
+    green (reviewer finding F1, reproduced). The actuator is faked: nothing is killed."""
+    import atfield.service as svc
+    from atfield.actuator import KillReport
+    from atfield.collectors import HealthState, ProbeResult
+    from atfield.signals import monotonic_ns
+
+    class Hot:
+        name = "fake"
+
+        def probe(self):
+            return ProbeResult(available=True, reason="fake", signals=(CPU,))
+
+        def health(self):
+            return HealthState.HEALTHY
+
+        def sample(self):
+            return {CPU: Sample(95.0, monotonic_ns(), self.name, "celsius")}
+
+    class NoKill:
+        def __init__(self, cfg):
+            pass
+
+        def execute(self, action, candidate_pids=None):
+            return KillReport(action=action, offender_pid=None, kill_root=None,
+                              skipped_reason="test: nothing is killed")
+
+        def enforce_rss_cap(self):
+            return []
+
+    states = []
+
+    class Spy(ServiceState):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            states.append(self)
+
+    c = Hot()
+    monkeypatch.setattr(svc, "_probe_all_collectors", lambda audit: ([c], {c.name: c.probe()}))
+    monkeypatch.setattr(svc, "Actuator", NoKill)
+    monkeypatch.setattr(svc, "ServiceState", Spy)
+    monkeypatch.setattr(svc, "report_kill", lambda *a, **kw: None)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(LOOP_CONFIG, encoding="utf-8")
+    svc.run_service(config_path=cfg, state_dir=tmp_path / "state", max_ticks=15)
+    h = states[0].snapshot_health()
+    assert h["last_warning"] and h["last_warning"]["rule"] == "cpu-pkg-warm", h["last_warning"]
+    assert h["last_action"]["kind"] == "kill", "the warning erased the kill pop-up in the real loop"
+
+def test_a_non_finite_warning_value_reaches_health_as_null(tmp_path):
+    """Reviewer F7: /health is plain json.dumps; NaN there would make the tray's
+    strict serde parse fail for the WHOLE snapshot, kill pop-ups included."""
+    import dataclasses
+    import json
+    eng = _engine(KILL, WARN)
+    (warn,) = _first_firing_tick(eng, 87.0)
+    st = _state(tmp_path)
+    record_on_health(st, dataclasses.replace(warn, latest_value=float("nan")), eng.effective_rules)
+    h = st.snapshot_health()
+    assert h["last_warning"]["value"] is None
+    json.dumps(h["last_warning"], allow_nan=False)
+

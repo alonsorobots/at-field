@@ -159,3 +159,27 @@ def test_end_to_end_the_worker_delivers_once_the_subscriber_comes_up(tmp_path, m
         sub.down()
     assert len(sub.got) == 1 and sub.got[0]["rule"] == "cpu-pkg-hot"
     assert reporter.spool_size(tmp_path) == 0
+
+def test_a_spool_left_by_a_previous_run_is_drained_after_restart(tmp_path, monkeypatch):
+    """Reviewer F2: the restart path had no test. A spool on disk from the last
+    process run is registered by the first event queued for that state dir (here
+    the once-a-minute telemetry row) and resent."""
+    sub = Sub(_free_port()).up()
+    try:
+        client = tmp_path / "clients" / "kiroshi"
+        client.mkdir(parents=True)
+        (client / "m.json").write_text(json.dumps({"atfield_event_webhook": sub.url}))
+        (tmp_path / reporter._SPOOL_NAME).write_text(
+            json.dumps({"url": sub.url, "payload": _kill(ts=111.0)}) + chr(10), encoding="utf-8")
+        monkeypatch.setattr(reporter, "_RETRY_MIN_S", 0.05)
+        monkeypatch.setattr(reporter, "_RETRY_MAX_S", 0.05)
+        assert reporter.report_telemetry(tmp_path, {}, credible=set(), now_unix=1.0)
+        deadline = time.time() + 5
+        while reporter.spool_size(tmp_path) and time.time() < deadline:
+            time.sleep(0.02)
+        time.sleep(0.2)
+    finally:
+        sub.down()
+    assert [p.get("ts") for p in sub.got if p.get("type") == "kill_report"] == [111.0]
+    assert reporter.spool_size(tmp_path) == 0
+

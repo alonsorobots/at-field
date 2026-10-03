@@ -46,7 +46,10 @@ struct LastWarning {
     at: f64,
     rule: String,
     signal: String,
-    value: f64,
+    // null when the service saw a non-finite reading; strict f64 would fail the
+    // WHOLE /health parse and with it the kill pop-up.
+    #[serde(default)]
+    value: Option<f64>,
     threshold: f64,
     #[serde(default)]
     kill_rule: Option<String>,
@@ -191,7 +194,10 @@ fn spawn_poller(app: AppHandle, last_status: Arc<Mutex<TrayStatus>>) {
 /// A softer toast for a near-limit warning: nothing was killed, but a kill
 /// line is close. Title names the reading, body names the line it is near.
 fn fire_warning_notification(app: &AppHandle, w: &LastWarning) {
-    let title = format!("Getting hot: {} at {:.0}", short_signal(&w.signal), w.value);
+    let title = match w.value {
+        Some(v) => format!("Getting hot: {} at {:.0}", short_signal(&w.signal), v),
+        None => format!("Getting hot: {}", short_signal(&w.signal)),
+    };
     let body = match (w.kill_rule.as_ref(), w.kill_threshold) {
         (Some(rule), Some(t)) => format!(
             "Warning line {:.0} crossed; AT-Field kills at {:.0} ({}).",
