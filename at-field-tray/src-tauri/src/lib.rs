@@ -6,6 +6,7 @@ mod autostart;
 mod caption_color;
 #[cfg(windows)]
 mod service_installer;
+mod warn_gate;
 
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -34,6 +35,23 @@ struct HealthSnapshot {
     heartbeat_age_s: Option<f64>,
     collectors: Vec<CollectorView>,
     last_action: Option<LastAction>,
+    // 0.4.19: a near-limit warning, kept apart from last_action so it can never
+    // mask a kill. Absent on older services -- serde fills None.
+    #[serde(default)]
+    last_warning: Option<LastWarning>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct LastWarning {
+    at: f64,
+    rule: String,
+    signal: String,
+    value: f64,
+    threshold: f64,
+    #[serde(default)]
+    kill_rule: Option<String>,
+    #[serde(default)]
+    kill_threshold: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -123,6 +141,7 @@ fn spawn_poller(app: AppHandle, last_status: Arc<Mutex<TrayStatus>>) {
     // so we don't notify the user about a kill that happened BEFORE the
     // tray app started -- they didn't ask for archaeology, only live alerts.
     let last_notified_kill_at: Arc<Mutex<Option<f64>>> = Arc::new(Mutex::new(None));
+    let mut warn_gate = warn_gate::WarnGate::new(warn_gate::WARN_MIN_GAP_S);
 
     thread::spawn(move || loop {
         let snapshot: Option<HealthSnapshot> = ureq_get_json(&format!("{}/health", API_BASE));
@@ -157,10 +176,45 @@ fn spawn_poller(app: AppHandle, last_status: Arc<Mutex<TrayStatus>>) {
                     fire_kill_notification(&app, la);
                 }
             }
+            let w = h.last_warning.as_ref();
+            if warn_gate.should_fire(w.map(|w| (w.at, w.rule.as_str())), chrono_now()) {
+                if let Some(w) = w {
+                    fire_warning_notification(&app, w);
+                }
+            }
         }
 
         thread::sleep(POLL_INTERVAL);
     });
+}
+
+/// A softer toast for a near-limit warning: nothing was killed, but a kill
+/// line is close. Title names the reading, body names the line it is near.
+fn fire_warning_notification(app: &AppHandle, w: &LastWarning) {
+    let title = format!("Getting hot: {} at {:.0}", short_signal(&w.signal), w.value);
+    let body = match (w.kill_rule.as_ref(), w.kill_threshold) {
+        (Some(rule), Some(t)) => format!(
+            "Warning line {:.0} crossed; AT-Field kills at {:.0} ({}).",
+            w.threshold, t, rule
+        ),
+        _ => format!("Warning line {:.0} crossed ({}).", w.threshold, w.rule),
+    };
+    let _ = app.notification().builder().title(&title).body(&body).show();
+    let payload = serde_json::json!({
+        "at": w.at, "rule": w.rule, "signal": w.signal, "value": w.value,
+        "threshold": w.threshold, "kill_rule": w.kill_rule, "kill_threshold": w.kill_threshold,
+    });
+    let _ = app.emit("atfield://warning", payload);
+}
+
+/// "system.cpu_package_temp_c" -> "cpu package temp". Toasts are narrow.
+fn short_signal(signal: &str) -> String {
+    let last = signal.rsplit('.').next().unwrap_or(signal);
+    let trimmed = last
+        .strip_suffix("_c")
+        .or_else(|| last.strip_suffix("_percent"))
+        .unwrap_or(last);
+    trimmed.replace('_', " ")
 }
 
 /// Build + send a Windows toast notification announcing a kill action.

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import queue
 import socket
@@ -238,6 +239,14 @@ def _webhooks(state_dir: Path) -> list[str]:
     return _cached_webhooks
 
 
+def _finite_or_none(x: Any) -> float | None:
+    try:
+        f = float(x)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
 def report_kill(state_dir: Path, *, action: Any, report: Any) -> None:
     """POST a kill/pressure event to every currently-registered subscriber.
 
@@ -264,6 +273,9 @@ def report_kill(state_dir: Path, *, action: Any, report: Any) -> None:
         "action": action.kind,
         # A near-limit warning (a log/throttle rule with notify = true), not a kill.
         "notify": bool(getattr(action, "notify", False)),
+        # The reading that fired the rule; None when not finite -- a NaN would make
+        # the body invalid JSON and the subscriber would refuse the whole event.
+        "value": _finite_or_none(getattr(action, "latest_value", None)),
         "kill_root": (
             {"pid": report.kill_root.pid, "name": report.kill_root.name}
             if report.kill_root

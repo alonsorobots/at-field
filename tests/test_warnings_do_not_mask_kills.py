@@ -119,6 +119,16 @@ def test_the_subscriber_payload_carries_notify(tmp_path, monkeypatch):
     for a in actions:
         reporter.report_kill(tmp_path, action=a, report=Report())
     assert [(p["rule"], p["notify"]) for p in sent] == [("cpu-pkg-hot", False), ("cpu-pkg-warm", True)]
+    assert [p["value"] for p in sent] == [95.0, 95.0]
+
+
+def test_a_non_finite_reading_is_sent_as_null_not_NaN():
+    import json
+    import math
+    assert reporter._finite_or_none(float("nan")) is None
+    assert reporter._finite_or_none(None) is None
+    assert reporter._finite_or_none(87.5) == 87.5
+    json.dumps({"value": reporter._finite_or_none(math.inf)}, allow_nan=False)
 
 
 def test_the_warning_names_the_nearest_kill_line_on_its_own_signal():
