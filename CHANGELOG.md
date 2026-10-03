@@ -7,7 +7,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-### Changed -- NVML is never rebuilt in-process (2026-10-02)
+## [0.4.18] — 2026-10-02 — NVML is never rebuilt in-process
+
+### Changed
 
 - **Inverts 0.4.13's "rebuild the session on sustained DEGRADED".** Measured on Aurora
   with `tools/nvml_resume_probe.py` across a real sleep: a session left alone heals by
