@@ -372,6 +372,8 @@ def _render_default_config(cfg: AtFieldConfig) -> str:
         ])
         if r.cooldown_s is not None:
             lines.append(f"cooldown_s = {r.cooldown_s}")
+        if r.notify:
+            lines.append("notify = true")
         lines.append("")
     return "\n".join(lines)
 

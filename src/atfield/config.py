@@ -258,6 +258,12 @@ class RuleConfig:
     # Ignored for non-thermal rules: a reservoir (percent-of-capacity) has a
     # real zero, so distance-to-wall is already a meaningful fraction.
     thermal_band_c: float = 25.0
+    # NEAR-LIMIT WARNING (0.4.19). A `log` / `throttle` rule with notify = true is a
+    # warning: when it fires the tray shows a "getting hot" notification and the
+    # event carries `notify: true` to subscribers (Kiroshi forwards it to its steward).
+    # Opt-in per rule, because observe-only mode downgrades every kill to `log` and
+    # those must NOT pop up. Refused on `kill` rules: a kill always notifies.
+    notify: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -713,6 +719,7 @@ def _parse_rules(raw: Any, base_rules: tuple[RuleConfig, ...], source: str) -> t
         "action",
         "cooldown_s",
         "thermal_band_c",
+        "notify",
     }
     required_keys = {"name", "signal", "threshold", "window_s", "min_fraction_over", "action"}
 
@@ -764,6 +771,16 @@ def _parse_rules(raw: Any, base_rules: tuple[RuleConfig, ...], source: str) -> t
                     f"number of degrees below the wall inside which a consumer "
                     f"holds), got {thermal_band_c}")
 
+        notify = False
+        if "notify" in entry:
+            if not isinstance(entry["notify"], bool):
+                raise ConfigError(f"{source}: {where}.notify must be true or false, got {entry['notify']!r}")
+            notify = entry["notify"]
+            if notify and action == "kill":
+                raise ConfigError(
+                    f"{source}: {where}.notify applies to log/throttle rules (a near-limit "
+                    f"warning); a kill rule always notifies")
+
         parsed.append(
             RuleConfig(
                 name=name,
@@ -774,6 +791,7 @@ def _parse_rules(raw: Any, base_rules: tuple[RuleConfig, ...], source: str) -> t
                 thermal_band_c=thermal_band_c,
                 action=action,  # type: ignore[arg-type]
                 cooldown_s=cooldown_s,
+                notify=notify,
             )
         )
 
