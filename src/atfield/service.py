@@ -26,6 +26,7 @@ the pytest integration tests. ``main()`` is the NSSM entry point.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
@@ -82,6 +83,32 @@ _EXIT_WANTS_RESTART = 3
 # boot-time condition that would otherwise restart the service in a tight
 # loop; NSSM's own AppThrottle (1500 ms) is the other half.
 _RESTART_UPTIME_FLOOR_S = 120.0
+# ...and a budget ACROSS process lifetimes, because a collector now asks for a fresh
+# process on any failure that persists (not only on a replaced driver): a GPU that is
+# genuinely gone would otherwise restart the watchdog every two minutes forever.
+# Recorded in the state dir so it survives the restarts it counts.
+_RESTART_BUDGET_FILENAME = "restart_budget.json"
+_RESTART_BUDGET_N = 3
+_RESTART_BUDGET_WINDOW_S = 6 * 3600.0
+
+
+def _restart_allowed(state_dir: Path, now_s: float) -> tuple[bool, list[float]]:
+    """(allowed, recent restart times) under the cross-lifetime restart budget."""
+    try:
+        past = json.loads((state_dir / _RESTART_BUDGET_FILENAME).read_text(encoding="utf-8"))
+        past = [float(t) for t in past if now_s - float(t) < _RESTART_BUDGET_WINDOW_S]
+    except (OSError, ValueError, TypeError):
+        past = []
+    return len(past) < _RESTART_BUDGET_N, past
+
+
+def _record_restart(state_dir: Path, past: list[float], now_s: float) -> None:
+    try:
+        (state_dir / _RESTART_BUDGET_FILENAME).write_text(
+            json.dumps(past + [now_s]), encoding="utf-8")
+    except OSError:
+        _log.warning("could not record the restart in %s; the budget may undercount",
+                     state_dir / _RESTART_BUDGET_FILENAME)
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +560,7 @@ def run_service(
     last_heartbeat_ns = 0
     service_started_at = time.monotonic()
     restart_reason: str | None = None
+    restart_budget_spent = False
     # Edge-triggered: log a suspect set when it CHANGES, not every tick.
     last_suspect: set[str] = set()
     last_pause_check_ns = 0
@@ -844,19 +872,19 @@ def run_service(
                 last_heartbeat_ns = now_ns
 
             # A collector may conclude that it cannot fix itself in this
-            # process. Today only nvml does, and only on conclusive evidence:
-            # the driver it opened its session against has been replaced on
-            # disk AND in-process rebuilds did not recover it. That is the
-            # documented library/kernel-module mismatch, whose cure is a fresh
-            # process -- NSSM is configured AppExit=Restart, so exiting IS the
-            # cure and not an outage.
+            # process. Today only nvml does: when the driver it opened against
+            # was replaced, or when its calls have failed continuously for
+            # minutes. Its cure is a fresh process (nvml.dll is pinned; an
+            # in-process rebuild can even cause the fault -- see the notes at
+            # the top of collectors/nvml.py) -- NSSM is configured
+            # AppExit=Restart, so exiting IS the cure and not an outage.
             #
             # Bounded three ways so a broken GPU can never crash-loop the
-            # watchdog: once per process, only above an uptime floor, and only
-            # on that exact witness. Without it a card simply degrades and its
-            # rules starve, loudly -- which is the correct outcome for hardware
-            # that is actually gone.
-            if restart_reason is None:
+            # watchdog: once per process, only above an uptime floor, and at
+            # most _RESTART_BUDGET_N times per _RESTART_BUDGET_WINDOW_S across
+            # lifetimes. Past the budget a card simply degrades and its rules
+            # starve, loudly -- the correct outcome for hardware that is gone.
+            if restart_reason is None and not restart_budget_spent:
                 for c in collectors:
                     reason = getattr(c, "wants_process_restart", None)
                     if reason:
@@ -866,6 +894,17 @@ def run_service(
                                 "collector %s wants a restart (%s) but this process "
                                 "is only %.0fs old; deferring", c.name, reason, uptime_s)
                             break
+                        allowed, past = _restart_allowed(sd, time.time())
+                        if not allowed:
+                            restart_budget_spent = True
+                            _log.error(
+                                "collector %s wants a restart (%s) but %d restarts in the "
+                                "last %.0f h already spent the budget; staying up -- its "
+                                "rules will starve rather than read from it",
+                                c.name, reason, len(past), _RESTART_BUDGET_WINDOW_S / 3600)
+                            audit.write_collector_health(c.name, "restart_budget_spent", reason)
+                            break
+                        _record_restart(sd, past, time.time())
                         restart_reason = f"{c.name}: {reason}"
                         _log.error(
                             "restarting the service so a fresh process maps the "

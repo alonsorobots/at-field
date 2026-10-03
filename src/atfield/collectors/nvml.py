@@ -32,24 +32,46 @@ from typing import Any, Final
 import logging
 import os
 import sys
+import time
 
 from atfield.collectors import HealthState, ProbeResult
 from atfield.signals import Sample, is_plausible, monotonic_ns
 
 _log = logging.getLogger("atfield.collectors.nvml")
 
-# Consecutive ticks of physically-impossible readings before we rebuild the
-# NVML session. Three is unambiguous (no real sensor produces 885510 C three
-# times running) and at the 1 Hz tick that's a ~3 s recovery instead of the
-# 8 hours the 2026-07-23 incident actually took.
-_MAX_IMPLAUSIBLE_BEFORE_REINIT: Final = 3
+# THERE IS NO IN-PROCESS NVML REBUILD, on purpose (2026-10-02).
+#
+# Every incident this collector has had was finally cured by a FRESH PROCESS (07-23:
+# "a fresh process read 36 C immediately"; 09-02: a service restart), and the
+# 2026-10-02 sleep/resume probe on Aurora (tools/nvml_resume_probe.py, 4 long-lived
+# processes, SYSTEM and user) showed that an in-process rebuild can CAUSE the fault:
+#   * entering sleep, every call returns garbage for a few seconds;
+#   * a session left alone was fully healthy 1-2 s after resume;
+#   * a session that ran nvmlShutdown+nvmlInit during that garbage could never read
+#     GetMemoryInfo again (v1 or v2, handles by index or by PCI id) -- while
+#     temperature/utilisation/power came back -- because nvml.dll is PINNED in the
+#     process (64 FreeLibrary calls, still mapped) and whatever broke lives in it.
+# AT-Field 0.4.17 did exactly that on Aurora's 2026-09-26 sleep, then rebuilt every
+# second for six days; the dead VRAM call held the collector DEGRADED, so the GPU
+# core-temperature rules sat "suspect" and Kiroshi froze the host's tuning.
+#
+# So: failures are ridden out, and only a failure that PERSISTS is escalated -- to a
+# process restart (wants_process_restart -> the service exits -> NSSM restarts it),
+# bounded by the service's restart budget so a genuinely dead GPU cannot loop it.
 
-# Wait after a FAILED rebuild, in seconds. The first attempt is immediate --
-# _next_reinit_ns starts at 0 -- and these are the gaps between retries after
-# that, because a genuinely dead or removed GPU will never come back and the
-# watchdog has other work to do. Do not put a 0.0 at the front: that makes the
-# first retry immediate too and the collector rebuilds on every single tick.
-_REINIT_BACKOFF_S: Final = (10.0, 30.0, 60.0, 120.0, 300.0)
+# Continuous failure (exceptions or impossible values) before asking for a fresh
+# process. Sleep-entry garbage lasts seconds and resume heals within ~2 s, so a
+# minute-scale threshold never fires on a power transition; a poisoned or replaced
+# session is cured a couple of minutes after it breaks instead of six days later.
+_PERSISTENT_FAILURE_S: Final = 120.0
+
+# A wall-clock jump this large between ticks means the machine slept, hibernated or
+# resumed from a Fast Startup "shut down" (which hibernates session 0 -- services
+# survive it, and Aurora's LastBootUpTime stayed 2026-09-26 through two power-offs).
+# The failure clock restarts at a gap: what failed across it is the transition.
+# (The service loop can run 2.7-6.7 s per tick on this fleet, so 30 s is far above
+# any slow tick.)
+_WALL_GAP_S: Final = 30.0
 
 # How often to read the installed driver version off disk. A version-resource
 # read is far more expensive than the metric calls (which total ~0.016 ms), so
@@ -58,11 +80,7 @@ _REINIT_BACKOFF_S: Final = (10.0, 30.0, 60.0, 120.0, 300.0)
 # unnoticed for four days.
 _DRIVER_CHECK_INTERVAL_NS: Final = 60_000_000_000
 
-# Rebuild attempts, and the time they must span, before a driver swap is
-# escalated to a process restart. Two attempts over a minute is enough to
-# distinguish "the rebuild fixed it" from "this process cannot be fixed".
-_REINIT_ATTEMPTS_BEFORE_ESCALATION: Final = 2
-_MIN_ESCALATION_SPAN_NS: Final = 60_000_000_000
+
 
 __all__ = ["PER_PROCESS_VRAM_KEY", "NvmlCollector", "encode_driver_version"]
 
@@ -114,6 +132,21 @@ def _import_pynvml() -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _wall_s() -> float:
+    """Wall clock; a thin wrapper so tests can replay a sleep."""
+    return time.time()
+
+
+def _error_code(exc: BaseException) -> str:
+    """NVML_ERROR_* code of an NVMLError (e.g. 'nvml:999'), else the exception type."""
+    v = getattr(exc, "value", None)
+    return f"nvml:{v}" if isinstance(v, int) else type(exc).__name__
+
+
+def _fmt_failures(failures: dict[str, str]) -> str:
+    return ", ".join(f"{k}={v}" for k, v in sorted(failures.items())) or "none"
+
+
 class NvmlCollector:
     """Collector for NVIDIA GPU signals via NVML.
 
@@ -134,32 +167,22 @@ class NvmlCollector:
         self._signals: tuple[str, ...] = ()
         self._consecutive_failures = 0
         self._max_consecutive = 3
-        # Consecutive ticks where NVML returned SUCCESS but with impossible
-        # values -- the only detector we have for that mode (see sample()).
-        self._implausible_streak = 0
-        # --- surviving a driver swap under a live session ---------------
-        # A boot-start service can open NVML against one driver and be handed
-        # another ten minutes later (Chronos 2026-09-02: UserPnp event 20003
-        # replaced nvlddmkm 610.88 with 616.56 while this process held its
-        # handles). Recovery is attempted on two independent witnesses, and
-        # escalated to a process restart if neither cures it.
-        #
-        # Backoff is in MONOTONIC TIME, not tick counts: the service loop runs
-        # at 2.7-6.7 s per tick on this fleet, not the configured 1 Hz, so a
-        # tick-counted backoff would mean something different on every host.
-        self._next_reinit_ns = 0
-        self._reinit_backoff_idx = 0
-        self._reinit_attempts_since_swap = 0
-        self._first_swap_seen_ns = 0
+        # Monotonic time the current run of failing ticks began (None while healthy),
+        # the previous tick's wall clock (power-transition witness), and the last
+        # failure set we logged -- NVML error codes are logged when they CHANGE, so
+        # the next new failure shape is diagnosable from the log on day one.
+        self._failing_since_ns: int | None = None
+        self._last_wall_s: float | None = None
+        self._last_failures: dict[str, str] = {}
         self._last_driver_check_ns: int | None = None
-        #: True while the installed driver differs from the one this session
-        #: opened against. Cleared only by a rebuild that succeeds AND re-reads
-        #: the version -- at which point the session is genuinely current
-        #: again. Never cleared by the reading merely looking reasonable.
+        #: True once the installed driver differs from the one this session
+        #: opened against. Never cleared in-process: only a fresh process maps
+        #: the new nvml.dll.
         self.driver_replaced = False
-        #: Set to a human-readable reason when in-process recovery has been
-        #: tried and failed after a driver swap. The service loop reads it and
-        #: exits so NSSM can hand us a fresh process (AppExit=Restart).
+        #: Set to a human-readable reason when this process cannot be cured in
+        #: place: the driver was replaced, or NVML has failed continuously for
+        #: _PERSISTENT_FAILURE_S. The service loop reads it and exits so NSSM
+        #: hands us a fresh process (AppExit=Restart), within its restart budget.
         self.wants_process_restart: str | None = None
         # Live per-GPU process map. Keyed by gpu_idx; value is a list of
         # (pid, used_vram_bytes) tuples. Refreshed on a slow cadence from
@@ -276,14 +299,11 @@ class NvmlCollector:
         pynvml = self._pynvml
         out: dict[str, Sample] = {}
         now = monotonic_ns()
-        # An empty handle list is a FAILING tick, not a quiet one. `sample()`
-        # used to return {} for it, which turned one failed rebuild into a
-        # permanent blind spot: _reinit_session() clears _handles when it
-        # fails, so the very next tick returned early -- before the health
-        # accounting and before every recovery path -- and the collector could
-        # never try again or even degrade. Nothing observed that, because a
-        # collector publishing nothing looks exactly like a quiet one.
+        # An empty handle list is a FAILING tick, not a quiet one: a collector
+        # publishing nothing looks exactly like a quiet one, so it must still
+        # reach the failure accounting (and the escalation) below.
         any_failure = not self._handles
+        failures: dict[str, str] = {} if self._handles else {"handles": "none"}
 
         for i, handle in enumerate(self._handles):
             try:
@@ -292,19 +312,28 @@ class NvmlCollector:
                 out[f"gpu.{i}.core_temp_c"] = Sample(
                     value=float(temp), taken_at_ns=now, source_id=_NAME, unit="celsius"
                 )
-            except Exception:
+            except Exception as exc:
                 any_failure = True
+                failures[f"gpu.{i}.core_temp_c"] = _error_code(exc)
 
             try:
                 util = pynvml.nvmlDeviceGetUtilizationRates(handle)
                 out[f"gpu.{i}.util_percent"] = Sample(
                     value=float(util.gpu), taken_at_ns=now, source_id=_NAME, unit="percent"
                 )
-            except Exception:
+            except Exception as exc:
                 any_failure = True
+                failures[f"gpu.{i}.util_percent"] = _error_code(exc)
 
             try:
                 meminfo = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                if meminfo.total and meminfo.used > meminfo.total:
+                    # Physically impossible, and it arrives as NVML_SUCCESS:
+                    # entering sleep on Aurora (2026-10-02) used read as the
+                    # wrapped uint64 18446744073673375744 on an 8 GB card.
+                    # The bytes unit has no upper bound in is_plausible, so
+                    # this is the only place that knows the card's total.
+                    raise ValueError("vram used > total")
                 used_bytes = float(meminfo.used)
                 pct = (meminfo.used / meminfo.total) * 100.0 if meminfo.total else 0.0
                 out[f"gpu.{i}.vram_used_bytes"] = Sample(
@@ -313,8 +342,9 @@ class NvmlCollector:
                 out[f"gpu.{i}.vram_used_percent"] = Sample(
                     value=float(pct), taken_at_ns=now, source_id=_NAME, unit="percent"
                 )
-            except Exception:
+            except Exception as exc:
                 any_failure = True
+                failures[f"gpu.{i}.vram"] = _error_code(exc)
 
             try:
                 power_mw = pynvml.nvmlDeviceGetPowerUsage(handle)  # milliwatts
@@ -340,67 +370,78 @@ class NvmlCollector:
             unit="count",
         )
 
-        # --- NVML "SUCCESS with garbage" detection -------------------------
-        # Observed 2026-07-23 22:39:26 on an RTX 5090 (driver 596.36) after a
-        # wedged NVDEC/CUDA context: nvmlDeviceGetTemperature returned
-        # 885510 C, and GetUtilizationRates/GetPowerUsage BOTH returned the
-        # same 260640043 -- while GetMemoryInfo on the SAME handle stayed
-        # perfectly correct. Every call returned NVML_SUCCESS, so nvidia-ml-py
-        # (which does check return codes) raised nothing, `any_failure` stayed
-        # False, health reset to HEALTHY, and no recovery ever ran.
-        #
-        # The poison was sticky to the SESSION, not the GPU: it survived the
-        # GPU returning to health and only cleared when the process restarted
-        # -- 8 hours later, by hand. Meanwhile /headroom read 0.0 and Kiroshi's
-        # WorkerTuner throttled a 6-worker node down to 1.
-        #
-        # So implausibility is the ONLY signal available here. Drop the bad
-        # samples and, if it persists, rebuild the NVML session in-process.
+        # --- NVML "SUCCESS with garbage" ------------------------------------
+        # 2026-07-23 (RTX 5090, wedged NVDEC context): temperature 885510 C and
+        # util/power both 260640043, every call NVML_SUCCESS -- nothing raised.
+        # 2026-10-02 (Aurora, entering sleep): temperature 0 C and VRAM used a
+        # wrapped uint64, also NVML_SUCCESS. Implausibility is the only witness:
+        # the bad samples are withheld (their rules abstain instead of reading
+        # "far over threshold") and the tick counts as failing.
         implausible = [k for k, s in out.items() if not is_plausible(s.value, s.unit)]
         if implausible:
             for k in implausible:
                 out.pop(k, None)
+                failures[k] = "implausible"
             any_failure = True
-            self._implausible_streak += 1
-            if self._implausible_streak >= _MAX_IMPLAUSIBLE_BEFORE_REINIT:
-                _log.warning(
-                    "NVML returned impossible values on %d consecutive ticks (%s); "
-                    "rebuilding the NVML session -- this is the success-with-garbage "
-                    "mode that no exception reports",
-                    self._implausible_streak, ", ".join(sorted(implausible)),
-                )
-                if self._reinit_session():
-                    self._implausible_streak = 0
-        else:
-            self._implausible_streak = 0
+        self._log_failure_change(failures)
 
-        # --- WITNESS B: the driver was swapped under us --------------------
-        # Checked every tick (rate-limited inside) because it is the ONLY
-        # route that sees a session whose calls all still succeed. On Chronos
-        # that shape published a constant 0.0 C for four days with health
-        # reading HEALTHY the whole time.
-        if self._check_driver_swap(now):
-            self._try_reinit(now, force=True)
+        # --- power transition: ride it out, touch nothing ------------------
+        wall = _wall_s()
+        if self._last_wall_s is not None and wall - self._last_wall_s > _WALL_GAP_S:
+            _log.warning(
+                "wall clock jumped %.0f s between ticks: the machine slept, hibernated "
+                "or resumed from a Fast Startup shutdown. Leaving the NVML session "
+                "untouched -- it heals by itself within seconds of resume, and a "
+                "rebuild during the transition breaks it for the life of the process.",
+                wall - self._last_wall_s)
+            if self._failing_since_ns is not None:
+                # what failed across the gap was the transition, not the session
+                self._failing_since_ns = now
+        self._last_wall_s = wall
+
+        # --- the driver was swapped under us --------------------------------
+        # Checked every tick (rate-limited inside) because it is the ONLY route
+        # that sees a session whose calls all still succeed (Chronos 2026-09-02:
+        # a constant 0.0 C for four days, health HEALTHY). Its cure is a fresh
+        # process: this one keeps the old nvml.dll mapped.
+        if self._check_driver_swap(now) and self.wants_process_restart is None:
+            installed = self._installed_driver_version() or "a different version"
+            self.wants_process_restart = (
+                f"NVML session was opened against driver {self._driver_version} but "
+                f"{installed} is installed; only a fresh process maps the new nvml.dll")
 
         if any_failure:
+            if self._failing_since_ns is None:
+                self._failing_since_ns = now
             self._consecutive_failures += 1
             if self._consecutive_failures >= self._max_consecutive:
                 self._health = HealthState.DEGRADED
-                # --- WITNESS C: sustained failure cures itself -------------
-                # Until 2026-09-07 nothing acted on DEGRADED at all. A session
-                # that failed by RAISING -- the GPU 1 shape -- could not reach
-                # _reinit_session(), whose only caller was the implausibility
-                # branch above, so it degraded and stayed degraded for 4.2
-                # days. DEGRADED is a state fact, so acting on it needs no
-                # judgement about any value; the backoff is what keeps a
-                # genuinely dead card from spinning.
-                self._try_reinit(now)
+            failing_s = (now - self._failing_since_ns) / 1e9
+            if failing_s >= _PERSISTENT_FAILURE_S and self.wants_process_restart is None:
+                self.wants_process_restart = (
+                    f"NVML has failed continuously for {failing_s:.0f} s "
+                    f"({_fmt_failures(failures)}); an in-process rebuild cannot cure "
+                    f"this (nvml.dll stays mapped) -- a fresh process does")
         else:
+            self._failing_since_ns = None
             self._consecutive_failures = 0
-            self._reinit_backoff_idx = 0
             self._health = HealthState.HEALTHY
 
         return out
+
+    def _log_failure_change(self, failures: dict[str, str]) -> None:
+        """Log NVML failures when the SET changes -- never per tick, never silently.
+
+        Until 2026-10-02 every exception here was swallowed, so a VRAM call that
+        failed for six days left no error code anywhere."""
+        if failures == self._last_failures:
+            return
+        if failures:
+            _log.warning("NVML calls failing: %s", _fmt_failures(failures))
+        else:
+            _log.info("NVML calls recovered (were failing: %s)",
+                      _fmt_failures(self._last_failures))
+        self._last_failures = dict(failures)
 
     def _installed_driver_version(self) -> str | None:
         """The driver version currently ON DISK, read WITHOUT touching NVML.
@@ -479,88 +520,10 @@ class NvmlCollector:
                 _log.error(
                     "NVIDIA driver was REPLACED under this session: it was opened "
                     "against %s and %s is now installed. Every reading from these "
-                    "handles is suspect -- rebuilding the NVML session.",
+                    "handles is suspect -- asking for a fresh process.",
                     self._driver_version, installed)
-                self._first_swap_seen_ns = now_ns
             self.driver_replaced = True
         return self.driver_replaced
-
-    def _try_reinit(self, now_ns: int, *, force: bool = False) -> None:
-        """Rebuild the session, at most as often as the backoff allows.
-
-        ``force`` skips the wait for witness B, whose evidence is conclusive:
-        the driver we were talking to is gone.
-        """
-        if not force and now_ns < self._next_reinit_ns:
-            return
-        self._reinit_attempts_since_swap += 1
-        ok = self._reinit_session()
-        if ok:
-            self._reinit_backoff_idx = 0
-            self._next_reinit_ns = now_ns
-            # /health must stop advertising a driver this session no longer
-            # talks to -- that string is what a human compares against
-            # nvidia-smi at deploy time.
-            fresh = self._installed_driver_version()
-            if fresh:
-                self._driver_version = fresh
-                self.driver_replaced = False
-                self._reinit_attempts_since_swap = 0
-            return
-        wait = _REINIT_BACKOFF_S[min(self._reinit_backoff_idx,
-                                     len(_REINIT_BACKOFF_S) - 1)]
-        self._reinit_backoff_idx += 1
-        self._next_reinit_ns = now_ns + int(wait * 1e9)
-
-        # Escalate ONLY on witness B. A rebuild that cannot fix a replaced
-        # driver is the documented mismatch case: the process still has the old
-        # nvml.dll mapped, and only a fresh process maps the new one. Scoped
-        # this narrowly on purpose -- escalating on DEGRADED alone would let a
-        # dead GPU restart the watchdog forever.
-        if (self.driver_replaced
-                and self.wants_process_restart is None
-                and self._reinit_attempts_since_swap >= _REINIT_ATTEMPTS_BEFORE_ESCALATION
-                and now_ns - self._first_swap_seen_ns >= _MIN_ESCALATION_SPAN_NS):
-            installed = self._installed_driver_version() or "a different version"
-            self.wants_process_restart = (
-                f"NVML session was opened against driver {self._driver_version} "
-                f"but {installed} is installed, and {self._reinit_attempts_since_swap} "
-                f"in-process rebuilds did not recover it")
-
-    def _reinit_session(self) -> bool:
-        """Tear down and rebuild the NVML session + device handles in-process.
-
-        Recovery path for the success-with-garbage mode described in
-        :meth:`sample`. Deliberately NOT a health-flag change: ``FAILED`` means
-        "unrecoverable, service stops polling until restart", which would turn
-        a transient poisoned session into a permanent GPU blind spot. Rebuilding
-        is what actually fixed it in the field (a fresh process read 36 C
-        immediately), so we do exactly that without needing a restart.
-
-        Best-effort: returns True only if a usable session + handles came back.
-        """
-        pynvml = self._pynvml
-        if pynvml is None:
-            return False
-        try:
-            # Balance the init refcount; a leaked one confuses later re-init
-            # in the same process (see the module notes on nvmlShutdown).
-            pynvml.nvmlShutdown()
-        except Exception:  # noqa: BLE001 - may already be torn down
-            pass
-        try:
-            pynvml.nvmlInit()
-            count = pynvml.nvmlDeviceGetCount()
-            if count == 0:
-                return False
-            self._handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(count)]
-            self._gpu_count = count
-            _log.info("NVML session rebuilt (%d GPU(s)); handles re-acquired", count)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("NVML session rebuild failed (%r); will retry next tick", exc)
-            self._handles = []
-            return False
 
     # -- Per-process VRAM accessor -----------------------------------------
 
