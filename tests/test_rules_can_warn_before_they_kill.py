@@ -60,3 +60,18 @@ def test_a_dashboard_threshold_edit_keeps_notify(tmp_path):
     by = {r.name: r for r in load_config(p).rules}
     assert by["cpu-pkg-warm"].threshold == 85.0
     assert by["cpu-pkg-warm"].notify is True, "editing the threshold dropped the warning flag"
+
+
+def test_every_warning_sits_under_its_kill_line_in_the_defaults_and_every_preset():
+    """A warning above its kill line can never fire first. One table
+    (rule_profiles.WARNING_UNDER) feeds the defaults and the slider presets."""
+    from atfield.config import default_config
+    from atfield.rule_profiles import PROFILE_PRESETS, RULE_PROFILES, WARNING_UNDER
+    by = {r.name: r for r in default_config().rules}
+    for kill, (warn, margin) in WARNING_UNDER.items():
+        assert by[warn].signal == by[kill].signal and by[warn].notify
+        assert by[warn].threshold == by[kill].threshold - margin < by[kill].threshold
+        for preset, m in PROFILE_PRESETS.items():
+            assert m[warn] < m[kill], (preset, warn, m[warn], kill, m[kill])
+        assert RULE_PROFILES[warn].max < RULE_PROFILES[kill].max
+

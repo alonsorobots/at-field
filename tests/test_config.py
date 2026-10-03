@@ -58,7 +58,16 @@ class TestDefaults:
             "ram-pressure",
             "pagefile-pressure",
             "cpu-pkg-hot",
+            # 0.4.19 near-limit warnings, one under each heat / memory kill line
+            "vram-junction-warm",
+            "gpu-hotspot-warm",
+            "gpu-core-warm",
+            "ram-high",
+            "pagefile-high",
+            "cpu-pkg-warm",
         }
+        assert {r.name for r in cfg.rules if r.action == "kill"} == names - {
+            r.name for r in cfg.rules if r.notify}
 
     @pytest.mark.parametrize(
         "name, signal, threshold, window_s, min_fraction",

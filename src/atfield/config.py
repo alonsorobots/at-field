@@ -31,6 +31,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final, Literal
 
+from atfield.rule_profiles import WARNING_UNDER
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:  # pragma: no cover - exercised on 3.10 only
@@ -339,8 +341,15 @@ def _default_rules() -> tuple[RuleConfig, ...]:
     * ``cpu-pkg-hot`` 90°C — most desktop CPUs trip thermal
       protection at 95-100°C and degrade silicon above ~85°C
       sustained.
+
+    NEAR-LIMIT WARNINGS (0.4.19): one ``log`` rule with ``notify = true`` under
+    each heat / memory kill line (``rule_profiles.WARNING_UNDER``: 4 °C under a
+    temperature, 5 points under a percentage, same window) so the tray and
+    subscribers hear "getting hot" while there is still time to act. Cooldown 600 s: one warning per rule per
+    10 minutes at most. 2026-10-03: AT-Field killed four processes on Chronos at
+    90 °C and the first anyone heard was the kill.
     """
-    return (
+    kills = (
         RuleConfig(
             name="vram-junction-hot",
             signal="gpu.*.mem_junction_temp_c",
@@ -398,6 +407,18 @@ def _default_rules() -> tuple[RuleConfig, ...]:
             action="kill",
         ),
     )
+    return kills + tuple(w for w in map(warning_for, kills) if w is not None)
+
+
+def warning_for(kill: RuleConfig) -> RuleConfig | None:
+    """The near-limit warning that sits under ``kill`` (same signal and window,
+    ``rule_profiles.WARNING_UNDER``'s margin below), or None if it has none."""
+    if kill.action != "kill" or kill.name not in WARNING_UNDER:
+        return None
+    name, margin = WARNING_UNDER[kill.name]
+    return RuleConfig(name=name, signal=kill.signal, threshold=kill.threshold - margin,
+                      window_s=kill.window_s, min_fraction_over=kill.min_fraction_over,
+                      action="log", cooldown_s=600, notify=True)
 
 
 def default_config() -> AtFieldConfig:

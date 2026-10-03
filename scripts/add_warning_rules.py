@@ -17,37 +17,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from atfield.config import load_config, load_config_from_dict  # noqa: E402
-
-#: kill rule -> (warning name, margin under its threshold)
-WARN_FOR = {
-    "vram-junction-hot": ("vram-junction-warm", 4.0),
-    "gpu-core-hot": ("gpu-core-warm", 4.0),
-    "gpu-hotspot-hot": ("gpu-hotspot-warm", 4.0),
-    "cpu-pkg-hot": ("cpu-pkg-warm", 4.0),
-    "ram-pressure": ("ram-high", 5.0),
-    "pagefile-pressure": ("pagefile-high", 5.0),
-}
+from atfield.config import load_config, load_config_from_dict, warning_for  # noqa: E402
 
 
 def warning_blocks(cfg) -> list[str]:
     have = {r.name for r in cfg.rules}
     out = []
-    for r in cfg.rules:
-        if r.action != "kill" or r.name not in WARN_FOR:
-            continue
-        name, margin = WARN_FOR[r.name]
-        if name in have:
+    for w in filter(None, map(warning_for, cfg.rules)):
+        if w.name in have:
             continue
         out.append(
             "[[rules]]\n"
-            f'name = "{name}"\n'
-            f'signal = "{r.signal}"\n'
-            f"threshold = {r.threshold - margin:.1f}\n"
-            f"window_s = {r.window_s}\n"
-            f"min_fraction_over = {r.min_fraction_over}\n"
-            'action = "log"\n'
-            "cooldown_s = 600\n"
+            f'name = "{w.name}"\n'
+            f'signal = "{w.signal}"\n'
+            f"threshold = {w.threshold:.1f}\n"
+            f"window_s = {w.window_s}\n"
+            f"min_fraction_over = {w.min_fraction_over}\n"
+            f'action = "{w.action}"\n'
+            f"cooldown_s = {w.cooldown_s}\n"
             "notify = true\n"
         )
     return out

@@ -7,6 +7,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.19] — 2026-10-03 — warnings before the kill line; kill reports are retried
+
+### Added
+
+- **Near-limit warnings.** `notify = true` on a `log`/`throttle` rule marks it a warning
+  (refused on `kill` rules: a kill always notifies). The defaults gain one under each
+  heat / memory kill line: `cpu-pkg-warm` 86 °C, `gpu-core-warm` 79 °C,
+  `vram-junction-warm` 86 °C, `ram-high` 80 %, `pagefile-high` 85 %, cooldown 600 s.
+- `/health` `last_warning` {rule, signal, value, threshold, kill_rule, kill_threshold}.
+  A warning never touches `last_action`: rules fire in config order, and a warning
+  firing in the same tick as its kill used to overwrite it and lose the kill pop-up.
+- Tray: a "Getting hot" notification on a new warning (at most one per rule per 10 min;
+  the first poll is a baseline).
+- Subscriber events carry `notify` and `value` (null when not finite).
+
+### Changed
+
+- **Undelivered kill / warning / guard-health reports are spooled and retried**
+  (`reporter_spool.jsonl` in the state dir, at most 500, backoff 15 s → 300 s) instead of
+  sent once and dropped. 4xx refusals are not retried; telemetry is never spooled.
+
 ## [0.4.18] — 2026-10-02 — NVML is never rebuilt in-process
 
 ### Changed

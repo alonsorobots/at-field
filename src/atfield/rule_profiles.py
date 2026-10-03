@@ -118,6 +118,33 @@ RULE_PROFILES: Final[dict[str, RuleProfile]] = {
 }
 
 
+#: NEAR-LIMIT WARNINGS (0.4.19): kill rule -> (its warning rule, margin under it).
+#: ONE table: the default config, scripts/add_warning_rules.py and the slider
+#: profiles below all read it, so a preset that moves a kill line moves its
+#: warning with it and the warning can never end up above the kill.
+WARNING_UNDER: Final[dict[str, tuple[str, float]]] = {
+    "vram-junction-hot": ("vram-junction-warm", 4.0),
+    "gpu-hotspot-hot": ("gpu-hotspot-warm", 4.0),
+    "gpu-core-hot": ("gpu-core-warm", 4.0),
+    "cpu-pkg-hot": ("cpu-pkg-warm", 4.0),
+    "ram-pressure": ("ram-high", 5.0),
+    "pagefile-pressure": ("pagefile-high", 5.0),
+}
+
+
+def _warning_profile(kill: RuleProfile, name: str, m: float) -> RuleProfile:
+    return RuleProfile(
+        name=name, unit=kill.unit, min=kill.min - m, aggressive_max=kill.aggressive_max - m,
+        relaxed_min=kill.relaxed_min - m, max=kill.max - m,
+        aggressive_value=kill.aggressive_value - m, normal_value=kill.normal_value - m,
+        relaxed_value=kill.relaxed_value - m, step=kill.step,
+    )
+
+
+RULE_PROFILES.update({w: _warning_profile(RULE_PROFILES[k], w, m)
+                      for k, (w, m) in WARNING_UNDER.items()})
+
+
 # Preset profiles. Each maps `(rule_name) -> threshold`. Used by
 # `atf set-profile aggressive` and the UI's preset buttons.
 PROFILE_PRESETS: Final[dict[Profile, dict[str, float]]] = {

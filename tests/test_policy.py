@@ -403,7 +403,9 @@ class TestDefaultConfigIntegration:
         dis_names = {d.base_rule_name for d in eng.disabled_rules}
         # gpu-hotspot-hot joins the disabled set for the same reason as
         # vram-junction-hot: both come from LHM, which is not running here.
-        assert dis_names == {"vram-junction-hot", "gpu-hotspot-hot", "cpu-pkg-hot"}
+        # ...and so do the 0.4.19 warnings that sit under them.
+        assert dis_names == {"vram-junction-hot", "gpu-hotspot-hot", "cpu-pkg-hot",
+                             "vram-junction-warm", "gpu-hotspot-warm", "cpu-pkg-warm"}
         assert "gpu-core-hot[gpu.0.core_temp_c]" in eff_names
         assert "gpu-core-hot[gpu.1.core_temp_c]" in eff_names
         assert "ram-pressure" in eff_names
