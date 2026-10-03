@@ -21,11 +21,19 @@ REFUSING, not just for firing:
     cycling the service;
   * at most once per process;
   * never below an uptime floor, so a condition present at boot cannot
-    produce a tight loop.
+    produce a tight loop;
+  * at most _RESTART_BUDGET_N times per _RESTART_BUDGET_WINDOW_S ACROSS
+    lifetimes (recorded in the state dir). Since 2026-10-02 nvml asks on any
+    failure that persists two minutes, not only on a replaced driver -- the
+    in-process rebuild it replaced was measured to poison the process -- so the
+    budget is what keeps a genuinely dead card from restarting the service
+    every two minutes forever.
 """
 from __future__ import annotations
 
+import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -163,3 +171,32 @@ class TestItRefuses:
 
         code = _run(env, _Bare(), ticks=3)
         assert code == 0
+
+
+class TestTheBudgetAcrossLifetimes:
+    def test_a_spent_budget_refuses_and_keeps_guarding(self, env):
+        """Three restarts in the last six hours: the fourth request is refused
+        and the service runs on (its rules on that collector starve, loudly)."""
+        cfg, sd = env
+        now = time.time()
+        (sd / svc._RESTART_BUDGET_FILENAME).write_text(
+            json.dumps([now - 3000, now - 2000, now - 1000]), encoding="utf-8")
+        c = _FakeCollector(want_after=2)
+        code = _run(env, c, ticks=6)
+        assert code == 0
+        assert c.samples_taken == 6, "refusing must not stop the loop"
+        assert any("restart_budget_spent" in e for e in _events(sd))
+
+    def test_restarts_outside_the_window_do_not_count(self, env):
+        cfg, sd = env
+        old = time.time() - svc._RESTART_BUDGET_WINDOW_S - 60
+        (sd / svc._RESTART_BUDGET_FILENAME).write_text(
+            json.dumps([old, old, old, old]), encoding="utf-8")
+        code = _run(env, _FakeCollector(want_after=2), ticks=20)
+        assert code == svc._EXIT_WANTS_RESTART
+
+    def test_each_restart_is_recorded_for_the_next_lifetime(self, env):
+        cfg, sd = env
+        assert _run(env, _FakeCollector(want_after=2), ticks=20) == svc._EXIT_WANTS_RESTART
+        rec = json.loads((sd / svc._RESTART_BUDGET_FILENAME).read_text(encoding="utf-8"))
+        assert len(rec) == 1 and abs(rec[0] - time.time()) < 60
