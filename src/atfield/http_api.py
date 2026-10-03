@@ -295,6 +295,10 @@ class ServiceState:
         # itself to surface the killed script when the report rolls in --
         # the tray reads `last_action.script` to title the system toast.
         self._last_action_at: float = 0.0
+        # Near-limit warnings (0.4.19) live apart from last_action: the tray pops a
+        # kill only on last_action.kind == "kill", and a warning firing in the same
+        # tick as its kill must not overwrite it.
+        self._last_warning: dict[str, Any] | None = None
         self._last_action_kind: str | None = None
         self._last_action_rule: str | None = None
         self._last_action_signal: str | None = None
@@ -372,6 +376,19 @@ class ServiceState:
             # Cleared here; populated by record_kill_report once we know
             # WHAT was actually killed.
             self._last_action_script = None
+
+    def record_warning(self, action: Action, *, kill_rule: str | None,
+                       kill_threshold: float | None) -> None:
+        with self._lock:
+            self._last_warning = {
+                "at": time.time(),
+                "rule": action.base_rule_name,
+                "signal": action.signal,
+                "value": action.latest_value,
+                "threshold": action.threshold,
+                "kill_rule": kill_rule,
+                "kill_threshold": kill_threshold,
+            }
 
     def record_kill_report(self, script: str | None) -> None:
         """Called immediately after `record_action(kill)` once the kill
@@ -581,6 +598,7 @@ class ServiceState:
                     if self._last_action_at
                     else None
                 ),
+                "last_warning": dict(self._last_warning) if self._last_warning else None,
             }
 
     def snapshot_signals(self, *, since: float | None) -> dict[str, Any]:

@@ -52,7 +52,7 @@ from atfield.config import AtFieldConfig, ConfigError, default_config, load_conf
 from atfield.forensics import ForensicBuffer
 from atfield.forensics import rotate_on_startup as rotate_forensics_on_startup
 from atfield.http_api import ApiServer, ServiceState, collector_view_from_probe
-from atfield.policy import PolicyEngine
+from atfield.policy import Action, EffectiveRule, PolicyEngine, kill_line_for
 from atfield.reporter import TelemetryPinger, report_guard_health, report_kill
 from atfield.signals import Sample, is_credible, is_plausible
 
@@ -404,6 +404,37 @@ class _StopFlag:
 
     def wait(self, timeout: float) -> bool:
         return self._event.wait(timeout)
+
+
+def demote_for_observe_only(action: Action) -> Action:
+    """Safe-mode demotion (PLANNING.md §5.4): a kill becomes a log. Built field by
+    field so ``notify`` takes its False default -- a demoted kill must never pop up
+    as a near-limit warning."""
+    return Action(
+        kind="log",
+        rule_name=action.rule_name,
+        base_rule_name=action.base_rule_name,
+        signal=action.signal,
+        threshold=action.threshold,
+        fraction_over=action.fraction_over,
+        samples_considered=action.samples_considered,
+        latest_value=action.latest_value,
+        triggered_at_ns=action.triggered_at_ns,
+        cooldown_seconds=action.cooldown_seconds,
+    )
+
+
+def record_on_health(api_state: ServiceState, action: Action,
+                     rules: tuple[EffectiveRule, ...]) -> None:
+    """Put a dispatched action on /health. A near-limit warning goes to
+    ``last_warning`` and leaves ``last_action`` alone: the tray pops a kill only on
+    last_action.kind == "kill", and rules fire in config order, so a warning firing
+    in the same tick as its kill would otherwise erase the kill notification."""
+    if action.notify and action.kind != "kill":
+        kill_rule, kill_threshold = kill_line_for(rules, action.signal, action.threshold)
+        api_state.record_warning(action, kill_rule=kill_rule, kill_threshold=kill_threshold)
+    else:
+        api_state.record_action(action)
 
 
 def run_service(
@@ -784,22 +815,10 @@ def run_service(
             for action in actions:
                 effective = action
                 if observe_only and action.kind == "kill":
-                    # Safe-mode demotion (PLANNING.md §5.4)
-                    effective = type(action)(
-                        kind="log",
-                        rule_name=action.rule_name,
-                        base_rule_name=action.base_rule_name,
-                        signal=action.signal,
-                        threshold=action.threshold,
-                        fraction_over=action.fraction_over,
-                        samples_considered=action.samples_considered,
-                        latest_value=action.latest_value,
-                        triggered_at_ns=action.triggered_at_ns,
-                        cooldown_seconds=action.cooldown_seconds,
-                    )
+                    effective = demote_for_observe_only(action)
 
                 audit.write_action(effective)
-                api_state.record_action(effective)
+                record_on_health(api_state, effective, engine.effective_rules)
 
                 # Pick candidate PIDs for GPU rules from the NVML proc map.
                 #

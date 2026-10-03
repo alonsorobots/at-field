@@ -132,6 +132,8 @@ def report_kill(state_dir: Path, *, action: Any, report: Any) -> None:
         "signal": action.signal,
         "threshold": action.threshold,
         "action": action.kind,
+        # A near-limit warning (a log/throttle rule with notify = true), not a kill.
+        "notify": bool(getattr(action, "notify", False)),
         "kill_root": (
             {"pid": report.kill_root.pid, "name": report.kill_root.name}
             if report.kill_root

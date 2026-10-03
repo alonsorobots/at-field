@@ -97,6 +97,10 @@ class Action:
     latest_value: float
     triggered_at_ns: int
     cooldown_seconds: int     # how long this rule will sleep after this action
+    # A near-limit WARNING (rule has notify = true; never set on a kill). Defaults
+    # False so anything that rebuilds an Action -- the observe-only demotion --
+    # cannot turn into a warning by accident.
+    notify: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +515,7 @@ class PolicyEngine:
                     latest_value=result.latest_value if result.latest_value is not None else float("nan"),
                     triggered_at_ns=now_ns,
                     cooldown_seconds=cooldown_s,
+                    notify=rule.base_rule.notify,
                 )
             )
 
@@ -590,3 +595,15 @@ class PolicyEngine:
     def starved_rules(self) -> tuple[EffectiveRule, ...]:
         """Rules currently receiving no samples -- i.e. not actually guarding."""
         return tuple(r for r in self._effective if r.starved)
+
+
+def kill_line_for(rules: tuple[EffectiveRule, ...], signal: str, above: float) -> tuple[str | None, float | None]:
+    """The kill rule a warning on ``signal`` at ``above`` is warning about: the lowest
+    kill threshold on the same concrete signal at or over the warning's own. (None, None)
+    when that signal has no kill rule -- a warning can stand alone."""
+    best: EffectiveRule | None = None
+    for r in rules:
+        if (r.signal == signal and r.base_rule.action == "kill" and r.base_rule.threshold >= above
+                and (best is None or r.base_rule.threshold < best.base_rule.threshold)):
+            best = r
+    return (best.base_rule.name, best.base_rule.threshold) if best else (None, None)
