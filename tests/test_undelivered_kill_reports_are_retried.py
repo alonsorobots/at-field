@@ -67,6 +67,11 @@ class Sub:
         return f"http://127.0.0.1:{self.port}/atfield/event"
 
 
+@pytest.fixture(autouse=True)
+def _fresh_spool_registry(monkeypatch):
+    monkeypatch.setattr(reporter, "_spool_dirs", set())
+
+
 def _kill(ts=1000.0, pid=1):
     return {"type": "kill_report", "rule": "cpu-pkg-hot", "action": "kill", "ts": ts,
             "kill_root": {"pid": pid, "name": "python.exe"}}
@@ -100,9 +105,12 @@ def test_a_server_error_is_retried_but_a_refusal_is_not(tmp_path):
 
 def test_the_spool_is_bounded_and_drops_the_oldest(tmp_path, monkeypatch):
     monkeypatch.setattr(reporter, "_SPOOL_MAX", 3)
-    url = Sub(_free_port()).url
-    for i in range(5):
-        reporter._deliver(url, _kill(ts=float(i), pid=i), tmp_path)
+    sub = Sub(_free_port(), status=503).up()        # fast to fail (a refused port takes 2 s on Windows)
+    try:
+        for i in range(5):
+            reporter._deliver(sub.url, _kill(ts=float(i), pid=i), tmp_path)
+    finally:
+        sub.down()
     lines = (tmp_path / reporter._SPOOL_NAME).read_text(encoding="utf-8").splitlines()
     assert [json.loads(x)["payload"]["ts"] for x in lines] == [2.0, 3.0, 4.0]
 
