@@ -13,12 +13,17 @@ that is or what it does with the events.
 Best-effort only: a slow or unreachable subscriber must never block or crash
 the watchdog's kill dispatch path. Every failure mode here is swallowed and
 logged, never raised.
+
+Kill and guard-health reports that fail to deliver are spooled on disk and
+retried (0.4.19): until then a kill that happened while the subscriber was
+restarting was simply lost. Telemetry is never spooled.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import socket
 import threading
@@ -48,20 +53,145 @@ _cached_at: float = 0.0
 # not a delivery guarantee, and a persistently-down subscriber must not grow
 # memory without limit.
 _QUEUE_MAX = 256
-_send_queue: "queue.Queue[tuple[str, dict[str, Any]]]" = queue.Queue(maxsize=_QUEUE_MAX)
+_send_queue: "queue.Queue[tuple[str, dict[str, Any], Path | None]]" = queue.Queue(maxsize=_QUEUE_MAX)
 _worker_started = False
 _worker_lock = threading.Lock()
 
+# RETRY SPOOL (0.4.19). An event worth retrying -- a kill, a near-limit warning, a
+# guard going inert -- that the subscriber did not accept is appended to
+# <state_dir>/reporter_spool.jsonl and resent by the delivery thread with backoff
+# until a 2xx. Bounded: past _SPOOL_MAX the oldest are dropped with a warning.
+# Only the delivery thread touches the file, so the tick loop never waits on it.
+_SPOOLED_TYPES = frozenset({"kill_report", "guard_health"})
+_SPOOL_NAME = "reporter_spool.jsonl"
+_SPOOL_MAX = 500
+_RETRY_MIN_S = 15.0
+_RETRY_MAX_S = 300.0
+_spool_dirs: set[Path] = set()
+
+
+def _post(url: str, payload: dict[str, Any]) -> tuple[bool, bool]:
+    """(delivered, worth_retrying). A refusal retrying cannot fix (401, 404, 422)
+    is not retried; a network failure, a timeout or a server error is."""
+    try:
+        r = requests.post(url, json=payload, timeout=_POST_TIMEOUT_S)
+    except Exception:
+        _log.debug("failed to report event to subscriber %s", url, exc_info=True)
+        return False, True
+    if 200 <= r.status_code < 300:
+        return True, False
+    retry = r.status_code >= 500 or r.status_code in (408, 429)
+    if not retry:
+        _log.warning("subscriber %s refused a %s event with HTTP %d; not retrying",
+                     url, payload.get("type"), r.status_code)
+    return False, retry
+
+
+def _read_spool(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    return [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def _write_spool(path: Path, lines: list[str]) -> None:
+    if not lines:
+        path.unlink(missing_ok=True)
+        return
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _spool_append(spool_dir: Path, url: str, payload: dict[str, Any]) -> None:
+    try:
+        path = spool_dir / _SPOOL_NAME
+        lines = _read_spool(path) + [json.dumps({"url": url, "payload": payload})]
+        if len(lines) > _SPOOL_MAX:
+            _log.warning("reporter spool over %d events; dropping the %d oldest",
+                         _SPOOL_MAX, len(lines) - _SPOOL_MAX)
+            lines = lines[-_SPOOL_MAX:]
+        _write_spool(path, lines)
+        _spool_dirs.add(spool_dir)
+    except Exception:  # noqa: BLE001
+        _log.exception("could not spool an undelivered %s event", payload.get("type"))
+
+
+def spool_size(spool_dir: Path) -> int:
+    try:
+        return len(_read_spool(spool_dir / _SPOOL_NAME))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _deliver(url: str, payload: dict[str, Any], spool_dir: Path | None) -> bool:
+    ok, retry = _post(url, payload)
+    if not ok and retry and spool_dir is not None and payload.get("type") in _SPOOLED_TYPES:
+        _spool_append(spool_dir, url, payload)
+    return ok
+
+
+def _drain_spool(spool_dir: Path) -> int:
+    """Resend every spooled event once; keep what still fails. Returns how many were
+    delivered. After one retryable failure the rest for that URL wait for the next
+    pass, so a black-holed subscriber costs one timeout per pass, not one per event."""
+    try:
+        path = spool_dir / _SPOOL_NAME
+        lines = _read_spool(path)
+        if not lines:
+            return 0
+        keep: list[str] = []
+        unreachable: set[str] = set()
+        delivered = 0
+        for ln in lines:
+            try:
+                item = json.loads(ln)
+                url, payload = item["url"], item["payload"]
+            except (ValueError, KeyError, TypeError):
+                _log.warning("dropping a malformed reporter spool line")
+                continue
+            if url in unreachable:
+                keep.append(ln)
+                continue
+            ok, retry = _post(url, payload)
+            if ok:
+                delivered += 1
+            elif retry:
+                unreachable.add(url)
+                keep.append(ln)
+        _write_spool(path, keep)
+        if delivered:
+            _log.info("delivered %d spooled event(s); %d still waiting", delivered, len(keep))
+        return delivered
+    except Exception:  # noqa: BLE001
+        _log.exception("reporter spool drain failed")
+        return 0
+
 
 def _delivery_worker() -> None:
+    backoff = _RETRY_MIN_S
+    next_retry = time.monotonic() + backoff
     while True:
-        url, payload = _send_queue.get()
+        timeout = max(0.01, next_retry - time.monotonic()) if _spool_dirs else None
         try:
-            requests.post(url, json=payload, timeout=_POST_TIMEOUT_S)
-        except Exception:
-            _log.debug("failed to report event to subscriber %s", url, exc_info=True)
-        finally:
-            _send_queue.task_done()
+            url, payload, spool_dir = _send_queue.get(timeout=timeout)
+        except queue.Empty:
+            pass
+        else:
+            try:
+                if spool_dir is not None and spool_dir not in _spool_dirs and spool_size(spool_dir):
+                    _spool_dirs.add(spool_dir)          # left over from a previous run
+                    next_retry = time.monotonic()
+                _deliver(url, payload, spool_dir)
+            except Exception:  # noqa: BLE001
+                _log.exception("event delivery failed")
+            finally:
+                _send_queue.task_done()
+        if _spool_dirs and time.monotonic() >= next_retry:
+            progressed = sum(_drain_spool(d) for d in list(_spool_dirs))
+            waiting = [d for d in list(_spool_dirs) if spool_size(d)]
+            _spool_dirs.intersection_update(waiting)
+            backoff = _RETRY_MIN_S if (progressed or not waiting) else min(backoff * 2, _RETRY_MAX_S)
+            next_retry = time.monotonic() + backoff
 
 
 def _ensure_worker() -> None:
@@ -146,7 +276,7 @@ def report_kill(state_dir: Path, *, action: Any, report: Any) -> None:
     _ensure_worker()
     for url in webhooks:
         try:
-            _send_queue.put_nowait((url, payload))
+            _send_queue.put_nowait((url, payload, state_dir))
         except queue.Full:
             # Subscriber persistently unreachable and events piling up: drop
             # the newest rather than block the tick loop or grow unbounded.
@@ -206,7 +336,7 @@ def report_guard_health(
     _ensure_worker()
     for url in webhooks:
         try:
-            _send_queue.put_nowait((url, payload))
+            _send_queue.put_nowait((url, payload, state_dir))
         except queue.Full:
             _log.debug("reporter queue full; dropping guard_health for %s", url)
 
@@ -302,7 +432,7 @@ def report_telemetry(state_dir: Path, samples: dict[str, Any], *, credible: set[
     }
     _ensure_worker()
     try:
-        _send_queue.put_nowait((url, payload))
+        _send_queue.put_nowait((url, payload, state_dir))
     except queue.Full:
         _log.debug("reporter queue full; dropping telemetry for %s", url)
         return False

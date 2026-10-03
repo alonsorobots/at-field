@@ -45,7 +45,7 @@ def _sent(monkeypatch, calls=None) -> list:
     monkeypatch.setattr(reporter, "_cached_webhooks", [], raising=False)
     monkeypatch.setattr(reporter, "_ensure_worker",
                         lambda: (calls.append(1) if calls is not None else None))
-    monkeypatch.setattr(reporter._send_queue, "put_nowait", lambda item: out.append(item))
+    monkeypatch.setattr(reporter._send_queue, "put_nowait", lambda item: out.append(item[:2]))  # (url, payload); item[2] is the spool dir
     return out
 
 
