@@ -580,6 +580,10 @@ class KillReport:
     killed: tuple[KilledProcess, ...] = ()
     skipped_reason: str | None = None
     finished_at_ns: int = 0
+    # The kill root's parent chain, (pid, name) nearest first, captured BEFORE the
+    # kill (psutil cannot report an exited process's parent). Lets whoever launched
+    # it recognise its own work: an agent session's process is in this chain.
+    ancestors: tuple[tuple[int, str], ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -736,6 +740,7 @@ class Actuator:
             # Capture the owner while the offender is still alive; psutil cannot
             # report the parent of an exited process.
             owner = self._provider.parent(offender.pid)
+            ancestors = self._ancestors(offender.pid)
             _log.warning(
                 "process-rss-cap: pid=%s name=%s holds %.1f GB (cap %.1f GB); killing it",
                 offender.pid, offender.name, offender.rss_bytes / (1024 ** 3), cap_gb,
@@ -757,10 +762,20 @@ class Actuator:
                     kill_root=offender,
                     killed=tuple(results),
                     finished_at_ns=int(time.monotonic_ns()),
+                    ancestors=ancestors,
                 )
             )
         return reports
 
+
+    def _ancestors(self, pid: int, cap: int = 16) -> tuple[tuple[int, str], ...]:
+        """(pid, name) of pid's parent, grandparent, ... up to ``cap`` levels."""
+        out: list[tuple[int, str]] = []
+        p = self._provider.parent(pid)
+        while p is not None and len(out) < cap:
+            out.append((p.pid, p.name))
+            p = self._provider.parent(p.pid)
+        return tuple(out)
 
     # -- Escalation --------------------------------------------------------
 
@@ -938,6 +953,7 @@ class Actuator:
         # faithfully and caught it), so a post-kill lookup silently returns None
         # and escalation never fires.
         owner = self._provider.parent(root.pid)
+        ancestors = self._ancestors(root.pid)
 
         # Build the full target set: root + descendants, minus protected. A
         # protected client can also sit *below* the root (a supervisor started by
@@ -981,6 +997,7 @@ class Actuator:
             kill_root=root,
             killed=tuple(results),
             finished_at_ns=int(time.monotonic_ns()),
+            ancestors=ancestors,
         )
 
     # -- Throttle (suspend/resume) ----------------------------------------

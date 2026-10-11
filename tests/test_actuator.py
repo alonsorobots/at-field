@@ -325,6 +325,24 @@ class TestActuator:
         # All survived terminate (FakeProvider doesn't auto-die), so kill() runs
         assert sorted(provider.killed) == [20, 30, 40]
 
+    def test_kill_report_records_the_launchers_ancestor_chain(self):
+        # claude.exe -> bash -> bash -> python (root) -> python worker: the report names
+        # the chain above the root, nearest first, so the launching session can find
+        # itself in it (its CLAUDE_PID) -- captured before the kill
+        actuator, provider = self._build(
+            [
+                (5, 0, "Cursor.exe", 0),
+                (6, 5, "claude.exe", 0),
+                (7, 6, "bash.exe", 0),
+                (8, 7, "bash.exe", 0),
+                (30, 8, "python.exe", 5_000_000_000),
+                (40, 30, "python.exe", 100),
+            ]
+        )
+        report = actuator.execute(_action(kind="kill"), candidate_pids=[40, 30])
+        assert report.kill_root is not None and report.kill_root.pid == 30
+        assert report.ancestors == ((8, "bash.exe"), (7, "bash.exe"), (6, "claude.exe"), (5, "Cursor.exe"))
+
     def test_self_protection_filters_own_pid(self):
         # python -> python where one is the watchdog
         own_pid = 99
