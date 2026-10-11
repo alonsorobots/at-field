@@ -7,6 +7,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.20] — 2026-10-11 — a kill report names who launched the killed process
+
+### Added
+
+- `kill_report.ancestors`: the kill root's parent chain, `[pid, name]` nearest first (capped at 16),
+  captured before the kill (an exited process has no parent to ask). An agent session finds itself in
+  it -- Kiroshi's `peek` hook matches its `CLAUDE_PID` and tells that session, once, that AT-Field killed
+  its job. Four `cpu-pkg-hot` kills on 2026-10-11 went unnoticed by the agents that launched them, one of
+  which relaunched at three times the load.
+
 ## [0.4.19] — 2026-10-03 — warnings before the kill line; kill reports are retried
 
 ### Added
