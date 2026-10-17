@@ -503,6 +503,34 @@ def test_kill(
     console.print(f"[red]killed[/] {len(report.killed)}; survived {sum(1 for k in report.killed if k.survived)}")
 
 
+@app.command(name="notify-drill")
+def notify_drill(
+    pid: int = typer.Option(..., "--pid", help="Whose owner gets the [DRILL] post with --send."),
+    send: bool = typer.Option(False, "--send", help="Post ONE [DRILL] message to PID's session."),
+    state_dir: Path = _state_dir_option(),
+) -> None:
+    """List the ranked owners of the live CPU load (no tokens); --send drills one post."""
+    from atfield import agent_inbox
+    from atfield.actuator import Actuator
+    from atfield.config import load_config
+
+    actuator = Actuator(load_config(state_dir / "config.toml"))
+    t0 = time.monotonic()
+    found = actuator.load_owners("system.cpu_package_temp_c")
+    console.print(f"owners ({time.monotonic() - t0:.2f}s):")
+    for o in found:
+        console.print(json.dumps(o.public()))
+    info = actuator._provider.get(pid)
+    if info is None:
+        raise typer.Exit(code=2)
+    owner = actuator._owner_of(info, actuator._ancestors(pid))
+    console.print(f"owner of pid {pid}: {json.dumps(owner.public())}")
+    if send and owner.inbox is not None:
+        ok = agent_inbox.post(owner.inbox, f"[DRILL] AT-Field notify-drill to the owner of pid "
+                              f"{pid}: reply with the word RECEIVED and this text verbatim.")
+        console.print(f"posted: {ok}")
+
+
 # ---------------------------------------------------------------------------
 # doctor -- interactive health check + setup helper
 # ---------------------------------------------------------------------------
