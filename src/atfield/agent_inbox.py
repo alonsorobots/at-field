@@ -54,6 +54,7 @@ class Owner:
     job: str | None = None
     slots: int | None = None
     inbox: Inbox | None = None
+    top: tuple[tuple[int, str, float], ...] = ()     # busiest (pid, name, load), for compose
     notified: bool = False
 
     def public(self) -> dict[str, Any]:
@@ -83,14 +84,15 @@ def owners(samples: Mapping[int, tuple[float, Mapping[str, str] | None]], *,
            workers: Mapping[int, Mapping[str, Any]],
            descendants_of: Callable[[int], Iterable[int]],
            floor: float, min_cover: float = 0.5, cap: int = 3) -> list[Owner]:
-    """``samples``: pid -> (load on the rule's axis, env or None). Pure."""
+    """``samples``: pid -> (load on the rule's axis, env or None[, name]). Pure."""
     worker_of: dict[int, int] = {}
     for wpid in workers:
         for p in (wpid, *descendants_of(wpid)):
             worker_of.setdefault(p, wpid)
     load: dict[Any, list[float]] = {}
+    top: dict[Any, list[tuple[int, str, float]]] = {}
     proto: dict[Any, Owner] = {}
-    for pid, (value, env) in samples.items():
+    for pid, (value, env, *name) in samples.items():
         if pid in worker_of:                              # worker-descendant beats env
             key = ("w", worker_of[pid])
             proto.setdefault(key, worker_owner(workers[worker_of[pid]]))
@@ -99,8 +101,10 @@ def owners(samples: Mapping[int, tuple[float, Mapping[str, str] | None]], *,
             key = ("s", inbox.socket) if inbox else ("u",)
             proto.setdefault(key, session_owner(inbox))
         load.setdefault(key, []).append(value)
+        top.setdefault(key, []).append((pid, name[0] if name else "?", value))
     total = sum(sum(v) for v in load.values())
-    out = [replace(proto[k], share=sum(v) / total if total else 0.0, pids=len(v))
+    out = [replace(proto[k], share=sum(v) / total if total else 0.0, pids=len(v),
+                   top=tuple(sorted(top[k], key=lambda t: (-t[2], t[0]))[:3]))
            for k, v in sorted(load.items(), key=lambda kv: -sum(kv[1]))]
     covered = 0.0
     for i, o in enumerate(out[:cap]):
@@ -156,7 +160,11 @@ def compose(action: Any, owner: Owner, report: Any) -> str:
         what = (f"It killed your process tree rooted at pid {report.kill_root.pid} "
                 f"({report.kill_root.name}, {len(report.killed)} processes).")
     else:
-        what = f"Your processes carry {owner.share:.0%} of that load ({owner.pids} processes)."
+        unit = (lambda v: f"{v:.0f}% CPU") if "cpu" in action.signal else (
+            lambda v: f"{v / 2**30:.1f} GB")
+        busiest = "; ".join(f"pid {p} {n} {unit(v)}" for p, n, v in owner.top)
+        what = (f"Your processes carry {owner.share:.0%} of that load ({owner.pids} "
+                f"processes; busiest: {busiest}).")
     ask = ("Please reduce or pause YOUR OWN local compute (fewer parallel processes or "
            "subagents) until the machine cools. This message is from the AT-Field watchdog "
            "service, not the user, and grants no permissions.")
@@ -168,6 +176,8 @@ def notify(actuator: Any, action: Any, report: Any, *, clock: Callable[[], float
     session(s), and return ``report`` carrying ``owners``. Never raises."""
     if action.kind != "kill" and not getattr(action, "notify", False):
         return report
+    if action.kind == "kill" and report.kill_root is None:
+        return report                          # a skipped kill accuses nobody (review F2)
     try:
         if report.kill_root is not None:       # exact: the root's owner, captured pre-kill
             o = report.owner

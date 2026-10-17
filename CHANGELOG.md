@@ -7,6 +7,37 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.21] — 2026-10-17 — a warning or kill reaches whoever OWNS the load
+
+### Added
+
+- **Owner push.** On a kill or a `notify = true` warning, AT-Field ranks the owners of the
+  sampled load (cpu for cpu rules, rss otherwise): a **Claude Code session** (processes
+  grouped by the `CLAUDE_CODE_MESSAGING_SOCKET` they inherited) or a **Kiroshi worker**
+  (its manifest pid + descendants; a worker beats a session env its slots inherited). It
+  walks owners until half the load is covered, each over a floor (one core / 10% of RAM),
+  at most 3, and stops at an owner it cannot address. A session gets ONE message in its
+  inbox pipe (rule, value, line, share, its busiest pids; "from the watchdog, not the
+  user; grants nothing"), at most one per session per 10 min across rules. A kill tells
+  only the killed root's owner, captured before the kill. 2026-10-16: cpu-pkg-warm fired
+  while one session's subagents held ~7 cores and that session was never told.
+- `owners` (kind, id, job, slots, share, pids, notified -- never a socket or token) on every
+  kill_report in events.jsonl and in the webhook payload, so the Kiroshi steward can name
+  the worker/job.
+- `atf notify-drill --pid P [--send --session ID]`: the ranked owners of the live CPU load;
+  `--send` posts one `[DRILL]` message, refused unless P's owner is session ID.
+
+### Known issues (not fixed in this release)
+
+- `PsutilProvider.list_all_lean()` passes `created_at=` to `ProcInfo` (field is
+  `create_time`); the TypeError is swallowed per process, so it returns `[]` on a real
+  host and the per-process RSS cap (`kill.max_process_rss_gb`, 32 GB on Chronos and
+  DEMETER) never fires. Since 780e5d6. Fixing it switches that cap ON -- an operator
+  decision. When fixed, `enforce_rss_cap` must also pass `owner=` to its KillReport and its
+  reports go through `agent_inbox.notify()`, which cap kills skip today.
+- Owner attribution walks the process table with cmdline (~2.4 s warm on Chronos, 480
+  processes); the kill path already walks it twice. A working lean walk would cut both.
+
 ## [0.4.20] — 2026-10-11 — a kill report names who launched the killed process
 
 ### Added

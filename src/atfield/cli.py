@@ -507,6 +507,7 @@ def test_kill(
 def notify_drill(
     pid: int = typer.Option(..., "--pid", help="Whose owner gets the [DRILL] post with --send."),
     send: bool = typer.Option(False, "--send", help="Post ONE [DRILL] message to PID's session."),
+    session: str = typer.Option("", "--session", help="--send refuses unless PID's owner IS this session id."),
     state_dir: Path = _state_dir_option(),
 ) -> None:
     """List the ranked owners of the live CPU load (no tokens); --send drills one post."""
@@ -525,7 +526,11 @@ def notify_drill(
         raise typer.Exit(code=2)
     owner = actuator._owner_of(info, actuator._ancestors(pid))
     print(f"owner of pid {pid}: {json.dumps(owner and owner.public())}")
-    if send and owner is not None and owner.inbox is not None:
+    if send and not (owner and owner.inbox and session
+                     and owner.inbox.session_id.startswith(session)):
+        console.print("[red]refusing --send: --session must name the owning session[/]")
+        raise typer.Exit(code=3)
+    if send:
         ok = agent_inbox.post(owner.inbox, f"[DRILL] AT-Field notify-drill to the owner of pid "
                               f"{pid}: reply with the word RECEIVED and this text verbatim.")
         console.print(f"posted: {ok}")

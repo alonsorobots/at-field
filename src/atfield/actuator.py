@@ -1053,7 +1053,7 @@ class Actuator:
         workers = {pid: c.manifest for pid, c in self._clients_by_pid.items()
                    if c.role == "worker"}
         return agent_inbox.owners(
-            {i.pid: (use.get(i.pid, 0.0), self._environ(i.pid)) for i in eligible},
+            {i.pid: (use.get(i.pid, 0.0), self._environ(i.pid), i.name) for i in eligible},
             workers=workers, floor=floor,
             descendants_of=lambda p: [d.pid for d in self._provider.descendants(p)])
 

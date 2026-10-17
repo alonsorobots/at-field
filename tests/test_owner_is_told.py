@@ -175,3 +175,44 @@ def test_a_killed_worker_slot_is_named_and_gets_no_pipe_post(tmp_path, monkeypat
     assert p["kill_root"]["pid"] in (501, 502, 503)
     assert [(o["kind"], o["id"], o.get("job")) for o in p["owners"]] == [
         ("kiroshi_worker", "DEMETER-4c030c", "handgap-v2")]
+
+
+
+def test_a_kill_that_found_no_root_tells_nobody(tmp_path, monkeypatch):
+    """A kill skipped with no root (here: the offender exited between pick and walk-up)
+    must not fall into the warning walk and accuse the top load owner (review F2)."""
+    import atfield.actuator as act
+    monkeypatch.setattr(act, "find_kill_root", lambda *a, **kw: None)
+    posts, payloads, _ = run(tmp_path, monkeypatch, procs_incident(), 95.0, KILL)
+    (p,) = payloads
+    assert (p["kill_root"], p["owners"], posts) == (None, [], [])
+
+
+def test_the_warning_names_the_owners_busiest_processes(tmp_path, monkeypatch):
+    """Review F5: say WHICH processes, so the agent can find them (top 3, pid name load)."""
+    procs = procs_incident()
+    for i, p in enumerate(procs):
+        if p.env is SA:
+            p.cpu = 80.0 + i                # pids 100..107 at 82..89% -> top three 107, 106, 105
+    posts, _, _ = run(tmp_path, monkeypatch, procs, 87.0, WARN)
+    (text,) = [t for _, t in posts]
+    assert "pid 107 python.exe 89% CPU; pid 106 python.exe 88% CPU; pid 105 python.exe 87% CPU" in text
+    assert TOKEN not in text
+
+
+def test_the_drill_refuses_to_send_without_the_owning_session_id(tmp_path, monkeypatch):
+    """Review F6: --send must name the session it expects; a mismatch posts nothing."""
+    from typer.testing import CliRunner
+
+    import atfield.actuator as act
+    from atfield.cli import app
+    provider = FakeProvider.from_procs(procs_incident())
+    monkeypatch.setattr(act, "Actuator", lambda cfg: Actuator(cfg, provider=provider,
+                                                              sleep=lambda _s: None))
+    posts = []
+    monkeypatch.setattr(ai, "post", lambda inbox, text, **kw: posts.append(inbox.session_id) or True)
+    base = ["notify-drill", "--pid", "100", "--send", "--state-dir", str(tmp_path)]
+    runs = [CliRunner().invoke(app, base + extra) for extra in
+            ([], ["--session", "bbbbbbbb"], ["--session", "aaaaaaaa"])]
+    assert [r.exit_code != 0 for r in runs] == [True, True, False]
+    assert posts == ["aaaaaaaa-1111"]
