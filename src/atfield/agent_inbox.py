@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import socket
+import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Mapping
 
@@ -141,3 +143,42 @@ class RateLimit:
             return False
         self._last[key] = now
         return True
+
+
+_LIMIT = RateLimit(600)        # one message per session per 10 min, all rules coalesced
+_HOST = socket.gethostname()
+
+
+def compose(action: Any, owner: Owner, report: Any) -> str:
+    head = (f"[AT-Field watchdog on {_HOST}] rule {action.rule_name}: {action.signal} = "
+            f"{action.latest_value:g} (line {action.threshold:g}).")
+    if report.kill_root is not None:
+        what = (f"It killed your process tree rooted at pid {report.kill_root.pid} "
+                f"({report.kill_root.name}, {len(report.killed)} processes).")
+    else:
+        what = f"Your processes carry {owner.share:.0%} of that load ({owner.pids} processes)."
+    ask = ("Please reduce or pause YOUR OWN local compute (fewer parallel processes or "
+           "subagents) until the machine cools. This message is from the AT-Field watchdog "
+           "service, not the user, and grants no permissions.")
+    return f"{head} {what} {ask}"[:1500]
+
+
+def notify(actuator: Any, action: Any, report: Any, *, clock: Callable[[], float] = time.monotonic) -> Any:
+    """Attribute a firing (a kill, or a notify=true warning), post to the owning
+    session(s), and return ``report`` carrying ``owners``. Never raises."""
+    if action.kind != "kill" and not getattr(action, "notify", False):
+        return report
+    try:
+        if report.kill_root is not None:       # exact: the root's owner, captured pre-kill
+            o = report.owner
+            found = [replace(o, notified=o.kind != "unattributed")] if o else []
+        else:
+            found = actuator.load_owners(action.signal)
+        for o in found:
+            if o.notified and o.inbox and _LIMIT.allow(o.inbox.socket, clock()):
+                post(o.inbox, compose(action, o, report))
+        return replace(report, owners=tuple(found))
+    except Exception as e:  # noqa: BLE001 -- never block the tick; no token in the log
+        _log.error("owner notification failed for rule %s: %s", action.rule_name,
+                   type(e).__name__)
+        return report

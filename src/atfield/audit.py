@@ -190,6 +190,7 @@ class AuditWriter:
                 "succeeded": report.succeeded,
                 "skipped_reason": report.skipped_reason,
                 "ancestors": [[pid, name] for pid, name in report.ancestors],
+                "owners": [o.public() for o in report.owners],
             }
         )
 

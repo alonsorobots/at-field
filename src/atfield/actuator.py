@@ -45,9 +45,10 @@ import os
 import threading
 import time
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
+from atfield import agent_inbox
 from atfield.client_registry import (
     discover_protected,
     is_absolute_protection,
@@ -237,6 +238,10 @@ class ProcessProvider(Protocol):
         """Return ProcInfo for every transitive descendant of ``pid``."""
         ...
 
+    def environ(self, pid: int) -> dict[str, str] | None:
+        """pid's environment, or None if unreadable / gone."""
+        ...
+
     def terminate(self, pid: int) -> None:
         """Best-effort polite termination (SIGTERM-equivalent)."""
         ...
@@ -370,6 +375,12 @@ class PsutilProvider:
                 out.append(info)
         return out
 
+    def environ(self, pid: int) -> dict[str, str] | None:
+        try:
+            return self._psutil.Process(pid).environ()
+        except Exception:
+            return None
+
     def terminate(self, pid: int) -> None:
         try:
             self._psutil.Process(pid).terminate()
@@ -444,6 +455,11 @@ class PsutilProvider:
 # ---------------------------------------------------------------------------
 # Kill targeting
 # ---------------------------------------------------------------------------
+
+
+def _host_ram_bytes() -> int:
+    import psutil
+    return int(psutil.virtual_memory().total)
 
 
 def offender_axis(signal: str) -> str:
@@ -584,6 +600,10 @@ class KillReport:
     # kill (psutil cannot report an exited process's parent). Lets whoever launched
     # it recognise its own work: an agent session's process is in this chain.
     ancestors: tuple[tuple[int, str], ...] = ()
+    # Who owns the kill root (agent_inbox.Owner, captured pre-kill like ancestors) and the
+    # ranked owners agent_inbox.notify() attributed; serialised only via Owner.public().
+    owner: Any = None
+    owners: tuple[Any, ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -954,6 +974,7 @@ class Actuator:
         # and escalation never fires.
         owner = self._provider.parent(root.pid)
         ancestors = self._ancestors(root.pid)
+        root_owner = self._owner_of(root, ancestors)
 
         # Build the full target set: root + descendants, minus protected. A
         # protected client can also sit *below* the root (a supervisor started by
@@ -998,7 +1019,38 @@ class Actuator:
             killed=tuple(results),
             finished_at_ns=int(time.monotonic_ns()),
             ancestors=ancestors,
+            owner=root_owner and replace(root_owner, pids=len(targets)),
         )
+
+    # -- Owners (agent_inbox) ------------------------------------------------
+
+    def _environ(self, pid: int) -> dict[str, str] | None:
+        return getattr(self._provider, "environ", lambda _p: None)(pid)
+
+    def _owner_of(self, root: ProcInfo, ancestors: tuple[tuple[int, str], ...]) -> Any:
+        """The worker whose manifest pid is the root or above it, else the root's session."""
+        for pid in (root.pid, *(p for p, _ in ancestors)):
+            client = self._clients_by_pid.get(pid)
+            if client is not None and client.role == "worker":
+                return agent_inbox.worker_owner(client.manifest)
+        return agent_inbox.session_owner(agent_inbox.inbox_of(self._environ(root.pid)))
+
+    def load_owners(self, signal: str) -> list[Any]:
+        """Ranked owners of the killable load on ``signal``'s axis. Reads env of the
+        eligible (killable-named) processes only; called only on a firing."""
+        protected = self._protected_pids()
+        eligible = self._eligible(self._provider.list_all(), protected)
+        if offender_axis(signal) == "cpu":
+            use, floor = self._sample_cpu(eligible), 100.0          # one core
+        else:
+            use = {i.pid: float(i.rss_bytes) for i in eligible}
+            floor = 0.10 * _host_ram_bytes()                       # 10% of RAM
+        workers = {pid: c.manifest for pid, c in self._clients_by_pid.items()
+                   if c.role == "worker"}
+        return agent_inbox.owners(
+            {i.pid: (use.get(i.pid, 0.0), self._environ(i.pid)) for i in eligible},
+            workers=workers, floor=floor,
+            descendants_of=lambda p: [d.pid for d in self._provider.descendants(p)])
 
     # -- Throttle (suspend/resume) ----------------------------------------
 
@@ -1231,14 +1283,7 @@ class Actuator:
         else:
             candidates = self._provider.list_all()
 
-        eligible = [
-            info
-            for info in candidates
-            if info.name.lower() in self._killable
-            and info.pid != self._own_pid
-            and info.pid not in protected
-            and not self._matches_never_cmdline(info)
-        ]
+        eligible = self._eligible(candidates, protected)
         if not eligible:
             return None
 
@@ -1251,6 +1296,16 @@ class Actuator:
             _log.warning("cpu-axis offender ranking unavailable, falling back to RSS")
 
         return max(eligible, key=lambda info: info.rss_bytes).pid
+
+    def _eligible(self, candidates: Iterable[ProcInfo], protected: frozenset[int]) -> list[ProcInfo]:
+        return [
+            info
+            for info in candidates
+            if info.name.lower() in self._killable
+            and info.pid != self._own_pid
+            and info.pid not in protected
+            and not self._matches_never_cmdline(info)
+        ]
 
     def _sample_cpu(self, candidates: list[ProcInfo]) -> dict[int, float]:
         sampler = getattr(self._provider, "sample_cpu_percent", None)

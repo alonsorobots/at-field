@@ -36,7 +36,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from atfield import __version__
+from atfield import __version__, agent_inbox
 from atfield.actuator import Actuator, script_name_from_cmdline
 from atfield.audit import (
     EVENTS_FILENAME,
@@ -862,6 +862,9 @@ def run_service(
                     )
 
                 report = actuator.execute(effective, candidate_pids=candidate_pids)
+                # Tell the OWNER of the load (a Claude session by pipe; a Kiroshi worker
+                # via the webhook's `owners`). Never raises; see agent_inbox.
+                report = agent_inbox.notify(actuator, effective, report)
                 audit.write_kill_report(report)
                 report_kill(sd, action=effective, report=report)
                 if report.kill_root:

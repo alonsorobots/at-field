@@ -36,6 +36,7 @@ class _FakeProc:
     alive: bool = True
     cpu: float = 0.0
     create_time: float = 0.0
+    env: dict | None = None
 
 
 @dataclass
@@ -97,6 +98,10 @@ class FakeProvider:
         if parent is None:
             return None
         return self._to_info(parent)
+
+    def environ(self, pid: int):
+        p = self.procs.get(pid)
+        return dict(p.env) if p is not None and p.alive and p.env is not None else None
 
     def descendants(self, pid: int) -> list[ProcInfo]:
         # BFS over alive children

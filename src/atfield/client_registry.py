@@ -54,7 +54,7 @@ _START_TOLERANCE_S = 120.0
 class ProtectedClient:
     """A live, verified protected process."""
 
-    __slots__ = ("pid", "role", "client", "reason", "manifest_path", "can_stop")
+    __slots__ = ("pid", "role", "client", "reason", "manifest_path", "can_stop", "manifest")
 
     def __init__(
         self,
@@ -64,6 +64,7 @@ class ProtectedClient:
         reason: str,
         manifest_path: Path | None = None,
         can_stop: bool = False,
+        manifest: dict[str, Any] | None = None,
     ) -> None:
         self.pid = pid
         self.role = role
@@ -75,6 +76,9 @@ class ProtectedClient:
         # The manifest advertised control.graceful_stop, i.e. this client says
         # it knows how to shut itself down when asked.
         self.can_stop = can_stop
+        # The parsed manifest (a Kiroshi worker's worker_id/slots/launch_command name it
+        # as a load owner -- see atfield.agent_inbox).
+        self.manifest = manifest or {}
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
         return (
@@ -224,6 +228,7 @@ def discover_protected(
             # manifest"); AT-Field implements the convention rather than
             # parsing the sentence, so a reworded manifest cannot break it.
             can_stop=isinstance(control, dict) and bool(control.get("graceful_stop")),
+            manifest=data,
         )
 
     return out

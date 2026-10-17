@@ -283,6 +283,8 @@ def report_kill(state_dir: Path, *, action: Any, report: Any) -> None:
         ),
         "succeeded": report.succeeded,
         "skipped_reason": report.skipped_reason,
+        # Ranked load owners (agent_inbox.Owner.public: ids and shares, never a token).
+        "owners": [o.public() for o in getattr(report, "owners", ())],
         "ts": time.time(),
     }
     _ensure_worker()
