@@ -519,13 +519,13 @@ def notify_drill(
     found = actuator.load_owners("system.cpu_package_temp_c")
     console.print(f"owners ({time.monotonic() - t0:.2f}s):")
     for o in found:
-        console.print(json.dumps(o.public()))
+        print(json.dumps(o.public()))
     info = actuator._provider.get(pid)
     if info is None:
         raise typer.Exit(code=2)
     owner = actuator._owner_of(info, actuator._ancestors(pid))
-    console.print(f"owner of pid {pid}: {json.dumps(owner.public())}")
-    if send and owner.inbox is not None:
+    print(f"owner of pid {pid}: {json.dumps(owner and owner.public())}")
+    if send and owner is not None and owner.inbox is not None:
         ok = agent_inbox.post(owner.inbox, f"[DRILL] AT-Field notify-drill to the owner of pid "
                               f"{pid}: reply with the word RECEIVED and this text verbatim.")
         console.print(f"posted: {ok}")

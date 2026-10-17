@@ -1028,18 +1028,23 @@ class Actuator:
         return getattr(self._provider, "environ", lambda _p: None)(pid)
 
     def _owner_of(self, root: ProcInfo, ancestors: tuple[tuple[int, str], ...]) -> Any:
-        """The worker whose manifest pid is the root or above it, else the root's session."""
-        for pid in (root.pid, *(p for p, _ in ancestors)):
-            client = self._clients_by_pid.get(pid)
-            if client is not None and client.role == "worker":
-                return agent_inbox.worker_owner(client.manifest)
-        return agent_inbox.session_owner(agent_inbox.inbox_of(self._environ(root.pid)))
+        """The worker whose manifest pid is the root or above it, else the root's session.
+        On the kill path, so it never raises (attribution must not cost a kill)."""
+        try:
+            for pid in (root.pid, *(p for p, _ in ancestors)):
+                client = self._clients_by_pid.get(pid)
+                if client is not None and client.role == "worker":
+                    return agent_inbox.worker_owner(client.manifest)
+            return agent_inbox.session_owner(agent_inbox.inbox_of(self._environ(root.pid)))
+        except Exception:  # noqa: BLE001
+            _log.exception("kill-root owner attribution failed")
+            return None
 
     def load_owners(self, signal: str) -> list[Any]:
         """Ranked owners of the killable load on ``signal``'s axis. Reads env of the
         eligible (killable-named) processes only; called only on a firing."""
-        protected = self._protected_pids()
-        eligible = self._eligible(self._provider.list_all(), protected)
+        procs = self._provider.list_all()     # ~2 s elevated on 480 procs; walk it once
+        eligible = self._eligible(procs, self._protected_pids(procs))
         if offender_axis(signal) == "cpu":
             use, floor = self._sample_cpu(eligible), 100.0          # one core
         else:
@@ -1194,7 +1199,7 @@ class Actuator:
 
     # -- Helpers -----------------------------------------------------------
 
-    def _protected_pids(self) -> frozenset[int]:
+    def _protected_pids(self, procs: list[ProcInfo] | None = None) -> frozenset[int]:
         """PIDs no kill may target, and that the kill-root walk-up may not pass.
 
         Two sources, and both have to reach ``find_kill_root``: the client
@@ -1232,7 +1237,7 @@ class Actuator:
             try:
                 pids.update(
                     info.pid
-                    for info in self._provider.list_all()
+                    for info in (self._provider.list_all() if procs is None else procs)
                     if self._matches_never_cmdline(info)
                 )
             except Exception:
