@@ -16,12 +16,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `cpu-pkg-hot` kill of its pid 3260 seventeen seconds later -- while events.jsonl said
   `notified: true`. Warnings and kills now have separate limits (per session per 10 min:
   one of each), and `owners[].notified` for a session is true only when a post was sent.
+  Known limit: a post that FAILS still spends that kind's 10-min budget, so a second kill
+  of the same session inside 10 min after a failed post is silent (recorded `notified: false`).
 - **Turing "memory junction" dedup was a coin flip.** It required the junction to equal the
   hot spot exactly in ONE startup sample; measured on Aurora (3,584 idle samples per card)
   they are equal only 2% / 45% of the time (|d| max 0.91 C), so restarts published the
   duplicate and `vram-junction-hot/warm` watched the die hot spot (85-95 C under load).
   Discovery now waits for 5 samples (~5 s) and compares each sensor's MEDIAN within
-  1.0 C. The RTX 5090s (Chronos, DEMETER) expose no hot spot, so their real junction can
+  1.0 C (a WARNING names the count if the startup deadline hits first). The RTX 5090s (Chronos, DEMETER) expose no hot spot, so their real junction can
   never be compared away (pinned with their 2026-10-17 readings). Limit: a card with BOTH
   a real junction and a hot spot (GDDR6X, none on this fleet) idling within 1 C of each
   other would lose its junction signal.

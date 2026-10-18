@@ -236,6 +236,9 @@ class LhmLibCollector:
                 signals=(),
             )
 
+        if len(recent) < _DISCOVERY_SAMPLES:
+            _log.warning("GPU temperature discovery decided from %d of %d samples "
+                         "(startup deadline)", len(recent), _DISCOVERY_SAMPLES)
         self._sensor_map = self._discover(latest, history=recent)
         if not self._sensor_map:
             self._health = HealthState.FAILED

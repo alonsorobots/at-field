@@ -228,3 +228,38 @@ def test_probe_decides_from_several_samples_not_the_first(tmp_path, monkeypatch)
     sigs = set(c.probe().signals)
     assert {s for s in sigs if s.startswith("gpu.")} == {"gpu.0.hotspot_temp_c",
                                                          "gpu.1.hotspot_temp_c"}
+
+
+def test_a_short_sample_window_is_said_out_loud(tmp_path, monkeypatch, caplog):
+    """Review F1: at the startup deadline with fewer than 5 samples, probe() still decides
+    (from what it has) -- and must SAY how many samples that decision rests on."""
+    import json
+    import logging
+    import threading
+    import time
+
+    exe = tmp_path / "atfield-sensors.exe"
+    exe.write_text("")
+    lines = [json.dumps({"event": "sample", "sensors": AURORA_NOISY})] * 2
+
+    class Proc:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        @property
+        def stdout(self):
+            yield from lines
+            time.sleep(5)                           # the helper stalls after 2 samples
+
+    c = LhmLibCollector(exe_path=exe, startup_timeout_s=1.0)
+
+    def spawn():
+        threading.Thread(target=c._read_loop, args=(Proc(),), daemon=True).start()
+        return True
+    monkeypatch.setattr(c, "_spawn", spawn)
+    caplog.set_level(logging.WARNING, logger="atfield.collectors.lhmlib")
+    assert c.probe().available
+    assert [r.getMessage() for r in caplog.records if "samples" in r.getMessage()] == [
+        "GPU temperature discovery decided from 2 of 5 samples (startup deadline)"]
