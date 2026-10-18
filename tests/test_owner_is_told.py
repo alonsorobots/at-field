@@ -67,7 +67,7 @@ WORKER = {"pid": 500, "role": "worker", "name": "kiroshi", "atfield_never_kill":
           "launch_command": "kiroshi join --task t:run --slots 22 --job handgap-v2"}
 
 
-def run(tmp_path, monkeypatch, procs, value, *rules, manifest=None):
+def run(tmp_path, monkeypatch, procs, value, *rules, manifest=None, delivered=True, ticks=15):
     """One run_service pass; returns (posts, webhook payloads, events.jsonl text)."""
     state = tmp_path / "state"
     if manifest:
@@ -85,15 +85,20 @@ def run(tmp_path, monkeypatch, procs, value, *rules, manifest=None):
         def health(self):
             return HealthState.HEALTHY
 
-        def sample(self):
-            return {CPU: Sample(value, monotonic_ns(), self.name, "celsius")}
+        n = 0
+
+        def sample(self):                   # value: a reading, or tick -> reading
+            Hot.n += 1
+            v = value(Hot.n) if callable(value) else value
+            return {CPU: Sample(v, monotonic_ns(), self.name, "celsius")}
 
     posts, sent = [], []
     c = Hot()
     monkeypatch.setattr(svc, "_probe_all_collectors", lambda audit: ([c], {c.name: c.probe()}))
     monkeypatch.setattr(svc, "Actuator", lambda cfg: Actuator(cfg, provider=provider,
                                                               sleep=lambda _s: None))
-    monkeypatch.setattr(ai, "post", lambda inbox, text, **kw: posts.append((inbox.session_id, text)))
+    monkeypatch.setattr(ai, "post", lambda inbox, text, **kw:
+                        posts.append((inbox.session_id, text)) or delivered)
     monkeypatch.setattr(ai, "_LIMIT", ai.RateLimit(600))
     monkeypatch.setattr(reporter, "_webhooks", lambda sd: ["http://x/atfield/event"])
     monkeypatch.setattr(reporter, "_ensure_worker", lambda: None)
@@ -105,7 +110,7 @@ def run(tmp_path, monkeypatch, procs, value, *rules, manifest=None):
     cfg = tmp_path / "config.toml"
     cfg.write_text(f"[general]\ntick_hz = 10\nstate_dir = {json.dumps(str(state))}\n\n"
                    "[api]\nenabled = false\n\n" + "\n\n".join(rules), encoding="utf-8")
-    svc.run_service(config_path=cfg, state_dir=state, max_ticks=15)
+    svc.run_service(config_path=cfg, state_dir=state, max_ticks=ticks)
     events = (state / "events.jsonl").read_text(encoding="utf-8")
     return posts, [p for p in sent if p.get("type") == "kill_report"], events
 
@@ -216,3 +221,23 @@ def test_the_drill_refuses_to_send_without_the_owning_session_id(tmp_path, monke
             ([], ["--session", "bbbbbbbb"], ["--session", "aaaaaaaa"])]
     assert [r.exit_code != 0 for r in runs] == [True, True, False]
     assert posts == ["aaaaaaaa-1111"]
+
+
+
+def test_a_kill_right_after_a_warning_is_still_told(tmp_path, monkeypatch):
+    """2026-10-17 16:28:52 / 16:29:09 on Chronos: cpu-pkg-warm told session 27fcdc64, then
+    cpu-pkg-hot killed its pid 3260 17 s later -- and the one-per-10-min limit, spent on
+    the warning, swallowed the kill notice while events.jsonl said notified: true (0.4.22)."""
+    posts, payloads, _ = run(tmp_path, monkeypatch, procs_incident(),
+                             lambda tick: 87.0 if tick <= 10 else 95.0, KILL, WARN, ticks=30)
+    assert [(sid, "killed your process tree" in t) for sid, t in posts] == [
+        ("aaaaaaaa-1111", False), ("aaaaaaaa-1111", True)]
+    told = [(p["rule"], o["id"], o["notified"]) for p in payloads for o in p["owners"]
+            if o["kind"] == "claude_session" and o["id"] == "aaaaaaaa"]
+    assert told[:2] == [("cpu-pkg-warm", "aaaaaaaa", True), ("cpu-pkg-hot", "aaaaaaaa", True)]
+    assert len(posts) == len([t for t in told if t[2]]), "a notified: true without a post"
+
+
+def test_notified_is_false_when_the_post_did_not_land(tmp_path, monkeypatch):
+    _, payloads, _ = run(tmp_path, monkeypatch, procs_incident(), 87.0, WARN, delivered=False)
+    assert [o["notified"] for p in payloads for o in p["owners"]] == [False, False, False]

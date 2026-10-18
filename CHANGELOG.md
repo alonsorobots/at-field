@@ -7,6 +7,31 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.22] — 2026-10-17 — a kill notice is never swallowed; Aurora's phantom junction found every time; cpu-pkg-hot 92 °C
+
+### Fixed
+
+- **Kill notices.** 0.4.21 limited owner messages to one per session per 10 min across all
+  rules, so on 2026-10-17 a `cpu-pkg-warm` warning to session 27fcdc64 swallowed the
+  `cpu-pkg-hot` kill of its pid 3260 seventeen seconds later -- while events.jsonl said
+  `notified: true`. Warnings and kills now have separate limits (per session per 10 min:
+  one of each), and `owners[].notified` for a session is true only when a post was sent.
+- **Turing "memory junction" dedup was a coin flip.** It required the junction to equal the
+  hot spot exactly in ONE startup sample; measured on Aurora (3,584 idle samples per card)
+  they are equal only 2% / 45% of the time (|d| max 0.91 C), so restarts published the
+  duplicate and `vram-junction-hot/warm` watched the die hot spot (85-95 C under load).
+  Discovery now waits for 5 samples (~5 s) and compares each sensor's MEDIAN within
+  1.0 C. The RTX 5090s (Chronos, DEMETER) expose no hot spot, so their real junction can
+  never be compared away (pinned with their 2026-10-17 readings). Limit: a card with BOTH
+  a real junction and a hot spot (GDDR6X, none on this fleet) idling within 1 C of each
+  other would lose its junction signal.
+
+### Changed
+
+- **`cpu-pkg-hot` default 90 -> 92 °C** (slider "normal" preset too; its warning follows at
+  88 °C). Chronos's 9950X3D has Tjmax 95 °C; the user's call. Existing hosts keep their
+  config.toml (deploy never rewrites it).
+
 ## [0.4.21] — 2026-10-17 — a warning or kill reaches whoever OWNS the load
 
 ### Added

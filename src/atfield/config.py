@@ -338,9 +338,9 @@ def _default_rules() -> tuple[RuleConfig, ...]:
     * ``ram-pressure`` / ``pagefile-pressure`` 85% / 90% — system
       RAM/pagefile exhaustion produces a sluggish, half-killed
       system that's worse than just killing the offender.
-    * ``cpu-pkg-hot`` 90°C — most desktop CPUs trip thermal
-      protection at 95-100°C and degrade silicon above ~85°C
-      sustained.
+    * ``cpu-pkg-hot`` 92°C (90 until 0.4.22) — most desktop CPUs trip thermal
+      protection at 95-100°C; Chronos's 9950X3D has Tjmax 95°C, and 92 was the
+      user's call (2026-10-17) after kills at 90 on routine heavy runs.
 
     NEAR-LIMIT WARNINGS (0.4.19): one ``log`` rule with ``notify = true`` under
     each heat / memory kill line (``rule_profiles.WARNING_UNDER``: 4 °C under a
@@ -401,7 +401,7 @@ def _default_rules() -> tuple[RuleConfig, ...]:
         RuleConfig(
             name="cpu-pkg-hot",
             signal="system.cpu_package_temp_c",
-            threshold=90.0,
+            threshold=92.0,
             window_s=30,
             min_fraction_over=0.67,
             action="kill",

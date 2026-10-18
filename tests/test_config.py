@@ -77,7 +77,8 @@ class TestDefaults:
             ("gpu-core-hot", "gpu.*.core_temp_c", 83.0, 30, 0.67),
             ("ram-pressure", "system.ram_used_percent", 85.0, 60, 0.75),
             ("pagefile-pressure", "system.commit_percent", 90.0, 60, 0.75),
-            ("cpu-pkg-hot", "system.cpu_package_temp_c", 90.0, 30, 0.67),
+            # 92 C since 0.4.22: a 9950X3D (Chronos) has Tjmax 95 C; user's call.
+            ("cpu-pkg-hot", "system.cpu_package_temp_c", 92.0, 30, 0.67),
         ],
     )
     def test_each_default_rule_locked(self, name, signal, threshold, window_s, min_fraction):
@@ -352,3 +353,11 @@ class TestApiValidation:
     def test_api_frozen(self):
         with pytest.raises(Exception):
             default_config().api.port = 9999  # type: ignore[misc]
+
+
+def test_the_cpu_warning_follows_the_92_c_kill_line():
+    rules = {r.name: r for r in default_config().rules}
+    assert (rules["cpu-pkg-hot"].threshold, rules["cpu-pkg-warm"].threshold) == (92.0, 88.0)
+    from atfield.rule_profiles import RULE_PROFILES as PROFILES
+    p = PROFILES["cpu-pkg-hot"]
+    assert p.aggressive_max < p.normal_value == 92.0 < p.relaxed_min

@@ -149,7 +149,7 @@ class RateLimit:
         return True
 
 
-_LIMIT = RateLimit(600)        # one message per session per 10 min, all rules coalesced
+_LIMIT = RateLimit(600)        # per session per 10 min: one warning, one kill notice
 _HOST = socket.gethostname()
 
 
@@ -184,9 +184,12 @@ def notify(actuator: Any, action: Any, report: Any, *, clock: Callable[[], float
             found = [replace(o, notified=o.kind != "unattributed")] if o else []
         else:
             found = actuator.load_owners(action.signal)
-        for o in found:
-            if o.notified and o.inbox and _LIMIT.allow(o.inbox.socket, clock()):
-                post(o.inbox, compose(action, o, report))
+        # Kills and warnings are limited separately (a warning must never swallow the kill
+        # notice that follows it -- 2026-10-17), and `notified` says what was SENT.
+        found = [replace(o, notified=bool(
+                     _LIMIT.allow(f"{o.inbox.socket}|{action.kind == 'kill'}", clock())
+                     and post(o.inbox, compose(action, o, report))))
+                 if o.notified and o.inbox else o for o in found]
         return replace(report, owners=tuple(found))
     except Exception as e:  # noqa: BLE001 -- never block the tick; no token in the log
         _log.error("owner notification failed for rule %s: %s", action.rule_name,

@@ -113,7 +113,7 @@ RULE_PROFILES: Final[dict[str, RuleProfile]] = {
     "cpu-pkg-hot": RuleProfile(
         name="cpu-pkg-hot", unit="°C",
         min=60.0, aggressive_max=85.0, relaxed_min=95.0, max=100.0,
-        aggressive_value=82.0, normal_value=90.0, relaxed_value=96.0,
+        aggressive_value=82.0, normal_value=92.0, relaxed_value=96.0,
     ),
 }
 

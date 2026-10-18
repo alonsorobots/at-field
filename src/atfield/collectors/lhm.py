@@ -110,7 +110,15 @@ def synthetic_junction(junction_c: float | None, hotspot_c: float | None) -> boo
     """
     if junction_c is None or hotspot_c is None:
         return False
-    return junction_c == hotspot_c
+    # 0.4.22: the two reads are not always bit-identical. Measured on Aurora 2026-10-17,
+    # 3,584 idle samples per card: equal in only 2% / 45%, |d| mean 0.34 / 0.08 C, max
+    # 0.91 C -- so exact equality in one startup sample was a coin flip. Callers pass
+    # the MEDIAN of a few samples per sensor; a real junction beside a hot spot (GDDR6X)
+    # sits degrees away, and the 5090s expose no hot spot to compare with at all.
+    return abs(junction_c - hotspot_c) <= _DUPLICATE_TOL_C
+
+
+_DUPLICATE_TOL_C: Final = 1.0
 
 
 _CPU_PACKAGE_PATTERNS: Final = (

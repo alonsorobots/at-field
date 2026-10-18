@@ -30,10 +30,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import statistics
 import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Final
 
@@ -54,6 +56,8 @@ _log = logging.getLogger(__name__)
 
 _NAME: Final = "lhm"
 _HELPER_EXE: Final = "atfield-sensors.exe"
+# Samples discovery waits for (1 Hz helper: ~5 s at startup) before naming GPU temps.
+_DISCOVERY_SAMPLES: Final = 5
 _GPU_HW_TYPES: Final = frozenset({"GpuNvidia", "GpuAmd", "GpuIntel"})
 
 # A sample older than this means the helper has stalled (it should emit at
@@ -167,6 +171,8 @@ class LhmLibCollector:
         self._lock = threading.Lock()
         self._latest: list[dict[str, Any]] = []
         self._latest_ts: float = 0.0
+        # The last few samples, so discovery decides from a median, not one read.
+        self._recent: deque[list[dict[str, Any]]] = deque(maxlen=_DISCOVERY_SAMPLES)
         self._ready = False
         self._elevated: bool | None = None
         self._last_spawn_at: float = 0.0
@@ -199,12 +205,14 @@ class LhmLibCollector:
                 signals=(),
             )
 
-        # Wait for the first sample so we can discover sensors.
+        # Wait for a few samples (one is a coin flip for the junction dedup; see
+        # synthetic_junction), or as many as the startup timeout allows.
         deadline = time.monotonic() + self._startup_timeout_s
+        latest: list[dict[str, Any]] = []
         while time.monotonic() < deadline:
             with self._lock:
-                latest = list(self._latest)
-            if latest:
+                latest, recent = list(self._latest), list(self._recent)
+            if len(recent) >= _DISCOVERY_SAMPLES:
                 break
             if self._proc is not None and self._proc.poll() is not None:
                 self._health = HealthState.FAILED
@@ -217,7 +225,7 @@ class LhmLibCollector:
                     signals=(),
                 )
             time.sleep(0.1)
-        else:
+        if not latest:
             self._health = HealthState.FAILED
             return ProbeResult(
                 available=False,
@@ -228,7 +236,7 @@ class LhmLibCollector:
                 signals=(),
             )
 
-        self._sensor_map = self._discover(latest)
+        self._sensor_map = self._discover(latest, history=recent)
         if not self._sensor_map:
             self._health = HealthState.FAILED
             elev = "" if self._elevated else " (helper not elevated -- CPU MSR sensors need admin)"
@@ -301,7 +309,8 @@ class LhmLibCollector:
 
     # -- Discovery ---------------------------------------------------------
 
-    def _discover(self, sensors: list[dict[str, Any]]) -> dict[str, tuple[str, str]]:
+    def _discover(self, sensors: list[dict[str, Any]],
+                  history: list[list[dict[str, Any]]] | None = None) -> dict[str, tuple[str, str]]:
         """Map helper sensors to AT-Field signal names using the same
         name patterns as the legacy HTTP collector, but keyed on the
         authoritative ``hwType`` the library reports."""
@@ -314,7 +323,7 @@ class LhmLibCollector:
         # GPU temps need a whole-list view before we can name them, because
         # deciding whether a "memory junction" is real means comparing it with
         # the same device's hot spot. Resolve them up front.
-        gpu_temp_metric = self._resolve_gpu_temps(sensors)
+        gpu_temp_metric = self._resolve_gpu_temps(sensors, history=history)
 
         for s in sensors:
             sid = s.get("id")
@@ -387,7 +396,8 @@ class LhmLibCollector:
 
         return mapping
 
-    def _resolve_gpu_temps(self, sensors: list[dict[str, Any]]) -> dict[str, str]:
+    def _resolve_gpu_temps(self, sensors: list[dict[str, Any]],
+                           history: list[list[dict[str, Any]]] | None = None) -> dict[str, str]:
         """Decide what each GPU temperature sensor is actually MEASURING.
 
         Returns sensor-id -> metric suffix. Two metrics come out of here:
@@ -425,6 +435,12 @@ class LhmLibCollector:
                 per_hw[hw] = {}
                 order.append(hw)
             per_hw[hw].setdefault(kind, (sid, value))
+        # Judge the duplicate on each sensor's MEDIAN over the recent samples.
+        for found in per_hw.values():
+            for kind, (sid, value) in list(found.items()):
+                vals = [s["value"] for snap in history or () for s in snap
+                        if s.get("id") == sid and isinstance(s.get("value"), (int, float))]
+                found[kind] = (sid, statistics.median(vals) if vals else value)
 
         out: dict[str, str] = {}
         for idx, hw in enumerate(order):
@@ -520,6 +536,7 @@ class LhmLibCollector:
                     with self._lock:
                         self._latest = sensors
                         self._latest_ts = time.monotonic()
+                        self._recent.append(sensors)
                 elif event == "ready":
                     with self._lock:
                         self._ready = True
