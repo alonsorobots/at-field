@@ -209,3 +209,34 @@ def test_t6b_a_gpu_user_under_the_floor_is_not_told(tmp_path, monkeypatch):
     _, posts, payloads = run(tmp_path, monkeypatch, NVML_SIG, {1: {HEATER: 15.0}},
                              action="log", notify=True)
     assert posts == [] and not [o for p in payloads for o in p["owners"] if o["notified"]]
+
+
+def test_f1_an_unreadable_own_card_is_not_measurable_not_unidentified(tmp_path, monkeypatch):
+    """Review F1: the rule's own NVML card failed to read (absent from the dict) -- that is
+    'not measurable', not 'source not identified; 0 measured'."""
+    killed, _, payloads = run(tmp_path, monkeypatch, NVML_SIG, {0: {HEATER: 97.0}})
+    assert killed == set() and "not measurable" in payloads[0]["skipped_reason"]
+
+
+def test_f1_a_device_read_error_drops_only_that_device():
+    c = _collector({0: [], 1: RuntimeError("NVML_ERROR_UNKNOWN")})
+    assert c.process_utilization() == {0: {}}
+
+
+def test_f2_an_exited_top_user_does_not_spare_the_live_loader(tmp_path, monkeypatch):
+    """Review F2: the window's top pid has exited -- the live killable loader must still die."""
+    killed, _, payloads = run(tmp_path, monkeypatch, NVML_SIG, {1: {99999: 99.0, HEATER: 97.0}})
+    assert HEATER in killed and payloads[0]["kill_root"]["pid"] == HEATER
+
+
+def test_notify_drill_dry_run_smoke(tmp_path, monkeypatch):
+    """The drill is a dry run now; keep it importable and runnable on the CPU axis."""
+    from typer.testing import CliRunner
+
+    import atfield.actuator as act
+    from atfield.cli import app
+    provider = FakeProvider.from_procs(procs())
+    monkeypatch.setattr(act, "Actuator", lambda cfg: Actuator(cfg, provider=provider,
+                                                              sleep=lambda _s: None))
+    r = CliRunner().invoke(app, ["notify-drill", "--state-dir", str(tmp_path)])
+    assert r.exit_code == 0 and '"kind": "claude_session"' in r.output, r.output

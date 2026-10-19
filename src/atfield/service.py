@@ -448,8 +448,8 @@ def gpu_use_for(nvml: Any, signal: str, nvml_owned: set[str]) -> dict[int, float
     per_dev = nvml.process_utilization()
     if per_dev is None:
         return None
-    if signal in nvml_owned:
-        return per_dev.get(int(signal.split(".")[1]), {})
+    if signal in nvml_owned:   # its own card unreadable -> not measurable (None)
+        return per_dev.get(int(signal.split(".")[1]))
     _log.warning("%s cannot be mapped to an NVML device; targeting the top GPU user "
                  "across all devices", signal)
     use: dict[int, float] = {}

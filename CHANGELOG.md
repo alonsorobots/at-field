@@ -31,6 +31,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   unsupported), a GPU rule now skips with a WARNING instead of killing by RSS: a kill the
   rule cannot tie to the heat sheds nothing (measured above) and costs someone's work.
 
+- Known decision: "the loader or nobody". If the top live GPU user is not killable-named or
+  is PROTECTED (a manifest's never-kill), nothing is killed -- a lighter python is never
+  taken in its place; the report names the top user. A rule's own NVML card that fails to
+  read is "not measurable", not "source not identified".
 - A Kiroshi worker owns its slots' load whether or not its manifest is protected
   (ownership keys on `role == "worker"` in any live client manifest).
 

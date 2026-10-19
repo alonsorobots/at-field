@@ -1278,7 +1278,8 @@ class Actuator:
         if gpu_use is None:
             return None, ("GPU use not measurable (NVML unavailable, or per-process "
                           "utilization unsupported here)")
-        top = max(gpu_use.items(), key=lambda kv: kv[1], default=None)
+        top = max(((p, v) for p, v in gpu_use.items() if self._provider.get(p)),  # exited: skip
+                  key=lambda kv: kv[1], default=None)
         info = self._provider.get(top[0]) if top else None
         who = f"pid {top[0]} {info.name if info else '?'} {top[1]:.0f}%" if top else "none"
         if top is None or top[1] < GPU_USE_FLOOR:
