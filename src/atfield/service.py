@@ -514,10 +514,9 @@ def run_service(
     engine = PolicyEngine(cfg, available_signals=policy_signals)
     actuator = Actuator(cfg)
 
-    # Locate the NVML collector (if present) so we can hand its per-GPU
-    # process map to the actuator on each kill.
+    # Locate the NVML collector (if present): a GPU rule targets its per-process use.
     nvml: NvmlCollector | None = next(
-        (c for c in collectors if isinstance(c, NvmlCollector)),
+        (c for c in collectors if hasattr(c, "process_utilization")),
         None,
     )
 
@@ -820,51 +819,31 @@ def run_service(
                 audit.write_action(effective)
                 record_on_health(api_state, effective, engine.effective_rules)
 
-                # Pick candidate PIDs for GPU rules from the NVML proc map.
-                #
-                # ONLY for signals NVML itself produced. The index in a signal
-                # name means nothing outside the collector that assigned it:
-                # NVML numbers GPUs by PCI order, while the LHM collector hands
-                # out gpu.{n} from a running counter in sensor-enumeration
-                # order (see lhmlib's mapping loop). Measured on a two-GPU host
-                # 2026-08-31: loading PHYSICAL gpu0 drove
-                # gpu.1.mem_junction_temp_c to 102.8 C while gpu.0's sat flat,
-                # and loading physical gpu1 did the reverse -- the two
-                # collectors' indices were exactly transposed.
-                #
-                # Taking the LHM index into the NVML map therefore selected the
-                # processes on the WRONG CARD: the innocent worker was killed
-                # while the hot card kept running. Falling back to
-                # candidate_pids=None is not a downgrade -- it is the same path
-                # taken whenever NVML is unavailable, and it picks a target by
-                # the rule's own resource axis instead of by a number that does
-                # not mean what it appears to.
-                candidate_pids = None
-                if (nvml is not None and effective.signal.startswith("gpu.")
-                        and effective.signal in nvml_owned_signals):
-                    # Force a fresh enumeration so kill targeting uses
-                    # up-to-the-moment PIDs (the hot-path map is only
-                    # cadence-refreshed to keep the per-tick cost low).
-                    proc_map = nvml.refresh_process_map()
-                    # Extract gpu index from signal name: gpu.<idx>.<metric>
-                    try:
-                        idx = int(effective.signal.split(".")[1])
-                        candidate_pids = [pid for pid, _ in proc_map.get(idx, [])]
-                    except (IndexError, ValueError):
-                        candidate_pids = None
-                elif nvml is not None and effective.signal.startswith("gpu."):
-                    _log.warning(
-                        "%s is not an NVML signal, so its GPU index cannot be "
-                        "used to select processes from the NVML map -- targeting "
-                        "by resource axis instead. (Cross-collector GPU indices "
-                        "are not interchangeable; see the note above.)",
-                        effective.signal,
-                    )
+                # A gpu.* rule targets MEASURED per-process GPU use, never a process list:
+                # on WDDM the compute-process list names every context holder (0.4.23).
+                # The index in a signal name means something only inside the collector
+                # that assigned it -- NVML numbers GPUs by PCI order, LHM by sensor
+                # enumeration, and the two were measured TRANSPOSED on a two-GPU host
+                # (2026-08-31: loading physical gpu0 drove LHM gpu.1 to 102.8 C). So an
+                # NVML signal reads its own device; an LHM signal reads the top user per
+                # pid across ALL devices (exact for one heater; ambiguous for two).
+                gpu_use = None
+                if effective.signal.startswith("gpu.") and nvml is not None:
+                    per_dev = nvml.process_utilization()
+                    if per_dev is not None and effective.signal in nvml_owned_signals:
+                        gpu_use = per_dev.get(int(effective.signal.split(".")[1]), {})
+                    elif per_dev is not None:
+                        _log.warning("%s cannot be mapped to an NVML device; targeting the "
+                                     "top GPU user across all devices", effective.signal)
+                        gpu_use = {}
+                        for d in per_dev.values():
+                            for pid, v in d.items():
+                                gpu_use[pid] = max(v, gpu_use.get(pid, 0.0))
 
-                report = actuator.execute(effective, candidate_pids=candidate_pids)
+                report = actuator.execute(effective, gpu_use=gpu_use)
                 # Tell the OWNER of the load (a Claude session by pipe; a Kiroshi worker
                 # via the webhook's `owners`). Never raises; see agent_inbox.
-                report = agent_inbox.notify(actuator, effective, report)
+                report = agent_inbox.notify(actuator, effective, report, gpu_use=gpu_use)
                 audit.write_kill_report(report)
                 report_kill(sd, action=effective, report=report)
                 if report.kill_root:

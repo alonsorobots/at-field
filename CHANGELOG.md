@@ -7,6 +7,34 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.23] — 2026-10-18 — a GPU rule kills the process USING the GPU, or nobody
+
+### Fixed
+
+- **GPU kills targeted the fattest process on the host** (issue #2). 2026-10-18 12:45 on
+  Chronos `gpu.1.mem_junction_temp_c` (an LHM signal, whose index cannot be mapped to an
+  NVML device) crossed vram-junction-hot; with no candidates the actuator ranked the whole
+  host by RSS and killed an idle viewer (5 GB of smplx + torch). The heater -- both cards at
+  99%, 575 W -- ran on until its owner stopped it 50 s later.
+  Now every `gpu.*` rule targets `NvmlCollector.process_utilization()` (NVML per-process
+  SM %, mean over 10 s): the top user, if it is at or over 20% and killable-named. Otherwise
+  NOTHING is killed and the report says why ("source not identified ... top: pid/name/%",
+  "is not in killable_names", or "GPU use not measurable"). An NVML signal reads its own
+  device; an LHM signal reads the top user across all devices (exact for one heater). The
+  RSS fallback for GPU rules is gone. Owners of a GPU warning are ranked by GPU use ("NN% GPU").
+  On WDDM the compute-process list (the old kill input) names every context holder
+  (36 pids on one Chronos card, no usage); ProcessUtilization reports only real users
+  (idle context holders absent) -- measured idle; the HOT case is UNMEASURED until the
+  plan's Phase 0 runs.
+- DELIBERATE CHANGE: with per-process GPU use unmeasurable (no NVML, or the call
+  unsupported), a GPU rule now skips with a WARNING instead of killing by RSS: a kill the
+  rule cannot tie to the heat sheds nothing (measured above) and costs someone's work.
+
+### Removed
+
+- `NvmlCollector.process_map()` / `refresh_process_map()` (their only caller was the kill
+  path). `tools/gpu_use_probe.py` prints what a GPU rule reads (read-only, not shipped).
+
 ## [0.4.22] — 2026-10-17 — a kill notice is never swallowed; Aurora's phantom junction found every time; cpu-pkg-hot 92 °C
 
 ### Fixed

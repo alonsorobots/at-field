@@ -160,8 +160,9 @@ def compose(action: Any, owner: Owner, report: Any) -> str:
         what = (f"It killed your process tree rooted at pid {report.kill_root.pid} "
                 f"({report.kill_root.name}, {len(report.killed)} processes).")
     else:
-        unit = (lambda v: f"{v:.0f}% CPU") if "cpu" in action.signal else (
-            lambda v: f"{v / 2**30:.1f} GB")
+        unit = ((lambda v: f"{v:.0f}% GPU") if action.signal.startswith("gpu.") else
+                (lambda v: f"{v:.0f}% CPU") if "cpu" in action.signal else
+                (lambda v: f"{v / 2**30:.1f} GB"))
         busiest = "; ".join(f"pid {p} {n} {unit(v)}" for p, n, v in owner.top)
         what = (f"Your processes carry {owner.share:.0%} of that load ({owner.pids} "
                 f"processes; busiest: {busiest}).")
@@ -171,7 +172,8 @@ def compose(action: Any, owner: Owner, report: Any) -> str:
     return f"{head} {what} {ask}"[:1500]
 
 
-def notify(actuator: Any, action: Any, report: Any, *, clock: Callable[[], float] = time.monotonic) -> Any:
+def notify(actuator: Any, action: Any, report: Any, *, clock: Callable[[], float] = time.monotonic,
+           gpu_use: Mapping[int, float] | None = None) -> Any:
     """Attribute a firing (a kill, or a notify=true warning), post to the owning
     session(s), and return ``report`` carrying ``owners``. Never raises."""
     if action.kind != "kill" and not getattr(action, "notify", False):
@@ -183,7 +185,7 @@ def notify(actuator: Any, action: Any, report: Any, *, clock: Callable[[], float
             o = report.owner
             found = [replace(o, notified=o.kind != "unattributed")] if o else []
         else:
-            found = actuator.load_owners(action.signal)
+            found = actuator.load_owners(action.signal, gpu_use)
         # Kills and warnings are limited separately (a warning must never swallow the kill
         # notice that follows it -- 2026-10-17), and `notified` says what was SENT.
         found = [replace(o, notified=bool(

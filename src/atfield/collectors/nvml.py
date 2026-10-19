@@ -190,15 +190,12 @@ class NvmlCollector:
         #: _PERSISTENT_FAILURE_S. The service loop reads it and exits so NSSM
         #: hands us a fresh process (AppExit=Restart), within its restart budget.
         self.wants_process_restart: str | None = None
-        # Live per-GPU process map. Keyed by gpu_idx; value is a list of
-        # (pid, used_vram_bytes) tuples. Refreshed on a slow cadence from
-        # sample() (cheap dashboard count) and force-refreshed at kill time.
+        # Per-GPU compute-process list, for the dashboard COUNT only (kill targeting
+        # reads process_utilization()). Refreshed on a slow cadence from sample().
         self._gpu_processes: dict[int, list[tuple[int, int]]] = {}
         # Compute-process enumeration is by far the most expensive NVML call
         # (~0.9 ms vs ~0.006 ms for ALL the metric reads combined on a 2-GPU
-        # box). It's only *consumed* when a kill fires, so we don't pay for it
-        # every tick -- we refresh at most this often on the hot path, and
-        # force a fresh enumeration at kill time via refresh_process_map().
+        # box), so we refresh it at most this often.
         self._proc_map_interval_ns = 5_000_000_000  # 5 s
         self._last_proc_map_ns = 0
 
@@ -361,14 +358,12 @@ class NvmlCollector:
                 # Power query is unsupported on some cards; not a failure.
                 pass
 
-        # Refresh the (expensive) per-process map only on a slow cadence so
-        # the hot path stays cheap. Kill targeting force-refreshes separately.
+        # Refresh the (expensive) per-process list only on a slow cadence.
         if now - self._last_proc_map_ns >= self._proc_map_interval_ns:
             self._gpu_processes = self._enumerate_process_map()
             self._last_proc_map_ns = now
 
-        # Sample carrying the GPU-proc count; the actual map is read via
-        # process_map() / refresh_process_map() by the service/actuator.
+        # Sample carrying the GPU-proc count (context holders, not users).
         out[PER_PROCESS_VRAM_KEY] = Sample(
             value=float(sum(len(v) for v in self._gpu_processes.values())),
             taken_at_ns=now,
@@ -574,29 +569,36 @@ class NvmlCollector:
             proc_map[i] = pairs
         return proc_map
 
-    def process_map(self) -> dict[int, list[tuple[int, int]]]:
-        """Last-known per-GPU process map: ``{gpu_idx -> [(pid, bytes), ...]}``.
+    def process_utilization(self, window_s: float = 10.0) -> dict[int, dict[int, float]] | None:
+        """``{nvml_idx: {pid: mean SM %}}`` over the last ``window_s``, or None when per-process
+        GPU use is not measurable here. What a GPU kill targets (0.4.23).
 
-        Returned dict is a shallow copy so callers can't mutate the
-        collector's state. This is the cadence-cached view (refreshed at most
-        every few seconds by sample()); for kill targeting use
-        :meth:`refresh_process_map` so the PIDs are current.
+        NOT the compute-process list: on WDDM that names every process holding a D3D/CUDA
+        context (Chronos 2026-10-18: 36 pids on one card -- dwm, Cursor, an idle viewer),
+        with no usage. ``nvmlDeviceGetProcessUtilization`` reports only processes that
+        used the device in the window (Cursor at sm=1; the idle viewer ABSENT), per device,
+        on the WDDM 5090s. NotFound = no samples on that device, not a failure.
         """
-        return {gpu: list(pairs) for gpu, pairs in self._gpu_processes.items()}
-
-    def refresh_process_map(self) -> dict[int, list[tuple[int, int]]]:
-        """Force a fresh compute-process enumeration and return a copy.
-
-        Called by the service immediately before a GPU kill so targeting uses
-        up-to-the-moment PIDs rather than the cadence-cached map. Also resets
-        the cadence clock so sample() won't redundantly re-enumerate right
-        after a kill.
-        """
-        if not self._health.is_pollable or not self._handles:
-            return {}
-        self._gpu_processes = self._enumerate_process_map()
-        self._last_proc_map_ns = monotonic_ns()
-        return {gpu: list(pairs) for gpu, pairs in self._gpu_processes.items()}
+        fn = getattr(self._pynvml, "nvmlDeviceGetProcessUtilization", None)
+        if fn is None or not self._health.is_pollable or not self._handles:
+            return None
+        since = int((time.time() - window_s) * 1e6)
+        out: dict[int, dict[int, float]] = {}
+        for i, handle in enumerate(self._handles):
+            try:
+                samples = fn(handle, since)
+            except getattr(self._pynvml, "NVMLError_NotFound", ()):
+                out[i] = {}
+                continue
+            except Exception as e:  # noqa: BLE001 -- that device is "not measurable"
+                _log.warning("GPU %d per-process utilization not readable: %s", i, e)
+                continue
+            acc: dict[int, list[float]] = {}
+            for smp in samples:
+                if smp.timeStamp >= since:
+                    acc.setdefault(int(smp.pid), []).append(float(smp.smUtil))
+            out[i] = {pid: sum(v) / len(v) for pid, v in acc.items()}
+        return out
 
     # -- Health / lifecycle -------------------------------------------------
 

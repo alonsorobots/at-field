@@ -44,7 +44,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
@@ -471,12 +471,22 @@ def offender_axis(signal: str) -> str:
     RSS ranking silently kills the largest process rather than the one causing
     the heat.
 
-    GPU rules don't appear here -- the caller already narrows those to the
-    per-GPU process map, so the candidate set itself carries the attribution.
+    ``"gpu"`` for every ``gpu.*`` signal: the target is the process with MEASURED GPU use
+    (``gpu_use`` from the NVML collector), or nobody. Never RSS -- 2026-10-18 an LHM junction
+    rule fell back to RSS and killed an idle viewer while the heater ran on.
     """
+    if signal.startswith("gpu."):
+        return "gpu"
     if "cpu" in signal:
         return "cpu"
     return "memory"
+
+
+# A GPU kill needs a process at or over this mean SM % (NVML process utilization, ~10 s).
+# Measured on Chronos 2026-10-18: desktop processes read 0-2, an idle CUDA context is
+# absent; a matmul heater ~100. 20 still catches two heaters sharing one card (~50 each).
+GPU_USE_FLOOR = 20.0
+_NO_ELIGIBLE = "no eligible offender PID matched killable_names"
 
 
 RSS_CAP_RULE = "process-rss-cap"
@@ -903,6 +913,7 @@ class Actuator:
         action: Action,
         *,
         candidate_pids: Iterable[int] | None = None,
+        gpu_use: Mapping[int, float] | None = None,
     ) -> KillReport:
         """Execute one policy action.
 
@@ -913,10 +924,11 @@ class Actuator:
         ``candidate_pids`` is the set of PIDs the caller (service) believes
         are candidates -- typically the per-GPU process map for GPU rules,
         or top-RSS python procs for RAM rules. If ``None``, the actuator
-        scans all processes.
+        scans all processes. ``gpu_use`` ({pid: mean SM %}, None = not measurable)
+        is the only input a ``gpu.*`` rule targets by.
         """
         if action.kind == "throttle":
-            return self._execute_throttle(action, candidate_pids)
+            return self._execute_throttle(action, candidate_pids, gpu_use)
 
         if action.kind != "kill":
             _log.info(
@@ -932,20 +944,14 @@ class Actuator:
             )
 
         protected = self._protected_pids()
-        axis = offender_axis(action.signal)
-        offender_pid = self._pick_offender(
-            candidate_pids, axis=axis, protected=protected
-        )
+        offender_pid, why = self._offender(action.signal, candidate_pids, protected, gpu_use)
         if offender_pid is None:
-            _log.warning(
-                "kill-action for rule=%s but no eligible offender PID found",
-                action.rule_name,
-            )
+            _log.warning("kill-action for rule=%s skipped: %s", action.rule_name, why)
             return KillReport(
                 action=action,
                 offender_pid=None,
                 kill_root=None,
-                skipped_reason="no eligible offender PID matched killable_names",
+                skipped_reason=why,
                 finished_at_ns=int(time.monotonic_ns()),
             )
 
@@ -1040,12 +1046,15 @@ class Actuator:
             _log.exception("kill-root owner attribution failed")
             return None
 
-    def load_owners(self, signal: str) -> list[Any]:
+    def load_owners(self, signal: str, gpu_use: Mapping[int, float] | None = None) -> list[Any]:
         """Ranked owners of the killable load on ``signal``'s axis. Reads env of the
         eligible (killable-named) processes only; called only on a firing."""
         procs = self._provider.list_all()     # ~2 s elevated on 480 procs; walk it once
         eligible = self._eligible(procs, self._protected_pids(procs))
-        if offender_axis(signal) == "cpu":
+        axis = offender_axis(signal)
+        if axis == "gpu":
+            use, floor = dict(gpu_use or {}), GPU_USE_FLOOR         # mean SM %
+        elif axis == "cpu":
             use, floor = self._sample_cpu(eligible), 100.0          # one core
         else:
             use = {i.pid: float(i.rss_bytes) for i in eligible}
@@ -1063,6 +1072,7 @@ class Actuator:
         self,
         action: Action,
         candidate_pids: Iterable[int] | None,
+        gpu_use: Mapping[int, float] | None = None,
     ) -> KillReport:
         """Suspend the offending tree for ``cfg.kill.throttle_duration_seconds``,
         then resume it.
@@ -1073,21 +1083,14 @@ class Actuator:
         :meth:`shutdown` can resume them if the service exits early.
         """
         protected = self._protected_pids()
-        offender_pid = self._pick_offender(
-            candidate_pids,
-            axis=offender_axis(action.signal),
-            protected=protected,
-        )
+        offender_pid, why = self._offender(action.signal, candidate_pids, protected, gpu_use)
         if offender_pid is None:
-            _log.info(
-                "throttle for rule=%s but no eligible offender PID found",
-                action.rule_name,
-            )
+            _log.info("throttle for rule=%s skipped: %s", action.rule_name, why)
             return KillReport(
                 action=action,
                 offender_pid=None,
                 kill_root=None,
-                skipped_reason="no eligible offender PID matched killable_names",
+                skipped_reason=why,
                 finished_at_ns=int(time.monotonic_ns()),
             )
 
@@ -1257,6 +1260,28 @@ class Actuator:
         if info.name.lower() in self._never:
             return False
         return not self._matches_never_cmdline(info)
+
+    def _offender(self, signal: str, candidate_pids: Iterable[int] | None,
+                  protected: frozenset[int], gpu_use: Mapping[int, float] | None
+                  ) -> tuple[int | None, str]:
+        """(pid, "") or (None, why). A gpu.* rule: the top MEASURED GPU user if it is at
+        or over GPU_USE_FLOOR and killable -- the loader or nobody."""
+        axis = offender_axis(signal)
+        if axis != "gpu":
+            pid = self._pick_offender(candidate_pids, axis=axis, protected=protected)
+            return pid, ("" if pid is not None else _NO_ELIGIBLE)
+        if gpu_use is None:
+            return None, ("GPU use not measurable (NVML unavailable, or per-process "
+                          "utilization unsupported here)")
+        top = max(gpu_use.items(), key=lambda kv: kv[1], default=None)
+        info = self._provider.get(top[0]) if top else None
+        who = f"pid {top[0]} {info.name if info else '?'} {top[1]:.0f}%" if top else "none"
+        if top is None or top[1] < GPU_USE_FLOOR:
+            return None, (f"no process with measured GPU use >= {GPU_USE_FLOOR:.0f}% (source "
+                          f"not identified; {len(gpu_use)} measured, top: {who})")
+        if info is None or not self._eligible([info], protected):
+            return None, f"top GPU user {who} is not in killable_names (or is protected)"
+        return top[0], ""
 
     def _pick_offender(
         self,
