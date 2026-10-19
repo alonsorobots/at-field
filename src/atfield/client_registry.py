@@ -39,7 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 _log = logging.getLogger("atfield.client_registry")
 
-__all__ = ["ProtectedClient", "discover_protected"]
+__all__ = ["ProtectedClient", "discover_protected", "live_manifests"]
 
 _MANIFEST_GLOB = "clients/*/*.json"
 _NEVER_KILL_FIELD = "atfield_never_kill"
@@ -54,7 +54,7 @@ _START_TOLERANCE_S = 120.0
 class ProtectedClient:
     """A live, verified protected process."""
 
-    __slots__ = ("pid", "role", "client", "reason", "manifest_path", "can_stop", "manifest")
+    __slots__ = ("pid", "role", "client", "reason", "manifest_path", "can_stop")
 
     def __init__(
         self,
@@ -64,7 +64,6 @@ class ProtectedClient:
         reason: str,
         manifest_path: Path | None = None,
         can_stop: bool = False,
-        manifest: dict[str, Any] | None = None,
     ) -> None:
         self.pid = pid
         self.role = role
@@ -76,9 +75,6 @@ class ProtectedClient:
         # The manifest advertised control.graceful_stop, i.e. this client says
         # it knows how to shut itself down when asked.
         self.can_stop = can_stop
-        # The parsed manifest (a Kiroshi worker's worker_id/slots/launch_command name it
-        # as a load owner -- see atfield.agent_inbox).
-        self.manifest = manifest or {}
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
         return (
@@ -173,49 +169,52 @@ def _is_same_process(info: Any, started_at: Any) -> bool:
     return abs(float(create_time) - float(started_at)) <= _START_TOLERANCE_S
 
 
-def discover_protected(
-    state_dir: Path,
-    *,
-    provider: ProcessProvider,
-    protected_roles: Iterable[str] = (),
-) -> dict[int, ProtectedClient]:
-    """Map live PID -> :class:`ProtectedClient` for every protected manifest.
+def live_manifests(state_dir: Path, *, provider: ProcessProvider) -> dict[int, tuple[Path, dict[str, Any]]]:
+    """Live PID -> (manifest path, parsed manifest) for EVERY client manifest whose process
+    is alive and is the same process (not a recycled PID). Protected or not: a Kiroshi
+    worker owns its slots' load whatever its protection says (agent_inbox).
 
     Best-effort: a malformed or unreadable manifest is skipped rather than
     allowed to break the kill path. Refusing to read manifests must never turn
     into refusing to act on a genuine thermal emergency.
     """
-    roles = frozenset(r.lower() for r in protected_roles)
-    out: dict[int, ProtectedClient] = {}
-
+    out: dict[int, tuple[Path, dict[str, Any]]] = {}
     try:
         paths = sorted(state_dir.glob(_MANIFEST_GLOB))
     except OSError:
-        _log.exception("failed to glob %s for protected clients", state_dir / _MANIFEST_GLOB)
+        _log.exception("failed to glob %s for client manifests", state_dir / _MANIFEST_GLOB)
         return out
-
     for path in paths:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if not isinstance(data, dict):
+        pid = data.get("pid") if isinstance(data, dict) else None
+        if not isinstance(pid, int):
             continue
+        info = provider.get(pid)
+        if info is None or not _is_same_process(info, data.get("started_at")):
+            continue  # manifest outlived its process, or the PID was recycled
+        out[pid] = (path, data)
+    return out
 
+
+def discover_protected(
+    state_dir: Path,
+    *,
+    provider: ProcessProvider,
+    protected_roles: Iterable[str] = (),
+    manifests: dict[int, tuple[Path, dict[str, Any]]] | None = None,
+) -> dict[int, ProtectedClient]:
+    """Map live PID -> :class:`ProtectedClient` for every protected manifest."""
+    roles = frozenset(r.lower() for r in protected_roles)
+    out: dict[int, ProtectedClient] = {}
+    if manifests is None:
+        manifests = live_manifests(state_dir, provider=provider)
+    for pid, (path, data) in manifests.items():
         reason = _manifest_claims_protection(data, roles)
         if reason is None:
             continue
-
-        pid = data.get("pid")
-        if not isinstance(pid, int):
-            continue
-
-        info = provider.get(pid)
-        if info is None:
-            continue  # manifest outlived its process
-        if not _is_same_process(info, data.get("started_at")):
-            continue  # PID was recycled
-
         control = data.get("control")
         out[pid] = ProtectedClient(
             pid=pid,
@@ -228,7 +227,6 @@ def discover_protected(
             # manifest"); AT-Field implements the convention rather than
             # parsing the sentence, so a reworded manifest cannot break it.
             can_stop=isinstance(control, dict) and bool(control.get("graceful_stop")),
-            manifest=data,
         )
 
     return out

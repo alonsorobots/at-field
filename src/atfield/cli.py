@@ -505,35 +505,26 @@ def test_kill(
 
 @app.command(name="notify-drill")
 def notify_drill(
-    pid: int = typer.Option(..., "--pid", help="Whose owner gets the [DRILL] post with --send."),
-    send: bool = typer.Option(False, "--send", help="Post ONE [DRILL] message to PID's session."),
-    session: str = typer.Option("", "--session", help="--send refuses unless PID's owner IS this session id."),
+    signal: str = typer.Option("system.cpu_package_temp_c", "--signal",
+                               help="Rank owners on this signal's axis (cpu, gpu.N.*, memory)."),
     state_dir: Path = _state_dir_option(),
 ) -> None:
-    """List the ranked owners of the live CPU load (no tokens); --send drills one post."""
-    from atfield import agent_inbox
+    """Dry run: the ranked owners a firing of SIGNAL would name (ids and shares, no tokens)."""
     from atfield.actuator import Actuator
+    from atfield.collectors.nvml import NvmlCollector
     from atfield.config import load_config
+    from atfield.service import gpu_use_for
 
-    actuator = Actuator(load_config(state_dir / "config.toml"))
+    gpu_use = None
+    if signal.startswith("gpu."):
+        nvml = NvmlCollector()
+        gpu_use = gpu_use_for(nvml, signal, set(nvml.probe().signals))
+        print(f"gpu use (pid: mean SM %): {gpu_use}")
     t0 = time.monotonic()
-    found = actuator.load_owners("system.cpu_package_temp_c")
-    console.print(f"owners ({time.monotonic() - t0:.2f}s):")
+    found = Actuator(load_config(state_dir / "config.toml")).load_owners(signal, gpu_use)
+    console.print(f"owners for {signal} ({time.monotonic() - t0:.2f}s):")
     for o in found:
         print(json.dumps(o.public()))
-    info = actuator._provider.get(pid)
-    if info is None:
-        raise typer.Exit(code=2)
-    owner = actuator._owner_of(info, actuator._ancestors(pid))
-    print(f"owner of pid {pid}: {json.dumps(owner and owner.public())}")
-    if send and not (owner and owner.inbox and session
-                     and owner.inbox.session_id.startswith(session)):
-        console.print("[red]refusing --send: --session must name the owning session[/]")
-        raise typer.Exit(code=3)
-    if send:
-        ok = agent_inbox.post(owner.inbox, f"[DRILL] AT-Field notify-drill to the owner of pid "
-                              f"{pid}: reply with the word RECEIVED and this text verbatim.")
-        console.print(f"posted: {ok}")
 
 
 # ---------------------------------------------------------------------------

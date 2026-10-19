@@ -3,18 +3,10 @@
 2026-10-16: cpu-pkg-warm fired while one Claude session's subagents held ~7 cores; the
 toast and the Kiroshi steward heard about it, the session that could act did not.
 
-Attribution uses what the processes already carry. A Claude Code session hands its
-children ``CLAUDE_CODE_MESSAGING_SOCKET`` / ``_TOKEN`` / ``_SESSION_ID``; its inbox
-accepts ``{"type":"auth",...}\\n{"type":"user",...}\\n`` on that pipe. A Kiroshi worker
-registers a manifest; its pool slots are its descendants, and they belong to the WORKER
-even when it was launched from a session's shell and inherited that session's env -- the
-steward, not the launching agent, can narrow the job.
-
-Owners are ranked by share of the sampled load; the walk takes owners until half the load
-is covered, each over an absolute floor, at most three, and STOPS at an owner it cannot
-address (no fall-through: the next owner is by construction not the main cause). Only
-Claude sessions get a pipe post; a worker is told through the existing webhook, whose
-payload carries the ranked ``owners`` (never a socket or token).
+A session is found by the ``CLAUDE_CODE_MESSAGING_SOCKET`` its children inherit; a Kiroshi
+worker by its manifest, and its slots stay the WORKER's even when they inherited a
+session's env (the steward, not the launching agent, can narrow the job). The walk STOPS
+at an owner it cannot address: the next one is by construction not the main cause.
 """
 from __future__ import annotations
 

@@ -90,7 +90,6 @@ def main() -> None:
         samples.update(nvml.sample())
     if rs.available:
         samples.update(sysc.sample())
-    samples.pop("gpu.processes", None)
 
     engine = PolicyEngine(cfg, available_signals=tuple(samples.keys()))
     tmp = Path(tempfile.mkdtemp(prefix="atf_bench_"))

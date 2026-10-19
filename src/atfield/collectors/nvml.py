@@ -84,7 +84,7 @@ _DRIVER_CHECK_INTERVAL_NS: Final = 60_000_000_000
 
 
 
-__all__ = ["PER_PROCESS_VRAM_KEY", "NvmlCollector", "encode_driver_version"]
+__all__ = ["NvmlCollector", "encode_driver_version"]
 
 
 def encode_driver_version(a: int, b: int, c: int, d: int) -> str:
@@ -106,16 +106,6 @@ def encode_driver_version(a: int, b: int, c: int, d: int) -> str:
 
 _NAME: Final = "nvml"
 
-# Signal name that carries the per-process VRAM map. Special-cased: its
-# Sample.value is the count of GPU procs (a numeric for shape consistency),
-# and the actual mapping lives in ``Sample.metadata`` -- but Sample is
-# frozen and metadata-less by design. So we ship the map separately via
-# the snapshot dict the service holds. The service imports this constant
-# and reads the live map from the collector when an Action needs it.
-#
-# Concretely: this signal name is *never* referenced by a [[rules]] entry
-# in config.toml -- it's a service-private channel for the actuator.
-PER_PROCESS_VRAM_KEY: Final = "gpu.processes"
 
 
 # ---------------------------------------------------------------------------
@@ -190,14 +180,6 @@ class NvmlCollector:
         #: _PERSISTENT_FAILURE_S. The service loop reads it and exits so NSSM
         #: hands us a fresh process (AppExit=Restart), within its restart budget.
         self.wants_process_restart: str | None = None
-        # Per-GPU compute-process list, for the dashboard COUNT only (kill targeting
-        # reads process_utilization()). Refreshed on a slow cadence from sample().
-        self._gpu_processes: dict[int, list[tuple[int, int]]] = {}
-        # Compute-process enumeration is by far the most expensive NVML call
-        # (~0.9 ms vs ~0.006 ms for ALL the metric reads combined on a 2-GPU
-        # box), so we refresh it at most this often.
-        self._proc_map_interval_ns = 5_000_000_000  # 5 s
-        self._last_proc_map_ns = 0
 
     # -- Probe -------------------------------------------------------------
 
@@ -247,7 +229,7 @@ class NvmlCollector:
                 self._driver_version = "unknown"
 
             # Build the per-GPU signal namespace.
-            sigs: list[str] = [PER_PROCESS_VRAM_KEY]
+            sigs: list[str] = []
             for i in range(count):
                 sigs.extend(
                     [
@@ -357,19 +339,6 @@ class NvmlCollector:
             except Exception:
                 # Power query is unsupported on some cards; not a failure.
                 pass
-
-        # Refresh the (expensive) per-process list only on a slow cadence.
-        if now - self._last_proc_map_ns >= self._proc_map_interval_ns:
-            self._gpu_processes = self._enumerate_process_map()
-            self._last_proc_map_ns = now
-
-        # Sample carrying the GPU-proc count (context holders, not users).
-        out[PER_PROCESS_VRAM_KEY] = Sample(
-            value=float(sum(len(v) for v in self._gpu_processes.values())),
-            taken_at_ns=now,
-            source_id=_NAME,
-            unit="count",
-        )
 
         # --- NVML "SUCCESS with garbage" ------------------------------------
         # 2026-07-23 (RTX 5090, wedged NVDEC context): temperature 885510 C and
@@ -540,34 +509,7 @@ class NvmlCollector:
             self.driver_replaced = True
         return self.driver_replaced
 
-    # -- Per-process VRAM accessor -----------------------------------------
-
-    def _enumerate_process_map(self) -> dict[int, list[tuple[int, int]]]:
-        """Enumerate compute processes on every GPU (the expensive call).
-
-        Tries the modern ``_v3`` entry point first and falls back to the
-        legacy one for older drivers; a GPU that refuses both contributes an
-        empty list rather than failing the whole sweep.
-        """
-        pynvml = self._pynvml
-        proc_map: dict[int, list[tuple[int, int]]] = {}
-        for i, handle in enumerate(self._handles):
-            try:
-                procs = pynvml.nvmlDeviceGetComputeRunningProcesses_v3(handle)
-            except Exception:
-                try:
-                    procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-                except Exception:
-                    proc_map[i] = []
-                    continue
-            pairs: list[tuple[int, int]] = []
-            for p in procs:
-                used = getattr(p, "usedGpuMemory", None)
-                # NVML returns ULLONG_MAX (0xFFFFFFFFFFFFFFFF) when not measurable.
-                used_int = 0 if used is None or used == (1 << 64) - 1 else int(used)
-                pairs.append((int(p.pid), used_int))
-            proc_map[i] = pairs
-        return proc_map
+    # -- Per-process GPU use (what a GPU kill targets) --------------------
 
     def process_utilization(self, window_s: float = 10.0) -> dict[int, dict[int, float]] | None:
         """``{nvml_idx: {pid: mean SM %}}`` over the last ``window_s``, or None when per-process

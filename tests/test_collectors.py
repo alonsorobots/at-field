@@ -26,7 +26,7 @@ import pytest
 from atfield.collectors import Collector, HealthState, ProbeResult
 from atfield.collectors.lhm import LhmCollector
 from atfield.collectors.lhmlib import LhmLibCollector
-from atfield.collectors.nvml import PER_PROCESS_VRAM_KEY, NvmlCollector
+from atfield.collectors.nvml import NvmlCollector
 from atfield.collectors.system import SystemCollector
 
 # ---------------------------------------------------------------------------
@@ -115,7 +115,6 @@ class TestNvmlCollectorBehavior:
         try:
             if not result.available:
                 pytest.skip(f"NVML unavailable on this host: {result.reason}")
-            assert PER_PROCESS_VRAM_KEY in result.signals
             # At least gpu.0 should exist if probe succeeded
             assert any(s.startswith("gpu.0.") for s in result.signals)
         finally:

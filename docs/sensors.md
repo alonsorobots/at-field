@@ -124,7 +124,6 @@ tells you what to *expect* before you install.
 | `gpu.N.util_percent` | NVML | **99%** | **99%** | **99%**¹ | **100%** | n/a |
 | `gpu.N.vram_used_bytes` | NVML | **99%** | **99%** | **99%**¹ | **100%** | n/a |
 | `gpu.N.power_w` | NVML | **95%** | **95%** | **70%**² | **100%** | n/a |
-| `gpu.processes` (per-PID VRAM map) | NVML | **99%** | **99%** | **99%** | **100%** | n/a |
 | `gpu.N.mem_junction_temp_c` | LHM | **80%**³ | **75%** | **20%**⁴ | **0%**⁵ | **40%**⁶ |
 | `system.cpu_package_temp_c` | LHM | **95%** | **90%** | **40%**⁷ | n/a | **95%** |
 | `system.cpu_vcore_volts` | LHM | **80%** | **65%** | **15%**⁷ | n/a | **80%** |

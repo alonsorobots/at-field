@@ -205,25 +205,6 @@ def test_the_warning_names_the_owners_busiest_processes(tmp_path, monkeypatch):
     assert TOKEN not in text
 
 
-def test_the_drill_refuses_to_send_without_the_owning_session_id(tmp_path, monkeypatch):
-    """Review F6: --send must name the session it expects; a mismatch posts nothing."""
-    from typer.testing import CliRunner
-
-    import atfield.actuator as act
-    from atfield.cli import app
-    provider = FakeProvider.from_procs(procs_incident())
-    monkeypatch.setattr(act, "Actuator", lambda cfg: Actuator(cfg, provider=provider,
-                                                              sleep=lambda _s: None))
-    posts = []
-    monkeypatch.setattr(ai, "post", lambda inbox, text, **kw: posts.append(inbox.session_id) or True)
-    base = ["notify-drill", "--pid", "100", "--send", "--state-dir", str(tmp_path)]
-    runs = [CliRunner().invoke(app, base + extra) for extra in
-            ([], ["--session", "bbbbbbbb"], ["--session", "aaaaaaaa"])]
-    assert [r.exit_code != 0 for r in runs] == [True, True, False]
-    assert posts == ["aaaaaaaa-1111"]
-
-
-
 def test_a_kill_right_after_a_warning_is_still_told(tmp_path, monkeypatch):
     """2026-10-17 16:28:52 / 16:29:09 on Chronos: cpu-pkg-warm told session 27fcdc64, then
     cpu-pkg-hot killed its pid 3260 17 s later -- and the one-per-10-min limit, spent on
@@ -241,3 +222,14 @@ def test_a_kill_right_after_a_warning_is_still_told(tmp_path, monkeypatch):
 def test_notified_is_false_when_the_post_did_not_land(tmp_path, monkeypatch):
     _, payloads, _ = run(tmp_path, monkeypatch, procs_incident(), 87.0, WARN, delivered=False)
     assert [o["notified"] for p in payloads for o in p["owners"]] == [False, False, False]
+
+
+def test_an_unprotected_worker_still_owns_its_slots(tmp_path, monkeypatch):
+    """Ownership keys on role == "worker" in ANY live manifest, not on protection: a worker
+    registered with atfield_never_kill = false is still the owner of its slots' load."""
+    posts, payloads, _ = run(tmp_path, monkeypatch, procs_both(200.0, 300.0), 87.0, WARN,
+                             manifest={**WORKER, "atfield_never_kill": False})
+    assert posts == []
+    (p,) = [p for p in payloads if p["rule"] == "cpu-pkg-warm"]
+    assert [(o["kind"], o["id"], o["notified"]) for o in p["owners"]][:2] == [
+        ("kiroshi_worker", "DEMETER-4c030c", True), ("claude_session", "aaaaaaaa", False)]

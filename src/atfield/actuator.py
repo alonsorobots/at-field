@@ -51,6 +51,7 @@ from typing import Any, Protocol
 from atfield import agent_inbox
 from atfield.client_registry import (
     discover_protected,
+    live_manifests,
     is_absolute_protection,
     request_stop,
 )
@@ -671,6 +672,9 @@ class Actuator:
         # the objects costs nothing and re-globbing would risk a different view
         # of the world between deciding and acting.
         self._clients_by_pid: dict[int, Any] = {}
+        # Every live Kiroshi worker manifest (pid -> manifest), protected or not: the
+        # load owner of its slots. Refreshed with _clients_by_pid.
+        self._workers: dict[int, dict[str, Any]] = {}
 
     # -- Public entry point ------------------------------------------------
 
@@ -1038,9 +1042,8 @@ class Actuator:
         On the kill path, so it never raises (attribution must not cost a kill)."""
         try:
             for pid in (root.pid, *(p for p, _ in ancestors)):
-                client = self._clients_by_pid.get(pid)
-                if client is not None and client.role == "worker":
-                    return agent_inbox.worker_owner(client.manifest)
+                if pid in self._workers:
+                    return agent_inbox.worker_owner(self._workers[pid])
             return agent_inbox.session_owner(agent_inbox.inbox_of(self._environ(root.pid)))
         except Exception:  # noqa: BLE001
             _log.exception("kill-root owner attribution failed")
@@ -1059,11 +1062,9 @@ class Actuator:
         else:
             use = {i.pid: float(i.rss_bytes) for i in eligible}
             floor = 0.10 * _host_ram_bytes()                       # 10% of RAM
-        workers = {pid: c.manifest for pid, c in self._clients_by_pid.items()
-                   if c.role == "worker"}
         return agent_inbox.owners(
             {i.pid: (use.get(i.pid, 0.0), self._environ(i.pid), i.name) for i in eligible},
-            workers=workers, floor=floor,
+            workers=self._workers, floor=floor,
             descendants_of=lambda p: [d.pid for d in self._provider.descendants(p)])
 
     # -- Throttle (suspend/resume) ----------------------------------------
@@ -1218,10 +1219,14 @@ class Actuator:
         """
         pids: set[int] = set()
         try:
+            manifests = live_manifests(self._cfg.general.state_dir, provider=self._provider)
+            self._workers = {pid: d for pid, (_p, d) in manifests.items()
+                             if d.get("role") == "worker"}
             found = discover_protected(
                 self._cfg.general.state_dir,
                 provider=self._provider,
                 protected_roles=self._protected_roles,
+                manifests=manifests,
             )
         except Exception:
             # Never let manifest trouble block a response to real thermal

@@ -35,6 +35,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from atfield import __version__, agent_inbox
 from atfield.actuator import Actuator, script_name_from_cmdline
@@ -46,7 +47,7 @@ from atfield.audit import (
 )
 from atfield.collectors import HealthState, ProbeResult
 from atfield.collectors.lhmlib import LhmLibCollector
-from atfield.collectors.nvml import PER_PROCESS_VRAM_KEY, NvmlCollector
+from atfield.collectors.nvml import NvmlCollector
 from atfield.collectors.system import SystemCollector
 from atfield.config import AtFieldConfig, ConfigError, default_config, load_config
 from atfield.forensics import ForensicBuffer
@@ -437,6 +438,27 @@ def record_on_health(api_state: ServiceState, action: Action,
         api_state.record_action(action)
 
 
+def gpu_use_for(nvml: Any, signal: str, nvml_owned: set[str]) -> dict[int, float] | None:
+    """{pid: mean SM %} a ``gpu.*`` rule targets by, or None (not a GPU rule / not
+    measurable). An NVML signal reads its own device; an LHM signal's index cannot be
+    mapped to an NVML device (the two were measured transposed -- CHANGELOG 0.4.23), so it
+    reads each pid's top use across all devices."""
+    if not signal.startswith("gpu.") or nvml is None:
+        return None
+    per_dev = nvml.process_utilization()
+    if per_dev is None:
+        return None
+    if signal in nvml_owned:
+        return per_dev.get(int(signal.split(".")[1]), {})
+    _log.warning("%s cannot be mapped to an NVML device; targeting the top GPU user "
+                 "across all devices", signal)
+    use: dict[int, float] = {}
+    for d in per_dev.values():
+        for pid, v in d.items():
+            use[pid] = max(v, use.get(pid, 0.0))
+    return use
+
+
 def run_service(
     *,
     config_path: Path | None = None,
@@ -506,9 +528,7 @@ def run_service(
     for r in probe_results.values():
         if r.available:
             available_signals.update(r.signals)
-    # Strip the special process-map channel from the policy view; it's used
-    # by the actuator only.
-    policy_signals = available_signals - {PER_PROCESS_VRAM_KEY}
+    policy_signals = available_signals
 
     # Build engine + actuator
     engine = PolicyEngine(cfg, available_signals=policy_signals)
@@ -649,7 +669,6 @@ def run_service(
                     _log.exception("collector %s.sample() raised; treating tick as no-op for it", getattr(c, "name", "?"))
                 # Reflect health state changes into the API mirror.
                 api_state.update_collector_health(c.name, c.health().name)  # type: ignore[attr-defined]
-            samples.pop(PER_PROCESS_VRAM_KEY, None)
             timer.phase("collect")
 
             # ONE liveness verdict, decided HERE -- the single place that
@@ -819,27 +838,7 @@ def run_service(
                 audit.write_action(effective)
                 record_on_health(api_state, effective, engine.effective_rules)
 
-                # A gpu.* rule targets MEASURED per-process GPU use, never a process list:
-                # on WDDM the compute-process list names every context holder (0.4.23).
-                # The index in a signal name means something only inside the collector
-                # that assigned it -- NVML numbers GPUs by PCI order, LHM by sensor
-                # enumeration, and the two were measured TRANSPOSED on a two-GPU host
-                # (2026-08-31: loading physical gpu0 drove LHM gpu.1 to 102.8 C). So an
-                # NVML signal reads its own device; an LHM signal reads the top user per
-                # pid across ALL devices (exact for one heater; ambiguous for two).
-                gpu_use = None
-                if effective.signal.startswith("gpu.") and nvml is not None:
-                    per_dev = nvml.process_utilization()
-                    if per_dev is not None and effective.signal in nvml_owned_signals:
-                        gpu_use = per_dev.get(int(effective.signal.split(".")[1]), {})
-                    elif per_dev is not None:
-                        _log.warning("%s cannot be mapped to an NVML device; targeting the "
-                                     "top GPU user across all devices", effective.signal)
-                        gpu_use = {}
-                        for d in per_dev.values():
-                            for pid, v in d.items():
-                                gpu_use[pid] = max(v, gpu_use.get(pid, 0.0))
-
+                gpu_use = gpu_use_for(nvml, effective.signal, nvml_owned_signals)
                 report = actuator.execute(effective, gpu_use=gpu_use)
                 # Tell the OWNER of the load (a Claude session by pipe; a Kiroshi worker
                 # via the webhook's `owners`). Never raises; see agent_inbox.

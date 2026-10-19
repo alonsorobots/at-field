@@ -27,7 +27,7 @@ import psutil
 def main() -> None:
     duration_s = float(sys.argv[1]) if len(sys.argv) > 1 else 30.0
 
-    from atfield.collectors.nvml import PER_PROCESS_VRAM_KEY, NvmlCollector
+    from atfield.collectors.nvml import NvmlCollector
     from atfield.collectors.system import SystemCollector
     from atfield.config import default_config
     from atfield.forensics import ForensicBuffer
@@ -48,7 +48,6 @@ def main() -> None:
     boot = {}
     boot.update(nvml.sample())
     boot.update(sysc.sample())
-    boot.pop(PER_PROCESS_VRAM_KEY, None)
     engine = PolicyEngine(cfg, available_signals=tuple(boot.keys()))
     state = ServiceState(
         version="measure",
@@ -71,7 +70,6 @@ def main() -> None:
         samples = {}
         samples.update(nvml.sample())
         samples.update(sysc.sample())
-        samples.pop(PER_PROCESS_VRAM_KEY, None)
         state.record_tick(now_unix=time.time(), samples=samples)
         fbuf.record(samples, ts=time.time())
         engine.tick(samples, now_ns=time.monotonic_ns())
