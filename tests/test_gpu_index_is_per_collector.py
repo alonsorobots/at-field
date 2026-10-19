@@ -26,15 +26,9 @@ def _dispatch_source():
 
 
 class TestCrossCollectorIndexIsRefused:
-    def test_nvml_map_is_only_used_for_nvml_signals(self):
-        src = _dispatch_source()
-        # The guard must sit on the same condition that reaches into the map.
-        assert re.search(
-            r"nvml is not None\s+and effective\.signal\.startswith\(\"gpu\.\"\)\s*\n\s*"
-            r"and effective\.signal in nvml_owned_signals", src), (
-            "the NVML process map is reachable for a signal NVML did not "
-            "produce; its gpu index is a different card's"
-        )
+    # 0.4.23: the two source greps that pinned the old process-map dispatch are gone with
+    # it; tests/test_gpu_kill_target.py::test_t3 pins the BEHAVIOUR through run_service
+    # (an NVML signal reads only its own device; an LHM signal says it is unmapped).
 
     def test_the_owned_signal_set_comes_from_the_probe(self):
         src = _dispatch_source()
@@ -42,14 +36,6 @@ class TestCrossCollectorIndexIsRefused:
         assert re.search(r"probe_results\.get\(\"nvml\"\)", src), (
             "the set of NVML-owned signals must come from NVML's own probe "
             "result, not from a hardcoded list that will drift"
-        )
-
-    def test_a_foreign_gpu_signal_is_reported_not_silently_dropped(self):
-        # Falling back is correct, but silently is how this stayed invisible.
-        src = _dispatch_source()
-        assert re.search(r"is not an NVML signal", src), (
-            "a GPU rule that cannot use the NVML map must say so; silence is "
-            "what let mis-targeted kills run for hours"
         )
 
 
