@@ -194,7 +194,7 @@ def test_the_real_service_loop_keeps_the_kill_on_health(tmp_path, monkeypatch):
         def __init__(self, cfg):
             pass
 
-        def execute(self, action, candidate_pids=None):
+        def execute(self, action, candidate_pids=None, gpu_use=None):
             return KillReport(action=action, offender_pid=None, kill_root=None,
                               skipped_reason="test: nothing is killed")
 
