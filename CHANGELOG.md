@@ -23,17 +23,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   device; an LHM signal reads the top user across all devices (exact for one heater). The
   RSS fallback for GPU rules is gone. Owners of a GPU warning are ranked by GPU use ("NN% GPU").
   On WDDM the compute-process list (the old kill input) names every context holder
-  (36 pids on one Chronos card, no usage); ProcessUtilization reports only real users
-  (idle context holders absent) -- measured idle; the HOT case is UNMEASURED until the
-  plan's Phase 0 runs.
+  (36 pids on one Chronos card, no usage); ProcessUtilization reports only real users.
+  Measured on Chronos 2026-10-18 (20 s fp16 matmul on one card, an idle CUDA holder on
+  the other): the heater read 52 -> 90% SM on its own card, absent from the other; the
+  idle holder was ABSENT throughout; identical from an `ssh` session-0 shell.
 - DELIBERATE CHANGE: with per-process GPU use unmeasurable (no NVML, or the call
   unsupported), a GPU rule now skips with a WARNING instead of killing by RSS: a kill the
   rule cannot tie to the heat sheds nothing (measured above) and costs someone's work.
 
+- A Kiroshi worker owns its slots' load whether or not its manifest is protected
+  (ownership keys on `role == "worker"` in any live client manifest).
+
 ### Removed
 
 - `NvmlCollector.process_map()` / `refresh_process_map()` (their only caller was the kill
-  path). `tools/gpu_use_probe.py` prints what a GPU rule reads (read-only, not shipped).
+  path), and the `gpu.processes` signal with its 5-s compute-process enumeration (nothing
+  consumed the count; the service stripped it before the policy). `atf notify-drill` is now a
+  dry run with `--signal` (GPU axis included); `--pid/--send/--session` are gone (the pipe was
+  proven by a real event on 2026-10-17). `tools/gpu_use_probe.py` prints what a GPU rule
+  reads (read-only, not shipped).
 
 ## [0.4.22] — 2026-10-17 — a kill notice is never swallowed; Aurora's phantom junction found every time; cpu-pkg-hot 92 °C
 
