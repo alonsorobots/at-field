@@ -203,3 +203,9 @@ def test_process_utilization_is_none_when_unsupported():
     c = NvmlCollector.__new__(NvmlCollector)
     c._pynvml, c._handles, c._health = object(), [0], HealthState.HEALTHY
     assert c.process_utilization() is None
+
+
+def test_t6b_a_gpu_user_under_the_floor_is_not_told(tmp_path, monkeypatch):
+    _, posts, payloads = run(tmp_path, monkeypatch, NVML_SIG, {1: {HEATER: 15.0}},
+                             action="log", notify=True)
+    assert posts == [] and not [o for p in payloads for o in p["owners"] if o["notified"]]
