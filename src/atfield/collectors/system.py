@@ -67,6 +67,7 @@ _SIGNALS: Final = (
     "system.cpu_used_percent",
     "system.input_idle_s",
     "system.hard_fault_rate",
+    "system.page_fault_rate",
 )
 
 
@@ -454,7 +455,10 @@ class _HardFaultRateReader:
 
     _COUNTER_PATH: Final = r"\Memory\Pages Input/sec"
 
-    def __init__(self) -> None:
+    def __init__(self, counter_path: Optional[str] = None) -> None:
+        # Same reader, other counter: system.page_fault_rate reads
+        # \Memory\Page Faults/sec (ALL faults, soft/demand-zero included).
+        self._path = counter_path or self._COUNTER_PATH
         self._hquery = wintypes.HANDLE()
         self._hcounter = wintypes.HANDLE()
         self._opened = False
@@ -468,10 +472,10 @@ class _HardFaultRateReader:
         if rc != 0:
             raise OSError(f"PdhOpenQueryW failed: 0x{rc & 0xFFFFFFFF:08X}")
         rc = _pdh.PdhAddEnglishCounterW(
-            self._hquery, self._COUNTER_PATH, None, ctypes.byref(self._hcounter))
+            self._hquery, self._path, None, ctypes.byref(self._hcounter))
         if rc != 0:
             _pdh.PdhCloseQuery(self._hquery)
-            raise OSError(f"PdhAddEnglishCounterW({self._COUNTER_PATH!r}) failed: "
+            raise OSError(f"PdhAddEnglishCounterW({self._path!r}) failed: "
                           f"0x{rc & 0xFFFFFFFF:08X}")
         self._opened = True
 
@@ -520,6 +524,13 @@ class SystemCollector:
         # the counter category not registered), hard_fault_rate is simply
         # omitted -- never fails the whole collector. See probe().
         self._hard_fault_reader: Optional[_HardFaultRateReader] = None
+        # ALL page faults/s, soft ones included. Hard faults say "paging to disk";
+        # this says "the machine is churning fresh pages" -- e.g. numpy workers
+        # streaming fresh GB-sized temporaries (lever-v14n256, 2026-10-24: ~2.7 M/s
+        # host-wide, per-slot speed 4x lower at 16 slots while every capacity
+        # gauge read fine). Logged only: no rule acts on it until its normal
+        # range is known. Measured cost ~10 us per read.
+        self._page_fault_reader: Optional[_HardFaultRateReader] = None
         # Resolved at probe(): which API can honestly answer "is a human at
         # this machine?" from the session we happen to be running in. None
         # means nothing can, and the signal is withheld rather than faked.
@@ -555,6 +566,14 @@ class SystemCollector:
                 except Exception as exc:  # noqa: BLE001
                     self._hard_fault_reader = None
                     meta["hard_fault_rate_source"] = f"unavailable ({exc!r})"
+                try:
+                    reader = _HardFaultRateReader(r"\Memory\Page Faults/sec")
+                    reader.open()
+                    self._page_fault_reader = reader
+                    meta["page_fault_rate_source"] = "PDH \\Memory\\Page Faults/sec"
+                except Exception as exc:  # noqa: BLE001
+                    self._page_fault_reader = None
+                    meta["page_fault_rate_source"] = f"unavailable ({exc!r})"
                 # Same best-effort contract as hard_fault_rate: losing the
                 # presence signal costs exactly that signal.
                 self._input_idle_reader, idle_source = _resolve_input_idle_reader()
@@ -656,6 +675,12 @@ class SystemCollector:
                     out["system.hard_fault_rate"] = Sample(
                         value=rate, taken_at_ns=now, source_id=_NAME, unit="count",
                     )
+            if self._page_fault_reader is not None:
+                rate = self._page_fault_reader.read()
+                if rate is not None:
+                    out["system.page_fault_rate"] = Sample(
+                        value=rate, taken_at_ns=now, source_id=_NAME, unit="count",
+                    )
             return out
         except Exception:
             self._consecutive_failures += 1
@@ -670,3 +695,6 @@ class SystemCollector:
         if self._hard_fault_reader is not None:
             self._hard_fault_reader.close()
             self._hard_fault_reader = None
+        if self._page_fault_reader is not None:
+            self._page_fault_reader.close()
+            self._page_fault_reader = None

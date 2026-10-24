@@ -7,6 +7,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- **`system.page_fault_rate`**: ALL page faults per second (`\Memory\Page Faults/sec`, PDH), soft and
+  demand-zero faults included, next to `system.hard_fault_rate` (which counts only pages read back from
+  disk). Why: on 2026-10-24 a Kiroshi job (lever-v14n256) ran 16 numpy workers that each streamed fresh
+  GB-sized temporaries. The host took ~2.7 M soft faults/s, and per-worker speed fell 4x versus running
+  alone, while every capacity gauge (CPU %, RAM %, commit %, temperatures) read healthy. Logged only: no
+  rule acts on it until its normal range is known. Cost ~10 us per read. Same best-effort contract as
+  hard_fault_rate: an unregistered counter costs only this signal.
+
 ## [0.4.23] — 2026-10-18 — a GPU rule kills the process USING the GPU, or nobody
 
 ### Fixed

@@ -485,14 +485,57 @@ class TestSystemCollectorHardFaultRate:
         s = samples["system.hard_fault_rate"]
         assert s.value == 7.5 and s.unit == "count" and s.source_id == "system"
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="page_fault_rate is Windows-only")
+    def test_page_fault_rate_reads_the_all_faults_counter_live(self):
+        """A REAL read, not a stub: the counter exists, is a different counter
+        from hard_fault_rate's, and yields a rate on the second collect."""
+        import time
+        c = SystemCollector()
+        result = c.probe()
+        assert "system.page_fault_rate" in result.signals
+        assert result.metadata["page_fault_rate_source"] == "PDH \\Memory\\Page Faults/sec"
+        assert c._page_fault_reader._path != c._hard_fault_reader._path
+        c.sample()                       # priming call: no prior sample to diff
+        buf = b"\x01" * (64 * 1024 * 1024)  # 64 MB of fresh, written pages -> soft faults
+        del buf
+        time.sleep(0.2)
+        s = c.sample()["system.page_fault_rate"]
+        assert s.value > 0 and s.unit == "count" and s.source_id == "system"
+        c.shutdown()
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="page_fault_rate is Windows-only")
+    def test_page_fault_reader_failure_costs_only_that_signal(self, monkeypatch):
+        from atfield.collectors import system as sysmod
+        real_open = sysmod._HardFaultRateReader.open
+
+        def open_(self):
+            if "Page Faults" in self._path:
+                raise OSError("counter missing")
+            real_open(self)
+
+        monkeypatch.setattr(sysmod._HardFaultRateReader, "open", open_)
+        c = SystemCollector()
+        result = c.probe()
+        assert result.available and "unavailable" in result.metadata["page_fault_rate_source"]
+        samples = c.sample()
+        assert "system.page_fault_rate" not in samples
+        assert "system.ram_used_percent" in samples
+        c.shutdown()
+
     def test_shutdown_closes_the_reader(self, monkeypatch):
         c = SystemCollector()
         c.probe()
+        if c._page_fault_reader is not None:
+            pf = {"n": 0}
+            monkeypatch.setattr(c._page_fault_reader, "close", lambda: pf.__setitem__("n", 1))
+        else:
+            pf = {"n": 1}
         if c._hard_fault_reader is not None:
             closed = {"n": 0}
             monkeypatch.setattr(c._hard_fault_reader, "close", lambda: closed.__setitem__("n", 1))
             c.shutdown()
             assert closed["n"] == 1
+            assert pf["n"] == 1
         else:
             c.shutdown()  # off-Windows / PDH unavailable: must not raise
 
