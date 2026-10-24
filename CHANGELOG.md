@@ -7,6 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.24] — 2026-10-24 — system.page_fault_rate
+
 ### Added
 
 - **`system.page_fault_rate`**: ALL page faults per second (`\Memory\Page Faults/sec`, PDH), soft and
