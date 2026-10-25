@@ -7,6 +7,33 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.26] — 2026-10-25 — review fixes for 0.4.25
+
+### Fixed
+
+- **A memory kill could be skipped while the tree still held the memory.** 0.4.25 named the tree's fattest
+  member as the offender -- in the incident tree one of thirty short-lived 1.5 GB children. `execute()`
+  re-walks from that pid with the live provider, so a child that exited during the 2-10 s scan made the whole
+  kill a "PID no longer exists" skip. The offender is now the tree's ROOT (long-lived; its own walk returns
+  itself). Test: the children exit between the scan and the kill, and the slot still dies.
+- **Test gap:** two slots under one protected worker must rank as two trees (the grouping walk has to stop
+  below the protected worker); no test could see it before.
+
+### Behaviour change carried by 0.4.25 (stated here because it was not)
+
+- **The per-process RSS cap is live again.** It had been blind since 0.4.15 (the lean scan returned no
+  processes). Chronos and DEMETER both configure `max_process_rss_gb = 32.0`, so any single unprotected
+  killable process over 32 GB is now killed within ~5 s, with no grace. Chronos's config says "nothing
+  legitimate on this box goes near 32 GB", but MDBPE builds measured up to 96 GB in one process while the cap
+  was blind (2026-09-23). Raise or zero the cap in config BEFORE the next such build (config is the
+  operator's; this release does not touch it).
+
+### Known
+
+- A `system.commit_percent` rule still ranks by working-set RSS; a paged-out commit holder reads small
+  (29 processes on Chronos with private > 2x RSS). Summing `memory_info().private` per tree for commit
+  signals is the next step.
+
 ## [0.4.25] — 2026-10-25 — a memory rule kills the job holding the memory
 
 ### Fixed

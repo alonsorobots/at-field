@@ -1367,8 +1367,10 @@ class Actuator:
                 protected_pids=protected,
             )
             trees.setdefault(root.pid if root is not None else info.pid, []).append(info)
-        fattest = max(trees.values(), key=lambda tree: sum(i.rss_bytes for i in tree))
-        return max(fattest, key=lambda info: info.rss_bytes).pid
+        # Name the tree's ROOT, not its fattest member: execute() re-walks from this pid with the live provider,
+        # and a short-lived child can exit during the seconds the scan takes -- the whole kill was then skipped
+        # while the tree still held the memory. The root's own walk returns itself.
+        return max(trees, key=lambda root: sum(i.rss_bytes for i in trees[root]))
 
     def _eligible(self, candidates: Iterable[ProcInfo], protected: frozenset[int]) -> list[ProcInfo]:
         return [

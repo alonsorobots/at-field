@@ -1281,3 +1281,44 @@ class TestMemoryRuleRanksWholeKillTrees:
         provider.procs[55804].rss = 60 * GB          # now the viewer outweighs the slot's ~45.5 GB
         report = actuator.execute(_action("kill", signal="system.ram_used_percent"))
         assert report.kill_root is not None and report.kill_root.pid == 55804, report
+
+    def test_two_slots_under_one_protected_worker_rank_as_two_trees(self, tmp_path):
+        """Review F2: the walk that groups processes must stop below the protected worker, or every slot under it
+        is one tree and the wrong slot dies. Slot B (ten 1 GB children) holds more than slot A (one 5 GB child)."""
+        procs = [
+            _FakeProc(pid=10, ppid=0, name="explorer.exe"),
+            _FakeProc(pid=900, ppid=10, name="python.exe", rss=6 * GB, cmdline=("python.exe", "viewer.py")),
+            _FakeProc(pid=1000, ppid=10, name="pythonw.exe", rss=200_000_000, create_time=1000.0,
+                      cmdline=("pythonw.exe", "-m", "kiroshi", "join")),
+            _FakeProc(pid=2000, ppid=1000, name="python.exe", rss=50_000_000, cmdline=("python.exe", "slotA")),
+            _FakeProc(pid=2001, ppid=2000, name="python.exe", rss=5 * GB),
+            _FakeProc(pid=3000, ppid=1000, name="python.exe", rss=50_000_000, cmdline=("python.exe", "slotB")),
+            *[_FakeProc(pid=3100 + i, ppid=3000, name="python.exe", rss=GB) for i in range(10)],
+        ]
+        provider = FakeProvider.from_procs(procs)
+        _write_manifest(tmp_path, "worker-1000.json", pid=1000, role="worker", name="kiroshi",
+                        started_at=1000.0, atfield_never_kill=True)
+        actuator = Actuator(_cfg(tmp_path, killable_names=("python.exe", "pythonw.exe")),
+                            provider=provider, sleep=lambda _s: None)
+        report = actuator.execute(_action("kill", signal="system.commit_percent"))
+        assert report.kill_root is not None and report.kill_root.pid == 3000, report.kill_root
+        touched = set(provider.terminated) | set(provider.killed)
+        assert not touched & {900, 1000, 2000, 2001}, touched
+
+    def test_the_offender_named_is_the_tree_root_not_a_short_lived_child(self, tmp_path):
+        """Review F3: execute() re-walks from the chosen pid with the live provider. A 1.5 GB child can exit in the
+        seconds the scan takes, and then the whole kill is skipped while the slot still holds 45 GB. Name the
+        tree's root (long-lived; its own walk returns itself), and the kill still lands when a child is gone."""
+        actuator, provider = self._rig(tmp_path)
+        assert actuator._pick_offender(None, axis="memory", protected=actuator._protected_pids()) == 111056
+        scan = provider.list_all
+
+        def scan_then_children_exit():
+            table = scan()                                  # the scan sees all 30 children ...
+            for i in range(30):
+                provider.procs[40000 + i].alive = False     # ... which exit before execute() walks the tree
+            return table
+
+        provider.list_all = scan_then_children_exit
+        report = actuator.execute(_action("kill", signal="system.commit_percent"))
+        assert report.kill_root is not None and report.kill_root.pid == 111056, report
