@@ -264,3 +264,21 @@ def test_an_offender_still_pays_for_the_full_facts():
     assert reports and 500 in prov.killed
     assert prov.full_scans >= 1, "killed without consulting the protected set"
     assert 500 in prov.cmdline_fetched, "killed without reading its cmdline"
+
+
+def test_the_REAL_lean_scan_sees_processes():
+    """2026-10-25: PsutilProvider.list_all_lean built ProcInfo(created_at=...) -- no such field -- so every process
+    raised inside its try and was skipped: the scan returned [] and the per-process RSS cap had seen nothing since
+    780e5d6 (2026-09-08). Every test above uses a fake list_all_lean, so none could catch it. This one reads the
+    real table: it must contain this test process, with its real ppid, RSS and start time.
+
+    # MUTATION: restore created_at=created -> red (an empty scan)
+    """
+    import os
+
+    from atfield.actuator import PsutilProvider
+
+    lean = PsutilProvider().list_all_lean()
+    me = [p for p in lean if p.pid == os.getpid()]
+    assert me, "the lean scan does not contain this very process (%d entries)" % len(lean)
+    assert me[0].ppid == os.getppid() and me[0].rss_bytes > 0 and me[0].create_time > 0, me[0]

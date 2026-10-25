@@ -1237,3 +1237,47 @@ class TestKillImmediateReportsTruthfully:
         results = actuator._kill_immediate([provider._to_info(provider.procs[10])])
         assert results[0].survived is False
         assert sum(slept) < actuator._REAP_TIMEOUT_S, "should exit as soon as it is gone"
+
+
+class TestMemoryRuleRanksWholeKillTrees:
+    """2026-10-25 03:47, Chronos: pagefile-pressure at 99.7 % commit killed a ~3 GB viewer server while the memory
+    sat in ONE Kiroshi slot -- a codebook build fanning out 30 children of ~1.5 GB each under a protected
+    (atfield_never_kill) worker. Ranking single processes by RSS can never see memory spread over many small
+    processes; the kill takes a whole tree, so a memory rule must rank whole kill trees by their summed RSS.
+
+    # MUTATION: rank single processes again (max over eligible by rss) -> the first test red; the second guards
+    # the other direction (summing must not let a small tree beat one genuinely fat process)
+    """
+
+    def _rig(self, tmp_path):
+        procs = [
+            _FakeProc(pid=10, ppid=0, name="explorer.exe"),
+            _FakeProc(pid=55804, ppid=10, name="python.exe", rss=3 * GB,
+                      cmdline=("python.exe", "seamless_viewer_server.py", "--port", "8767")),
+            _FakeProc(pid=122456, ppid=10, name="pythonw.exe", rss=200_000_000, create_time=1000.0,
+                      cmdline=("pythonw.exe", "-m", "kiroshi", "join")),
+            _FakeProc(pid=111056, ppid=122456, name="python.exe", rss=100_000_000, cmdline=("python.exe", "slot")),
+            _FakeProc(pid=35332, ppid=111056, name="python.exe", rss=400_000_000,
+                      cmdline=("python.exe", "build_codebook_ps.py", "--workers", "30")),
+            *[_FakeProc(pid=40000 + i, ppid=35332, name="python.exe", rss=int(1.5 * GB)) for i in range(30)],
+        ]
+        provider = FakeProvider.from_procs(procs)
+        _write_manifest(tmp_path, "worker-122456.json", pid=122456, role="worker", name="kiroshi",
+                        started_at=1000.0, atfield_never_kill=True)
+        cfg = _cfg(tmp_path, killable_names=("python.exe", "pythonw.exe"))
+        return Actuator(cfg, provider=provider, sleep=lambda _s: None), provider
+
+    def test_the_slot_holding_the_memory_dies_not_the_biggest_single_process(self, tmp_path):
+        actuator, provider = self._rig(tmp_path)
+        report = actuator.execute(_action("kill", signal="system.commit_percent"))
+        assert report.kill_root is not None and report.kill_root.pid == 111056, report
+        touched = set(provider.terminated) | set(provider.killed)
+        assert 55804 not in touched, "the viewer was not what held the memory"
+        assert 122456 not in touched, "the protected worker survives"
+        assert {111056, 35332, 40000, 40029} <= touched, "the whole slot subtree goes"
+
+    def test_a_single_fat_process_still_wins_over_a_smaller_tree(self, tmp_path):
+        actuator, provider = self._rig(tmp_path)
+        provider.procs[55804].rss = 60 * GB          # now the viewer outweighs the slot's ~45.5 GB
+        report = actuator.execute(_action("kill", signal="system.ram_used_percent"))
+        assert report.kill_root is not None and report.kill_root.pid == 55804, report

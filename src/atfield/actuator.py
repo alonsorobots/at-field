@@ -344,7 +344,7 @@ class PsutilProvider:
                         created = 0.0
                 out.append(ProcInfo(pid=p.pid, ppid=ppid, name=name,
                                     cmdline=(), rss_bytes=rss,
-                                    created_at=created))
+                                    create_time=created))
             except Exception:
                 continue
         return out
@@ -527,6 +527,27 @@ def processes_over_rss_cap(
         return []
     over = [p for p in processes if p.rss_bytes > cap_bytes]
     return sorted(over, key=lambda p: p.rss_bytes, reverse=True)
+
+
+class _TableProvider:
+    """``get`` / ``parent`` over a process table already in hand, for ranking whole kill trees without one more
+    psutil call (each re-reads a cmdline, ~1.7 ms) per ancestor while the machine is at the memory wall. A parent
+    that started after its child is a recycled PID, not the parent (psutil's own ``parent()`` check)."""
+
+    def __init__(self, procs: Iterable[ProcInfo]) -> None:
+        self._by = {p.pid: p for p in procs}
+
+    def get(self, pid: int) -> ProcInfo | None:
+        return self._by.get(pid)
+
+    def parent(self, pid: int) -> ProcInfo | None:
+        child = self._by.get(pid)
+        par = None if child is None else self._by.get(child.ppid)
+        if par is None or par.pid == child.pid:
+            return None
+        if par.create_time and child.create_time and par.create_time > child.create_time:
+            return None
+        return par
 
 
 def find_kill_root(
@@ -1305,8 +1326,12 @@ class Actuator:
         * ``"cpu"`` -- measured busy-ness. Required for CPU/thermal rules: a
           compute loop can hold almost no memory, so RSS ranking overlooks it
           entirely and picks the fattest idle process instead.
-        * ``"memory"`` -- RSS, correct for RAM/commit/pagefile rules and a
-          reasonable proxy within an already GPU-attributed candidate set.
+        * ``"memory"`` -- RSS summed over each KILL TREE (the candidates that
+          ``find_kill_root`` maps to the same root), and the fattest tree wins.
+          The kill takes a whole tree, so the ranking must too: 2026-10-25 a
+          pagefile rule at 99.7 % commit killed a 3 GB viewer while 45 GB sat in
+          ONE job slot spread over 30 children of 1.5 GB each, invisible to a
+          per-process ranking.
 
         Returns None if nothing is eligible, and ``execute()`` logs a miss.
         """
@@ -1331,7 +1356,19 @@ class Actuator:
             # candidate exited); fall through to RSS rather than doing nothing.
             _log.warning("cpu-axis offender ranking unavailable, falling back to RSS")
 
-        return max(eligible, key=lambda info: info.rss_bytes).pid
+        table = _TableProvider(candidates) if candidate_pids is None else self._provider
+        trees: dict[int, list[ProcInfo]] = {}
+        for info in eligible:
+            root = find_kill_root(
+                info.pid,
+                provider=table,
+                killable_names=self._killable,
+                launcher_names=self._launchers,
+                protected_pids=protected,
+            )
+            trees.setdefault(root.pid if root is not None else info.pid, []).append(info)
+        fattest = max(trees.values(), key=lambda tree: sum(i.rss_bytes for i in tree))
+        return max(fattest, key=lambda info: info.rss_bytes).pid
 
     def _eligible(self, candidates: Iterable[ProcInfo], protected: frozenset[int]) -> list[ProcInfo]:
         return [

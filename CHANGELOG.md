@@ -7,6 +7,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.25] — 2026-10-25 — a memory rule kills the job holding the memory
+
+### Fixed
+
+- **Memory rules ranked single processes, so memory spread over many children was invisible** (was issue #3).
+  2026-10-25 03:47 on Chronos, `pagefile-pressure` fired at 99.7 % commit and killed a ~3 GB viewer server
+  while ~45 GB sat in ONE Kiroshi slot: a codebook build fanning out 30 children of ~1.5 GB each under a
+  protected (`atfield_never_kill`) worker. The kill takes a whole tree, so the ranking now does too: RSS is
+  summed over each kill tree (the candidates `find_kill_root` maps to the same root, stopping below a
+  protected client) and the fattest tree dies. A single process fatter than any tree still wins. The trees are
+  walked over the process table the scan already returned (no extra psutil call per ancestor: < 1 ms for
+  472 processes on Chronos); a parent that started after its child is a recycled PID, as in psutil.
+- **The per-process RSS cap had seen no process since 0.4.15.** `PsutilProvider.list_all_lean()` built
+  `ProcInfo(created_at=...)` -- no such field -- so every process raised inside its `try` and was skipped:
+  the scan returned `[]` (measured live: 0 of 472). Every test of the cap used a fake `list_all_lean`. A new
+  test reads the real table and must find its own process with its real ppid, RSS and start time.
+
+### Known
+
+- A memory kill still spends 2.3 s (warm) to 10 s (cold) in the full `list_all()` scan before choosing,
+  measured on Chronos with 472 processes -- unchanged by this release; worth a lean-first scan like the cap's.
+
 ## [0.4.24] — 2026-10-24 — system.page_fault_rate
 
 ### Added
