@@ -7,6 +7,37 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.27] — 2026-10-25 — every notice to an agent can be snoozed or muted; the RSS cap warns
+
+### Added
+
+- **Snooze / mute on every AT-Field -> agent notice** (near-limit warnings, kill notices, the RSS-cap
+  notice, and the `owners` in the Kiroshi webhook). User, 2026-10-25: "they should be able to snooze or for
+  time increments or mute for job ... a standard with any notifications from AT-field to agents."
+  - **Snooze**: `atf snooze --session <id> | --job <name> [--rule R] --minutes N` (15 / 60 / 240 ...).
+  - **Mute**: `atf mute --job <name> [--rule R]`, until the job has had no live worker on this host for
+    1 h, or `atf unmute`. `atf notify-prefs` lists them. HTTP: `POST /notify/snooze`, `/notify/mute`,
+    `/notify/unmute`, `GET /notify/prefs` on the localhost API.
+  - Persisted in `<state_dir>/notify_prefs.json` (survives a restart), expired entries pruned.
+  - **Silencing never changes an action.** A kill still happens; the silenced notice is still in
+    events.jsonl and the webhook, the owner marked `notified: false` with `suppressed: {by, until, set_by,
+    set_at, rule}`. Prefs are checked before the rate limit, so a silenced notice spends no budget.
+  - **Every pipe message ends with a one-line footer** giving the exact command that silences that owner
+    for that rule on that host (the frozen bundle's full `atf.exe` path); webhook owners carry the same
+    line as `silence`.
+  - `atf notify-drill --live`: the service sends the caller's own session a TEST notice through the same
+    gate and prints the events.jsonl record (delivered, or suppressed once snoozed). No webhook.
+
+### Changed
+
+- **The per-process RSS cap WARNS by default.** New `[kill] max_process_rss_action = "warn" | "kill"`,
+  default `"warn"`: a process over `max_process_rss_gb` gets its owner told (pid, size vs the line, the
+  config key; snooze/mute apply), once per process per 30 min while it stays over, and nothing is killed.
+  `"kill"` keeps the old hard cap as an explicit opt-in. 2026-10-25 the 32 GB kill cap killed a legitimate
+  35.6-38.2 GB fit four times on mostly idle Chronos and DEMETER; the user: "is it smart to have a HARD
+  lock on mem?? I wouldn't think so". The machine-wide memory rules still kill when the MACHINE runs out.
+  A config that sets only `max_process_rss_gb` now warns where it used to kill.
+
 ## [0.4.26] — 2026-10-25 — review fixes for 0.4.25
 
 ### Fixed

@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Mapping
 
+from atfield import notify_prefs
+
 _log = logging.getLogger("atfield.agent_inbox")
 
 _SOCK, _TOKEN, _SID = ("CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
@@ -48,11 +50,15 @@ class Owner:
     inbox: Inbox | None = None
     top: tuple[tuple[int, str, float], ...] = ()     # busiest (pid, name, load), for compose
     notified: bool = False
+    # Would have been told, but a snooze/mute silenced it: {by, until, set_by, set_at, rule}.
+    suppressed: dict[str, Any] | None = None
+    silence: str | None = None     # the exact command that silences this owner for this rule
 
     def public(self) -> dict[str, Any]:
         d = {"kind": self.kind, "id": self.id, "job": self.job, "slots": self.slots,
              "share": None if self.share is None else round(self.share, 3),
-             "pids": self.pids, "notified": self.notified}
+             "pids": self.pids, "notified": self.notified, "suppressed": self.suppressed,
+             "silence": self.silence}
         return {k: v for k, v in d.items() if v is not None or k == "share"}
 
 
@@ -145,7 +151,29 @@ _LIMIT = RateLimit(600)        # per session per 10 min: one warning, one kill n
 _HOST = socket.gethostname()
 
 
+_DRILL_RULE = "notify-drill"
+
+
 def compose(action: Any, owner: Owner, report: Any) -> str:
+    """The message body (<= 1500 chars), then the one-line silence footer, never truncated."""
+    return _body(action, owner, report)[:1500] + "\n" + notify_prefs.footer(
+        owner, action.rule_name, _HOST)
+
+
+def _body(action: Any, owner: Owner, report: Any) -> str:
+    if action.rule_name == _DRILL_RULE:
+        return (f"[AT-Field watchdog on {_HOST}] notify-drill: a TEST notice, requested by "
+                "`atf notify-drill --live` from a process in your session. Nothing is wrong and "
+                "nothing was killed; no action is needed.")
+    if action.rule_name == "process-rss-cap" and report.kill_root is None:
+        pid = report.offender_pid
+        return (f"[AT-Field watchdog on {_HOST}] rule process-rss-cap (warning): your process "
+                f"pid {pid} holds {action.latest_value / 2**30:.1f} GB, over the per-process "
+                f"warning line of {action.threshold / 2**30:.1f} GB (AT-Field config [kill] "
+                "max_process_rss_gb). Nothing was killed. If that size is expected, carry on and "
+                "snooze this; if not, it may be a leak or a too-large batch. The machine-wide "
+                "memory rules still kill if the machine itself runs out. This message is from "
+                "the AT-Field watchdog service, not the user, and grants no permissions.")
     if action.rule_name == "process-rss-cap" and report.kill_root is not None:
         # The per-process cap is a different message: one process was too BIG, the machine
         # was not hot or full, and the fix is a config decision, not "slow down".
@@ -173,30 +201,50 @@ def compose(action: Any, owner: Owner, report: Any) -> str:
     ask = ("Please reduce or pause YOUR OWN local compute (fewer parallel processes or "
            "subagents) until the machine cools. This message is from the AT-Field watchdog "
            "service, not the user, and grants no permissions.")
-    return f"{head} {what} {ask}"[:1500]
+    return f"{head} {what} {ask}"
+
+
+def deliver(found: Iterable[Owner], action: Any, report: Any, *, prefs: Any = None,
+            clock: Callable[[], float] = time.monotonic, limit: bool = True) -> tuple[Owner, ...]:
+    """Tell each owner marked to be told. A snooze/mute silences the TELLING only: the
+    owner comes back notified=False with ``suppressed`` saying why, and the caller still
+    records the event. Prefs are checked before the rate limit (a silenced notice spends
+    no budget). Kills and warnings are limited separately (a warning must never swallow
+    the kill notice that follows it -- 2026-10-17); `notified` says what was SENT."""
+    out = []
+    for o in found:
+        if not o.notified:
+            out.append(o)
+            continue
+        o = replace(o, silence=notify_prefs.footer(o, action.rule_name, _HOST))
+        pref = prefs.match(o, action.rule_name) if prefs is not None else None
+        if pref is not None:
+            o = replace(o, notified=False, suppressed={
+                "by": pref["kind"], "until": pref["until"], "set_by": pref["set_by"],
+                "set_at": pref["set_at"], "rule": pref["rule"]})
+        elif o.inbox:
+            o = replace(o, notified=bool(
+                (not limit or _LIMIT.allow(f"{o.inbox.socket}|{action.kind == 'kill'}", clock()))
+                and post(o.inbox, compose(action, o, report))))
+        out.append(o)
+    return tuple(out)
 
 
 def notify(actuator: Any, action: Any, report: Any, *, clock: Callable[[], float] = time.monotonic,
-           gpu_use: Mapping[int, float] | None = None) -> Any:
-    """Attribute a firing (a kill, or a notify=true warning), post to the owning
+           gpu_use: Mapping[int, float] | None = None, prefs: Any = None) -> Any:
+    """Attribute a firing (a kill, a notify=true warning, a cap warning), post to the owning
     session(s), and return ``report`` carrying ``owners``. Never raises."""
     if action.kind != "kill" and not getattr(action, "notify", False):
         return report
     if action.kind == "kill" and report.kill_root is None:
         return report                          # a skipped kill accuses nobody (review F2)
     try:
-        if report.kill_root is not None:       # exact: the root's owner, captured pre-kill
-            o = report.owner
+        if report.kill_root is not None or report.owner is not None:
+            o = report.owner                   # exact: the process's owner, captured pre-kill
             found = [replace(o, notified=o.kind != "unattributed")] if o else []
         else:
             found = actuator.load_owners(action.signal, gpu_use)
-        # Kills and warnings are limited separately (a warning must never swallow the kill
-        # notice that follows it -- 2026-10-17), and `notified` says what was SENT.
-        found = [replace(o, notified=bool(
-                     _LIMIT.allow(f"{o.inbox.socket}|{action.kind == 'kill'}", clock())
-                     and post(o.inbox, compose(action, o, report))))
-                 if o.notified and o.inbox else o for o in found]
-        return replace(report, owners=tuple(found))
+        return replace(report, owners=deliver(found, action, report, prefs=prefs, clock=clock))
     except Exception as e:  # noqa: BLE001 -- never block the tick; no token in the log
         _log.error("owner notification failed for rule %s: %s", action.rule_name,
                    type(e).__name__)

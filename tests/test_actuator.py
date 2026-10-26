@@ -994,7 +994,8 @@ class TestRssCapEnforcement:
     def _actuator(self, edges, cap_gb):
         provider = FakeProvider.from_tree(edges)
         cfg = default_config()
-        cfg = replace(cfg, kill=replace(cfg.kill, max_process_rss_gb=cap_gb))
+        cfg = replace(cfg, kill=replace(cfg.kill, max_process_rss_gb=cap_gb,
+                                                  max_process_rss_action="kill"))
         return Actuator(cfg, provider=provider, sleep=lambda _s: None), provider
 
     def test_off_by_default(self):
@@ -1162,7 +1163,8 @@ class TestFutilityDecaysAndAppliesToBothKillPaths:
         setup = TestOwnerEscalation()
         actuator, provider, clients = setup._setup(tmp_path)
         cfg = replace(
-            actuator._cfg, kill=replace(actuator._cfg.kill, max_process_rss_gb=8.0)
+            actuator._cfg, kill=replace(actuator._cfg.kill, max_process_rss_gb=8.0,
+                                                          max_process_rss_action="kill")
         )
         actuator._cfg = cfg
         # Advance the clock between scans: the cap rate-limits its process walk
@@ -1183,7 +1185,8 @@ class TestFutilityDecaysAndAppliesToBothKillPaths:
         setup = TestOwnerEscalation()
         actuator, provider, clients = setup._setup(tmp_path)
         actuator._cfg = replace(
-            actuator._cfg, kill=replace(actuator._cfg.kill, max_process_rss_gb=8.0)
+            actuator._cfg, kill=replace(actuator._cfg.kill, max_process_rss_gb=8.0,
+                                                          max_process_rss_action="kill")
         )
         # See the note above: two separate scans need two separate times.
         now = 10 * 1_000_000_000

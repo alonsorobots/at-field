@@ -74,7 +74,7 @@ def _provider(n=N_PROCESSES, hog_gb=0):
 def _cfg(**kill):
     return load_config_from_dict({
         "general": {"tick_hz": 1},
-        "kill": {"max_process_rss_gb": 32.0, **kill},
+        "kill": {"max_process_rss_gb": 32.0, "max_process_rss_action": "kill", **kill},
         "rules": [{
             "name": "cpu-pkg-hot",
             "signal": "system.cpu_package_temp_c",

@@ -506,6 +506,9 @@ RSS_CAP_RULE = "process-rss-cap"
 # guard it was suppressing is the one that protects the whole machine, so the
 # trade is not close.
 _RSS_CAP_MIN_INTERVAL_S = 5.0
+# warn mode: re-tell the owner of a process still over the line this often (snooze/mute
+# silence it sooner; the repeat is what makes a long-lived oversized process visible).
+_RSS_WARN_REPEAT_S = 1800.0
 
 
 def processes_over_rss_cap(
@@ -673,6 +676,7 @@ class Actuator:
         # Last time the RSS cap walked the process table (see
         # _RSS_CAP_MIN_INTERVAL_S). Monotonic ns; 0 means "never, run now".
         self._last_rss_cap_ns = 0
+        self._rss_warned: dict[tuple[int, Any], int] = {}   # (pid, create_time) -> last warned
 
         # Throttle action support: tracks PIDs we've suspended so we can
         # resume them on shutdown (a service crash mid-throttle would
@@ -773,6 +777,9 @@ class Actuator:
                 candidates.append(full)
 
         reports: list[KillReport] = []
+        if self._cfg.kill.max_process_rss_action != "kill":
+            return self._warn_rss_cap(processes_over_rss_cap(candidates, cap_bytes), cap_bytes,
+                                      now_mono_ns)
         for offender in processes_over_rss_cap(candidates, cap_bytes):
             action = Action(
                 kind="kill",
@@ -825,6 +832,39 @@ class Actuator:
             )
         return reports
 
+
+    def _warn_rss_cap(self, over: list[ProcInfo], cap_bytes: int,
+                      now_ns: int) -> list[KillReport]:
+        """``max_process_rss_action = "warn"`` (the default): tell the owner, kill nothing.
+        One notice per process per ``_RSS_WARN_REPEAT_S`` while it stays over the line."""
+        repeat_ns = int(_RSS_WARN_REPEAT_S * 1_000_000_000)
+        live = {(o.pid, o.create_time) for o in over}
+        self._rss_warned = {k: t for k, t in self._rss_warned.items() if k in live}
+        reports: list[KillReport] = []
+        for offender in over:
+            key = (offender.pid, offender.create_time)
+            last = self._rss_warned.get(key)
+            if last is not None and now_ns - last < repeat_ns:
+                continue
+            self._rss_warned[key] = now_ns
+            action = Action(
+                kind="log", rule_name=RSS_CAP_RULE, base_rule_name=RSS_CAP_RULE,
+                signal="process.rss_bytes", threshold=float(cap_bytes), fraction_over=1.0,
+                samples_considered=1, latest_value=float(offender.rss_bytes),
+                triggered_at_ns=now_ns, cooldown_seconds=0, notify=True,
+            )
+            ancestors = self._ancestors(offender.pid)
+            owner = self._owner_of(offender, ancestors)
+            _log.warning(
+                "process-rss-cap (warn): pid=%s name=%s holds %.1f GB (line %.1f GB); "
+                "telling its owner, killing nothing", offender.pid, offender.name,
+                offender.rss_bytes / (1024 ** 3), cap_bytes / (1024 ** 3))
+            reports.append(KillReport(
+                action=action, offender_pid=offender.pid, kill_root=None,
+                skipped_reason='warn only (kill.max_process_rss_action = "warn")',
+                finished_at_ns=int(time.monotonic_ns()), ancestors=ancestors,
+                owner=owner and replace(owner, pids=1)))
+        return reports
 
     def _ancestors(self, pid: int, cap: int = 16) -> tuple[tuple[int, str], ...]:
         """(pid, name) of pid's parent, grandparent, ... up to ``cap`` levels."""
@@ -1072,6 +1112,18 @@ class Actuator:
         except Exception:  # noqa: BLE001
             _log.exception("kill-root owner attribution failed")
             return None
+
+    def owner_of_pid(self, pid: int) -> Any:
+        """Who a notice about ``pid`` would address (the notify drill). None if gone."""
+        self._protected_pids()                 # refresh the worker manifests
+        info = self._provider.get(pid)
+        return None if info is None else self._owner_of(info, self._ancestors(pid))
+
+    def live_worker_jobs(self) -> set[str]:
+        """Jobs carried by a live Kiroshi worker on this host (ends a job mute)."""
+        manifests = live_manifests(self._cfg.general.state_dir, provider=self._provider)
+        return {j for _p, d in manifests.values() if d.get("role") == "worker"
+                for j in [agent_inbox.worker_owner(d).job] if j}
 
     def load_owners(self, signal: str, gpu_use: Mapping[int, float] | None = None) -> list[Any]:
         """Ranked owners of the killable load on ``signal``'s axis. Reads env of the

@@ -17,6 +17,6 @@ imported on demand by the CLI (``atfield.cli``) and the service entrypoint
 
 from __future__ import annotations
 
-__version__ = "0.4.26"
+__version__ = "0.4.27"
 
 __all__ = ["__version__"]

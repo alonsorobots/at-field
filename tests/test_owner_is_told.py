@@ -67,7 +67,8 @@ WORKER = {"pid": 500, "role": "worker", "name": "kiroshi", "atfield_never_kill":
           "launch_command": "kiroshi join --task t:run --slots 22 --job handgap-v2"}
 
 
-def run(tmp_path, monkeypatch, procs, value, *rules, manifest=None, delivered=True, ticks=15):
+def run(tmp_path, monkeypatch, procs, value, *rules, manifest=None, delivered=True, ticks=15,
+        limit_s=600, provider_out=None):
     """One run_service pass; returns (posts, webhook payloads, events.jsonl text)."""
     state = tmp_path / "state"
     if manifest:
@@ -75,6 +76,8 @@ def run(tmp_path, monkeypatch, procs, value, *rules, manifest=None, delivered=Tr
         d.mkdir(parents=True)
         (d / "worker-500.json").write_text(json.dumps(manifest), encoding="utf-8")
     provider = FakeProvider.from_procs(procs)
+    if provider_out is not None:
+        provider_out.append(provider)
 
     class Hot:
         name = "fake"
@@ -99,7 +102,7 @@ def run(tmp_path, monkeypatch, procs, value, *rules, manifest=None, delivered=Tr
                                                               sleep=lambda _s: None))
     monkeypatch.setattr(ai, "post", lambda inbox, text, **kw:
                         posts.append((inbox.session_id, text)) or delivered)
-    monkeypatch.setattr(ai, "_LIMIT", ai.RateLimit(600))
+    monkeypatch.setattr(ai, "_LIMIT", ai.RateLimit(limit_s))
     monkeypatch.setattr(reporter, "_webhooks", lambda sd: ["http://x/atfield/event"])
     monkeypatch.setattr(reporter, "_ensure_worker", lambda: None)
 
@@ -113,6 +116,11 @@ def run(tmp_path, monkeypatch, procs, value, *rules, manifest=None, delivered=Tr
     svc.run_service(config_path=cfg, state_dir=state, max_ticks=ticks)
     events = (state / "events.jsonl").read_text(encoding="utf-8")
     return posts, [p for p in sent if p.get("type") == "kill_report"], events
+
+
+def without_silence(o):
+    """The owner dict minus its `silence` command line (pinned in test_notices_can_be_snoozed)."""
+    return {k: v for k, v in o.items() if k != "silence"}
 
 
 def owners_of(payloads, rule_name):
@@ -154,7 +162,7 @@ def test_both_case_flip_worker_ahead_gets_no_pipe_post(tmp_path, monkeypatch):
                              manifest=WORKER)
     assert posts == []
     (p,) = [p for p in payloads if p["rule"] == "cpu-pkg-warm"]
-    assert p["owners"][0] == {"kind": "kiroshi_worker", "id": "DEMETER-4c030c",
+    assert without_silence(p["owners"][0]) == {"kind": "kiroshi_worker", "id": "DEMETER-4c030c",
                               "job": "handgap-v2", "slots": 22, "share": 0.667, "pids": 3,
                               "notified": True}
     assert [o["id"] for o in p["owners"]] == ["DEMETER-4c030c", "aaaaaaaa", "bbbbbbbb"]
@@ -168,7 +176,7 @@ def test_a_kill_tells_the_killed_roots_session(tmp_path, monkeypatch):
     assert [sid for sid, _ in posts] == ["bbbbbbbb-2222"]
     assert "killed" in posts[0][1]
     (p,) = payloads
-    assert p["owners"] == [{"kind": "claude_session", "id": "bbbbbbbb", "share": None,
+    assert [without_silence(o) for o in p["owners"]] == [{"kind": "claude_session", "id": "bbbbbbbb", "share": None,
                             "pids": 1, "notified": True}]
 
 

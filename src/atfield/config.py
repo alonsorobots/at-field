@@ -192,6 +192,13 @@ class KillConfig:
     # and a cap is only meaningful against a known workload shape. Set it per
     # machine, above anything you expect to run and below what would hurt.
     max_process_rss_gb: float = 0.0
+    # What crossing it DOES (0.4.27). "warn" (default): tell the process's owner (a Claude
+    # session by pipe, a Kiroshi job via the webhook), with snooze/mute, and kill nothing.
+    # "kill": the legacy hard cap, explicit opt-in only. 2026-10-25 the 32 GB kill cap
+    # killed a legitimate 35.6-38.2 GB fit four times on mostly idle machines; the user:
+    # "is it smart to have a HARD lock on mem?? I wouldn't think so". The machine-wide
+    # memory RULES still kill when the machine itself runs out.
+    max_process_rss_action: Literal["warn", "kill"] = "warn"
 
     # Above this system-RAM percentage, kill IMMEDIATELY instead of granting
     # grace_seconds. 0 disables. Graceful termination is right at the threshold
@@ -626,7 +633,7 @@ def _parse_kill(raw: Any, base: KillConfig, source: str) -> KillConfig:
     _check_unknown_keys(
         table,
         {"mode", "grace_seconds", "post_kill_cooldown_seconds", "throttle_duration_seconds",
-         "max_process_rss_gb", "hard_ceiling_percent"},
+         "max_process_rss_gb", "max_process_rss_action", "hard_ceiling_percent"},
         "kill",
         source,
     )
@@ -656,6 +663,12 @@ def _parse_kill(raw: Any, base: KillConfig, source: str) -> KillConfig:
         if gb < 0:
             raise ConfigError(f"{source}: kill.max_process_rss_gb must be >= 0, got {gb}")
         out = replace(out, max_process_rss_gb=gb)
+    if "max_process_rss_action" in table:
+        act = _as_str(table["max_process_rss_action"], "kill.max_process_rss_action", source)
+        if act not in ("warn", "kill"):
+            raise ConfigError(f"{source}: kill.max_process_rss_action must be \"warn\" or "
+                              f"\"kill\", got {act!r}")
+        out = replace(out, max_process_rss_action=act)  # type: ignore[arg-type]
     if "hard_ceiling_percent" in table:
         pct = _as_number(table["hard_ceiling_percent"], "kill.hard_ceiling_percent", source)
         if not (0 <= pct <= 100):

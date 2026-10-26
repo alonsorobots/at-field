@@ -11,10 +11,10 @@ import json
 
 from atfield.actuator import RSS_CAP_RULE
 from tests.test_actuator import _FakeProc
-from tests.test_owner_is_told import SA, SB, TOKEN, WORKER, run
+from tests.test_owner_is_told import SA, SB, TOKEN, WORKER, run, without_silence
 
 GB = 1024 ** 3
-CAP = "[kill]\nmax_process_rss_gb = 32.0"
+CAP = "[kill]\nmax_process_rss_gb = 32.0\nmax_process_rss_action = \"kill\""   # the opt-in legacy mode
 
 
 def procs_session_hog():
@@ -41,7 +41,7 @@ def test_a_cap_kill_tells_the_owning_session_why(tmp_path, monkeypatch):
     # the WHY, in the units a reader acts on -- not a raw byte count and a "cool down" ask
     assert "38.0 GB" in text and "32.0 GB" in text and "max_process_rss_gb" in text
     assert "cools" not in text
-    assert caps[0]["owners"] == [{"kind": "claude_session", "id": "aaaaaaaa", "share": None,
+    assert [without_silence(o) for o in caps[0]["owners"]] == [{"kind": "claude_session", "id": "aaaaaaaa", "share": None,
                                   "pids": 1, "notified": True}]
     assert TOKEN not in events and TOKEN not in json.dumps(payloads)
 

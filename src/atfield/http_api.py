@@ -263,6 +263,10 @@ class ServiceState:
         self._tick_count: int = 0
         self._paused_until_unix: float = 0.0  # 0 == not paused
         self._reload_requested = False
+        # Snooze/mute store (agent notifications), set by the service; drill requests
+        # (pids of `atf notify-drill --live` processes) for the tick loop to serve.
+        self.notify_prefs: Any = None
+        self._drills: list[int] = []
 
         # Latest sample per signal, with wall-clock when the tick loop saw it.
         # value: (unix_ts: float, value: float, source_id: str, unit: str)
@@ -412,6 +416,15 @@ class ServiceState:
                 self._reload_requested = False
                 return True
             return False
+
+    def request_drill(self, pid: int) -> None:
+        with self._lock:
+            self._drills = [*self._drills[-7:], pid]
+
+    def consume_drills(self) -> list[int]:
+        with self._lock:
+            out, self._drills = self._drills, []
+            return out
 
     # Internal: HTTP handler calls this when /reload comes in.
     def _request_reload(self) -> None:
@@ -1321,6 +1334,9 @@ def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
                     limit = max(1, min(_EVENTS_MAX_LIMIT, limit))
                     events = _tail_events(state.events_path(), since=since, limit=limit)
                     self._send_json({"events": events, "count": len(events)})
+                elif path == "/notify/prefs":
+                    prefs = state.notify_prefs
+                    self._send_json({"prefs": prefs.snapshot() if prefs else []})
                 elif path == "/metrics":
                     # Prometheus text-exposition. Build all three snapshots
                     # under the state lock and hand them to the renderer.
@@ -1357,6 +1373,9 @@ def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
                     cleared = _clear_pause_sentinel(state.state_dir())
                     state.set_paused_until(0.0)
                     self._send_json({"paused": False, "cleared": cleared})
+                elif path in ("/notify/snooze", "/notify/mute", "/notify/unmute",
+                              "/notify/drill"):
+                    self._notify_post(path, body if isinstance(body, dict) else {})
                 elif path == "/reload":
                     state._request_reload()
                     self._send_json({"reload_queued": True})
@@ -1391,6 +1410,37 @@ def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
         # ------------------------------------------------------------------
         # Helpers
         # ------------------------------------------------------------------
+
+        def _notify_post(self, path: str, body: dict[str, Any]) -> None:
+            """Snooze / mute / unmute an owner's AT-Field notices, or queue a live drill.
+            Silencing changes who is TOLD, never what is done (see notify_prefs)."""
+            prefs = state.notify_prefs
+            if prefs is None:
+                self._send_error(HTTPStatus.SERVICE_UNAVAILABLE, "notify prefs not ready")
+                return
+            try:
+                if path == "/notify/snooze":
+                    out = {"snoozed": prefs.snooze(
+                        session=body.get("session"), job=body.get("job"),
+                        minutes=body.get("minutes"), rule=body.get("rule"), by=body.get("by"))}
+                elif path == "/notify/mute":
+                    if body.get("session"):
+                        raise ValueError("mute is per JOB; snooze a session for N minutes instead")
+                    out = {"muted": prefs.mute(job=body.get("job"), rule=body.get("rule"),
+                                               by=body.get("by"))}
+                elif path == "/notify/unmute":
+                    out = {"removed": prefs.unmute(session=body.get("session"),
+                                                   job=body.get("job"), rule=body.get("rule"))}
+                else:
+                    pid = body.get("pid")
+                    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                        raise ValueError("pid must be a positive integer")
+                    state.request_drill(pid)
+                    out = {"drill_queued": pid}
+            except ValueError as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._send_json(out)
 
         def _read_json_body(self) -> Any:
             length = int(self.headers.get("Content-Length") or 0)

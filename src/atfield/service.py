@@ -37,7 +37,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from atfield import __version__, agent_inbox
+from atfield import __version__, agent_inbox, notify_prefs
+from atfield.actuator import KillReport
 from atfield.actuator import Actuator, script_name_from_cmdline
 from atfield.audit import (
     EVENTS_FILENAME,
@@ -438,6 +439,25 @@ def record_on_health(api_state: ServiceState, action: Action,
         api_state.record_action(action)
 
 
+def notify_drill(actuator: Any, pid: int, prefs: Any) -> KillReport:
+    """A test notice to whoever owns ``pid``, through the same snooze/mute gate as a real
+    one (no rate limit, no webhook). Returned for events.jsonl; nothing is killed."""
+    from dataclasses import replace
+    now = time.monotonic_ns()
+    action = Action(kind="log", rule_name=agent_inbox._DRILL_RULE,
+                    base_rule_name=agent_inbox._DRILL_RULE, signal="drill", threshold=0.0,
+                    fraction_over=0.0, samples_considered=0, latest_value=0.0,
+                    triggered_at_ns=now, cooldown_seconds=0, notify=True)
+    owner = actuator.owner_of_pid(pid)
+    report = KillReport(action=action, offender_pid=pid, kill_root=None,
+                        skipped_reason="notify drill", finished_at_ns=now)
+    if owner is None:
+        return replace(report, skipped_reason="notify drill: pid not found")
+    found = [replace(owner, notified=owner.kind != "unattributed")]
+    return replace(report, owner=owner, owners=agent_inbox.deliver(
+        found, action, report, prefs=prefs, limit=False))
+
+
 def gpu_use_for(nvml: Any, signal: str, nvml_owned: set[str]) -> dict[int, float] | None:
     """{pid: mean SM %} a ``gpu.*`` rule targets by, or None (not a GPU rule / not
     measurable). An NVML signal reads its own device; an LHM signal's index cannot be
@@ -565,6 +585,10 @@ def run_service(
         config_path=Path(config_path) if config_path else None,
     )
     api_state.attach_engine(engine)
+    # Snooze / mute for every notice to an agent; persisted, so it survives this restart.
+    prefs = notify_prefs.NotifyPrefs(sd / notify_prefs.FILENAME)
+    api_state.notify_prefs = prefs
+    prefs_jobs_checked = 0.0
     # Optional collectors (e.g. third-party plugins) report "INACTIVE" rather
     # than "FAILED" when unavailable, so the dashboard reads them as "an
     # optional extra isn't active" instead of "something is broken". The
@@ -808,6 +832,17 @@ def run_service(
                         change.rule_name, change.signal, change.silent_for_s,
                     )
 
+            # Notice silencing: a job mute ends when the job has left this host; and serve
+            # `atf notify-drill --live` (same gate as a real notice; events.jsonl, no webhook).
+            try:
+                if time.monotonic() - prefs_jobs_checked >= 60.0:
+                    prefs_jobs_checked = time.monotonic()
+                    prefs.observe_jobs(actuator.live_worker_jobs())
+                for drill_pid in api_state.consume_drills():
+                    audit.write_kill_report(notify_drill(actuator, drill_pid, prefs))
+            except Exception:  # noqa: BLE001 -- bookkeeping must never stop the tick
+                _log.exception("notify prefs / drill failed")
+
             # Per-process cap, INDEPENDENT of any rule. The rules answer "is
             # the machine in danger", which is necessarily late; this asks "is
             # one process unreasonable", which is answerable while the machine
@@ -820,11 +855,13 @@ def run_service(
             if not observe_only and cfg.kill.max_process_rss_gb > 0:
                 try:
                     for cap_report in actuator.enforce_rss_cap():
-                        # Every kill tells its owner -- this path used to tell nobody, and
-                        # a 38 GB fit was killed 4x as "child failed rc=15" (2026-10-25).
-                        cap_report = agent_inbox.notify(actuator, cap_report.action, cap_report)
+                        # Tells the owner (warn mode: ONLY tells) -- this path used to tell
+                        # nobody, and a 38 GB fit was killed 4x as "child failed rc=15"
+                        # (2026-10-25).
+                        cap_report = agent_inbox.notify(actuator, cap_report.action, cap_report,
+                                                        prefs=prefs)
                         audit.write_kill_report(cap_report)
-                        api_state.record_action(cap_report.action)
+                        record_on_health(api_state, cap_report.action, engine.effective_rules)
                         report_kill(sd, action=cap_report.action, report=cap_report)
                 except Exception:  # noqa: BLE001
                     # A bookkeeping failure here must never stop the tick loop
@@ -845,7 +882,8 @@ def run_service(
                 report = actuator.execute(effective, gpu_use=gpu_use)
                 # Tell the OWNER of the load (a Claude session by pipe; a Kiroshi worker
                 # via the webhook's `owners`). Never raises; see agent_inbox.
-                report = agent_inbox.notify(actuator, effective, report, gpu_use=gpu_use)
+                report = agent_inbox.notify(actuator, effective, report, gpu_use=gpu_use,
+                                            prefs=prefs)
                 audit.write_kill_report(report)
                 report_kill(sd, action=effective, report=report)
                 if report.kill_root:

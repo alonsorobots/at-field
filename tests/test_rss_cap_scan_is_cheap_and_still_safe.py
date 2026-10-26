@@ -108,7 +108,7 @@ def _cfg(never_cmdline=()):
         targeting=replace(base.targeting,
                           killable_names=("python.exe",),
                           never_kill_cmdline_patterns=tuple(never_cmdline)),
-        kill=replace(base.kill, max_process_rss_gb=CAP_GB),
+        kill=replace(base.kill, max_process_rss_gb=CAP_GB, max_process_rss_action="kill"),
     )
 
 

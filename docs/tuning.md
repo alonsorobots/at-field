@@ -103,16 +103,20 @@ is racing the allocator. Two `[kill]` settings cover what it cannot. Both are
 
 ```toml
 [kill]
-max_process_rss_gb  = 32.0   # no single process may hold more than this
+max_process_rss_gb  = 32.0   # tell the owner of any single process over this
+max_process_rss_action = "warn"  # default; "kill" = the old hard cap, opt-in only
 hard_ceiling_percent = 96.0  # above this, kill outright instead of granting grace
 ```
 
 `max_process_rss_gb` asks a different question — *is one process unreasonable* —
-which is answerable while the machine is still healthy. Set it above anything
-you expect to run and below what would hurt; a legitimate trainer may hold
-40 GB, which is why there is no safe default. Unlike the pressure rules this
-kills **only the offending process and its own descendants**, never walking up
-to a supervisor: the point is to lose one unit of work, not a job.
+which is answerable while the machine is still healthy. Since 0.4.27 it is a
+**warning line**: the process's owner (a Claude session, or a Kiroshi job via
+the webhook) is told the pid and size, once per process per 30 min while it
+stays over, and can snooze or mute it (`atf snooze`, `atf mute`); nothing is
+killed. A legitimate fit holding 38 GB was hard-killed four times by a 32 GB
+cap on 2026-10-25, which is why the kill mode is now an explicit opt-in. In
+`"kill"` mode it kills **only the offending process and its own descendants**,
+never walking up to a supervisor.
 
 `hard_ceiling_percent` skips `grace_seconds`. Graceful termination is right at
 the threshold and wrong near the ceiling — at 97 % a five-second courtesy

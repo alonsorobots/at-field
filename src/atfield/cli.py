@@ -21,6 +21,7 @@ fast even on a box where NVIDIA drivers aren't installed yet.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -503,13 +504,122 @@ def test_kill(
     console.print(f"[red]killed[/] {len(report.killed)}; survived {sum(1 for k in report.killed if k.survived)}")
 
 
+# ---------------------------------------------------------------------------
+# snooze / mute: silence AT-Field's notices to an agent (never its actions)
+# ---------------------------------------------------------------------------
+
+
+def _api(method: str, path: str, state_dir: Path, body: dict | None = None) -> dict:
+    """Call the running service's localhost API (port from config.toml, else 8765)."""
+    import urllib.error
+    import urllib.request
+    port = 8765
+    cfg_path = _resolve_config_path(state_dir)
+    if cfg_path is not None:
+        try:
+            from atfield.config import load_config
+            port = load_config(cfg_path).api.port
+        except Exception:  # noqa: BLE001 -- fall back to the default port
+            pass
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read().decode("utf-8")).get("error")
+        except Exception:  # noqa: BLE001
+            msg = str(e)
+        console.print(f"[red]refused:[/] {msg}")
+        raise typer.Exit(code=2)
+    except OSError as e:
+        console.print(f"[red]AT-Field API not reachable on 127.0.0.1:{port}:[/] {e}")
+        raise typer.Exit(code=1)
+
+
+def _by() -> str:
+    import getpass
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    return f"session {sid[:8]}" if sid else f"user {getpass.getuser()}"
+
+
+def _owner_body(session: str | None, job: str | None) -> dict:
+    if not session and not job:
+        session = os.environ.get("CLAUDE_CODE_SESSION_ID")   # default: the caller's own session
+        if not session:
+            raise typer.BadParameter("give --session <id> or --job <name>")
+    return {"session": session, "job": job}
+
+
+@app.command()
+def snooze(
+    session: str | None = typer.Option(None, "--session", help="Claude session id (first 8 chars ok). Default: your own session."),
+    job: str | None = typer.Option(None, "--job", help="Kiroshi job name."),
+    rule: str | None = typer.Option(None, "--rule", help="Only this rule (default: every rule)."),
+    minutes: float = typer.Option(60, "--minutes", "-m", help="How long (e.g. 15, 60, 240)."),
+    state_dir: Path = _state_dir_option(),
+) -> None:
+    """Silence AT-Field's NOTICES to a session or job for N minutes. Kills still happen and are still logged."""
+    out = _api("POST", "/notify/snooze", state_dir,
+               {**_owner_body(session, job), "rule": rule, "minutes": minutes, "by": _by()})
+    print(json.dumps(out))
+
+
+@app.command()
+def mute(
+    job: str = typer.Option(..., "--job", help="Kiroshi job name."),
+    rule: str | None = typer.Option(None, "--rule", help="Only this rule (default: every rule)."),
+    state_dir: Path = _state_dir_option(),
+) -> None:
+    """Silence AT-Field's NOTICES about a job until it ends on this host or is unmuted."""
+    print(json.dumps(_api("POST", "/notify/mute", state_dir,
+                          {"job": job, "rule": rule, "by": _by()})))
+
+
+@app.command()
+def unmute(
+    session: str | None = typer.Option(None, "--session", help="Claude session id. Default: your own session."),
+    job: str | None = typer.Option(None, "--job", help="Kiroshi job name."),
+    rule: str | None = typer.Option(None, "--rule", help="Only this rule (default: every rule)."),
+    state_dir: Path = _state_dir_option(),
+) -> None:
+    """Remove snoozes and mutes for a session or job."""
+    print(json.dumps(_api("POST", "/notify/unmute", state_dir,
+                          {**_owner_body(session, job), "rule": rule})))
+
+
+@app.command(name="notify-prefs")
+def notify_prefs_cmd(state_dir: Path = _state_dir_option()) -> None:
+    """List active snoozes and mutes."""
+    print(json.dumps(_api("GET", "/notify/prefs", state_dir), indent=1))
+
+
 @app.command(name="notify-drill")
 def notify_drill(
     signal: str = typer.Option("system.cpu_package_temp_c", "--signal",
                                help="Rank owners on this signal's axis (cpu, gpu.N.*, memory)."),
+    live: bool = typer.Option(False, "--live", help="Send a real test notice via the service."),
     state_dir: Path = _state_dir_option(),
 ) -> None:
-    """Dry run: the ranked owners a firing of SIGNAL would name (ids and shares, no tokens)."""
+    """Dry run: the ranked owners a firing of SIGNAL would name (ids and shares, no tokens).
+
+    --live: ask the running service to send THIS process's owner a test notice through the
+    real snooze/mute gate, and print the events.jsonl record (delivered or suppressed)."""
+    if live:
+        t0 = time.time()
+        _api("POST", "/notify/drill", state_dir, {"pid": os.getpid()})
+        for _ in range(60):
+            time.sleep(0.5)
+            evs = _api("GET", f"/events?since={t0 - 1}&limit=200", state_dir)["events"]
+            hit = [e for e in evs if e.get("rule") == "notify-drill"
+                   and e.get("offender_pid") == os.getpid()]
+            if hit:
+                print(json.dumps({k: hit[-1].get(k) for k in ("ts", "skipped_reason", "owners")}))
+                return
+        console.print("[red]no drill record in events.jsonl after 30 s[/]")
+        raise typer.Exit(code=1)
     from atfield.actuator import Actuator
     from atfield.collectors.nvml import NvmlCollector
     from atfield.config import load_config
