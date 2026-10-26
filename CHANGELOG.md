@@ -7,6 +7,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.29] — 2026-10-25 — review fixes for 0.4.27/0.4.28
+
+### Fixed
+
+- **A cap warning right after a thermal warning was never delivered** (review F1). The cap warning shared
+  the session's 10-minute warning budget, and the per-process 30-minute memory was stamped anyway, so a
+  session told about `cpu-pkg-warm` then heard nothing about its 38 GB process for 30 minutes. A cap
+  warning now bypasses the session budget (it has its own: one per process per 30 min).
+- **Test gaps** (review F2-F4; the code was right, nothing pinned it): a job mute is refreshed from the
+  LIVE worker manifests by the tick loop (without it every mute lapsed an hour after it was set); a
+  snoozed notice spends no rate-limit budget; the cap warning names the process's own owner, never a
+  memory ranking.
+
 ## [0.4.28] — 2026-10-25 — warn-mode cap must not starve the tick loop
 
 ### Fixed

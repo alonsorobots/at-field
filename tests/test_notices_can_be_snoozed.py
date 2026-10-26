@@ -276,3 +276,60 @@ def test_the_cap_action_defaults_to_warn_and_kill_is_an_explicit_opt_in():
                                  ).kill.max_process_rss_action == "kill"
     with pytest.raises(ConfigError, match="max_process_rss_action"):
         load_config_from_dict({"kill": {"max_process_rss_action": "terminate"}})
+
+
+# -- review 2026-10-25 (Fable, 0.4.28) -------------------------------------------------
+
+
+def test_a_cap_warning_right_after_a_thermal_warning_is_still_told(tmp_path, monkeypatch):
+    """Review F1: the cap warning shared the session's 10-min WARNING budget, so a session
+    told about cpu-pkg-warm was then told nothing about its 38 GB process for 30 min. The
+    cap has its own per-process limit (30 min) and bypasses the session budget."""
+    import atfield.actuator as act_mod
+    monkeypatch.setattr(act_mod, "_RSS_CAP_MIN_INTERVAL_S", 0.0)
+    prov = []
+
+    def value(tick):
+        if tick == 10 and prov:                    # the fit balloons AFTER the warm notice
+            prov[0].procs[100].rss = 38 * 1024 ** 3
+        return 87.0
+    posts, _, _ = run(tmp_path, monkeypatch, procs_incident(), value, WARN0,
+                      "[kill]\nmax_process_rss_gb = 32.0", provider_out=prov, ticks=15)
+    assert [("process-rss-cap" in t) for _, t in posts] == [False, True]
+
+
+def test_a_suppressed_notice_spends_no_rate_limit_budget(tmp_path, monkeypatch, clock):
+    """Review F3: with the real 10-min limit on, notices suppressed by a 1-min snooze must
+    not use up the budget -- the first one after expiry is posted."""
+    prefs_at(tmp_path).snooze(session="aaaaaaaa", minutes=1, rule="cpu-pkg-warm")
+
+    def value(tick):
+        clock[0] = T0 + 5.0 * tick
+        return 87.0
+    posts, payloads, _ = run(tmp_path, monkeypatch, procs_incident(), value, WARN0, ticks=30)
+    assert any(told(p, "aaaaaaaa").get("suppressed") for p in payloads)
+    assert len(posts) == 1
+
+
+def test_a_job_mute_holds_while_the_job_is_still_on_the_host(tmp_path, monkeypatch, clock):
+    """Review F2: the tick loop must refresh a mute from the LIVE worker manifests; without
+    that every job mute lapses an hour after it was set, job running or not."""
+    prefs_at(tmp_path).mute(job="handgap-v2")      # set at T0
+
+    def value(tick):                               # observed alive at T0+3500, read at T0+3700
+        clock[0] = T0 + (3500.0 if tick < 3 else 3700.0)
+        return 87.0
+    _, payloads, _ = run(tmp_path, monkeypatch, procs_both(200.0, 300.0), value, WARN0,
+                         manifest=WORKER)
+    late = told(payloads[-1], "DEMETER-4c030c")
+    assert late["notified"] is False and late["suppressed"]["by"] == "mute"
+
+
+def test_the_cap_warning_names_the_exact_owner_not_a_ranking(tmp_path, monkeypatch):
+    """Review F4: the warn path carries the process's own owner; it must not fall back to
+    ranking the machine's memory users (which could name another session)."""
+    from atfield.actuator import Actuator
+    monkeypatch.setattr(Actuator, "load_owners", lambda *a, **kw: [])
+    posts, _, _ = run(tmp_path, monkeypatch, procs_session_hog(), 40.0,
+                      "[kill]\nmax_process_rss_gb = 32.0")
+    assert [sid for sid, _ in posts] == ["aaaaaaaa-1111"]

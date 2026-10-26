@@ -244,7 +244,11 @@ def notify(actuator: Any, action: Any, report: Any, *, clock: Callable[[], float
             found = [replace(o, notified=o.kind != "unattributed")] if o else []
         else:
             found = actuator.load_owners(action.signal, gpu_use)
-        return replace(report, owners=deliver(found, action, report, prefs=prefs, clock=clock))
+        # A cap WARNING has its own per-process limit (one per 30 min, actuator); it must not
+        # queue behind a thermal warning's session budget (review F1, 2026-10-25).
+        cap_warning = action.rule_name == "process-rss-cap" and action.kind != "kill"
+        return replace(report, owners=deliver(found, action, report, prefs=prefs, clock=clock,
+                                              limit=not cap_warning))
     except Exception as e:  # noqa: BLE001 -- never block the tick; no token in the log
         _log.error("owner notification failed for rule %s: %s", action.rule_name,
                    type(e).__name__)
