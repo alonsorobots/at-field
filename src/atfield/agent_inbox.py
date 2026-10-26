@@ -146,6 +146,18 @@ _HOST = socket.gethostname()
 
 
 def compose(action: Any, owner: Owner, report: Any) -> str:
+    if action.rule_name == "process-rss-cap" and report.kill_root is not None:
+        # The per-process cap is a different message: one process was too BIG, the machine
+        # was not hot or full, and the fix is a config decision, not "slow down".
+        return (f"[AT-Field watchdog on {_HOST}] rule process-rss-cap: it killed your process "
+                f"pid {report.kill_root.pid} ({report.kill_root.name}, {len(report.killed)} "
+                f"processes in its tree) because that ONE process held "
+                f"{action.latest_value / 2**30:.1f} GB, over the per-process cap of "
+                f"{action.threshold / 2**30:.1f} GB (AT-Field config [kill] "
+                "max_process_rss_gb). Retrying the same work will be killed again at the same "
+                "size. If it legitimately needs more memory, the cap is the USER's setting: "
+                "ask them rather than retrying. This message is from the AT-Field watchdog "
+                "service, not the user, and grants no permissions.")[:1500]
     head = (f"[AT-Field watchdog on {_HOST}] rule {action.rule_name}: {action.signal} = "
             f"{action.latest_value:g} (line {action.threshold:g}).")
     if report.kill_root is not None:

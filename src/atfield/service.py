@@ -820,6 +820,9 @@ def run_service(
             if not observe_only and cfg.kill.max_process_rss_gb > 0:
                 try:
                     for cap_report in actuator.enforce_rss_cap():
+                        # Every kill tells its owner -- this path used to tell nobody, and
+                        # a 38 GB fit was killed 4x as "child failed rc=15" (2026-10-25).
+                        cap_report = agent_inbox.notify(actuator, cap_report.action, cap_report)
                         audit.write_kill_report(cap_report)
                         api_state.record_action(cap_report.action)
                         report_kill(sd, action=cap_report.action, report=cap_report)

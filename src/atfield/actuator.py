@@ -796,6 +796,8 @@ class Actuator:
             # report the parent of an exited process.
             owner = self._provider.parent(offender.pid)
             ancestors = self._ancestors(offender.pid)
+            # Who to TELL, captured pre-kill like the rule path (the environ is gone after).
+            root_owner = self._owner_of(offender, ancestors)
             _log.warning(
                 "process-rss-cap: pid=%s name=%s holds %.1f GB (cap %.1f GB); killing it",
                 offender.pid, offender.name, offender.rss_bytes / (1024 ** 3), cap_gb,
@@ -818,6 +820,7 @@ class Actuator:
                     killed=tuple(results),
                     finished_at_ns=int(time.monotonic_ns()),
                     ancestors=ancestors,
+                    owner=root_owner and replace(root_owner, pids=len(targets)),
                 )
             )
         return reports
