@@ -81,7 +81,8 @@ class _LazyProvider(FakeProvider):
 
     def list_all(self) -> list[ProcInfo]:
         return [ProcInfo(pid=p.pid, ppid=p.ppid, name=p.name, cmdline=(),
-                         rss_bytes=p.rss_bytes) for p in self._full.values()]
+                         rss_bytes=p.rss_bytes, create_time=p.create_time)
+                for p in self._full.values()]
 
     def list_all_lean(self) -> list[ProcInfo]:
         return self.list_all()
@@ -282,3 +283,43 @@ def test_the_REAL_lean_scan_sees_processes():
     me = [p for p in lean if p.pid == os.getpid()]
     assert me, "the lean scan does not contain this very process (%d entries)" % len(lean)
     assert me[0].ppid == os.getppid() and me[0].rss_bytes > 0 and me[0].create_time > 0, me[0]
+
+
+def test_warn_mode_does_not_repay_the_full_facts_every_scan_for_a_process_it_already_warned():
+    """0.4.27, found on the live Chronos deploy: in kill mode an over-cap process is GONE
+    after the first scan, so the expensive path (protected-pid walk + cmdline fetch: 2-7 s
+    on Chronos) ran once. In warn mode it STAYS over, and each 5 s scan would pay that
+    again -- the 2026-09-03 starvation shape (rules unable to fire at 0.2 Hz). A process
+    already warned within the repeat window must cost only the lean sweep."""
+    procs = [ProcInfo(pid=999, ppid=1, name="python.exe", cmdline=("python.exe", "fit.py"),
+                      rss_bytes=OVER, create_time=123.0)]
+    prov = _LazyProvider(procs)
+    cfg = replace(_cfg(), kill=replace(_cfg().kill, max_process_rss_action="warn"))
+    act = Actuator(cfg, provider=prov, sleep=lambda _s: None)
+    calls = []
+    real = act._protected_pids
+    act._protected_pids = lambda *a, **kw: calls.append(1) or real(*a, **kw)
+    s = 1_000_000_000
+    assert len(act.enforce_rss_cap(now_ns=10 * s)) == 1          # warned once
+    paid = (len(calls), len(prov.cmdline_fetched))
+    for i in range(1, 20):                                       # 19 more scans, 6 s apart
+        assert act.enforce_rss_cap(now_ns=(10 + 6 * i) * s) == []
+    assert (len(calls), len(prov.cmdline_fetched)) == paid, "re-paid the full facts"
+    assert prov.killed == [] and prov.terminated == []
+    # past the repeat window it is told again (and pays once more)
+    assert len(act.enforce_rss_cap(now_ns=(10 + 1801) * s)) == 1
+
+
+def test_warn_mode_does_not_repay_for_a_spared_process_either():
+    """A never-kill (or protected) process over the line is dropped by the full facts; in
+    warn mode it stays over, so it too must not re-pay those facts every 5 s."""
+    prov = _LazyProvider([ProcInfo(pid=200, ppid=1, name="python.exe",
+                                   cmdline=("python.exe", "-m", "kiroshi.coordinator"),
+                                   rss_bytes=OVER, create_time=5.0)])
+    base = _cfg(never_cmdline=("*kiroshi.coordinator*",))
+    act = Actuator(replace(base, kill=replace(base.kill, max_process_rss_action="warn")),
+                   provider=prov, sleep=lambda _s: None)
+    s = 1_000_000_000
+    for i in range(10):
+        assert act.enforce_rss_cap(now_ns=(10 + 6 * i) * s) == []
+    assert prov.cmdline_fetched == [200], prov.cmdline_fetched

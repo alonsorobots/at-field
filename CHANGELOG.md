@@ -7,6 +7,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.28] — 2026-10-25 — warn-mode cap must not starve the tick loop
+
+### Fixed
+
+- **A process held over the warn line re-paid the cap's expensive facts every 5 s.** In kill mode the
+  over-cap process is gone after the first scan, so the full-facts path (protected-pid walk + cmdline
+  fetch; 2-4.4 s on Chronos per the 2026-10-25 17:23 kill's `SLOW TICK ... rss_cap 4387 ms`) ran once. In
+  0.4.27's warn mode the process stays over, and every scan would pay it again: the 2026-09-03 shape where
+  the loop fell to ~0.2 Hz and every rule became unable to fire. A process already told (or already
+  spared as protected / never-kill) within the 30-min repeat window now costs only the lean sweep.
+  Tests: 20 scans of one warned process pay the full facts once; a spared one likewise. Found by
+  reading a 7.5 s first-tick `rss_cap` stall on the 0.4.27 Chronos deploy; that stall itself was the cold
+  first sweep (nothing was over the line), so the starvation was prevented, not observed.
+
 ## [0.4.27] — 2026-10-25 — every notice to an agent can be snoozed or muted; the RSS cap warns
 
 ### Added

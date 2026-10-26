@@ -758,6 +758,18 @@ class Actuator:
         scan = getattr(self._provider, "list_all_lean", self._provider.list_all)
         lean = [p for p in scan() if p.name.lower() in self._killable]
         over = processes_over_rss_cap(lean, cap_bytes)
+        warn = self._cfg.kill.max_process_rss_action != "kill"
+        if warn:
+            # In warn mode the process STAYS over (kill mode removed it), so one already
+            # told within the repeat window must cost only this lean sweep -- not the
+            # 2-7 s of full facts below every 5 s (the 2026-09-03 starvation shape).
+            repeat_ns = int(_RSS_WARN_REPEAT_S * 1_000_000_000)
+            live = {(o.pid, o.create_time) for o in over}
+            self._rss_warned = {k: t for k, t in self._rss_warned.items() if k in live}
+            over = [o for o in over if now_mono_ns - self._rss_warned.get(
+                (o.pid, o.create_time), -repeat_ns) >= repeat_ns]
+            for o in over:      # also those the full facts then skip (protected, never-kill)
+                self._rss_warned[(o.pid, o.create_time)] = now_mono_ns
         if not over:
             return []
 
@@ -777,7 +789,7 @@ class Actuator:
                 candidates.append(full)
 
         reports: list[KillReport] = []
-        if self._cfg.kill.max_process_rss_action != "kill":
+        if warn:
             return self._warn_rss_cap(processes_over_rss_cap(candidates, cap_bytes), cap_bytes,
                                       now_mono_ns)
         for offender in processes_over_rss_cap(candidates, cap_bytes):
@@ -836,17 +848,10 @@ class Actuator:
     def _warn_rss_cap(self, over: list[ProcInfo], cap_bytes: int,
                       now_ns: int) -> list[KillReport]:
         """``max_process_rss_action = "warn"`` (the default): tell the owner, kill nothing.
-        One notice per process per ``_RSS_WARN_REPEAT_S`` while it stays over the line."""
-        repeat_ns = int(_RSS_WARN_REPEAT_S * 1_000_000_000)
-        live = {(o.pid, o.create_time) for o in over}
-        self._rss_warned = {k: t for k, t in self._rss_warned.items() if k in live}
+        One notice per process per ``_RSS_WARN_REPEAT_S`` while it stays over the line
+        (the caller already dropped those told within it, before paying for full facts)."""
         reports: list[KillReport] = []
         for offender in over:
-            key = (offender.pid, offender.create_time)
-            last = self._rss_warned.get(key)
-            if last is not None and now_ns - last < repeat_ns:
-                continue
-            self._rss_warned[key] = now_ns
             action = Action(
                 kind="log", rule_name=RSS_CAP_RULE, base_rule_name=RSS_CAP_RULE,
                 signal="process.rss_bytes", threshold=float(cap_bytes), fraction_over=1.0,
