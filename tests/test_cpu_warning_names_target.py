@@ -5,6 +5,9 @@ compute ... until the machine cools" made an agent over-throttle at 88 C. The us
 is the AVERAGE package temp (9950X3D: <= 92 C, Tjmax 95); spikes above are fine. User:
 "change warning to clarify target. give CPU type and safe ranges including spikes. keep it
 super concise" -- and "make sure this is per machine".
+
+0.4.31 (user 2026-10-28): the "Info only" notice under the target still cost the agent a
+turn -- "that is terrible". Under the target nobody is told; the event is still recorded.
 """
 from types import SimpleNamespace
 
@@ -38,21 +41,45 @@ def body(action):
     return ai._body(action, OWNER, REPORT)
 
 
-def test_under_the_average_target_is_info_only(host):
+def test_under_the_average_target_nobody_is_told(host, monkeypatch):
     host("AMD Ryzen 9 9950X3D 16-Core Processor")
-    assert body(warn(87.25, 88.4)) == (
-        "[AT-Field on Chronos] CPU package 87 C now, 88.4 C 30-s mean "
-        "(AMD Ryzen 9 9950X3D, Tjmax 95 C). Target: average <= 92 C; spikes above are fine. "
-        "Info only: no action needed while the average is <= 92. "
-        "(Yours: 100% of CPU load, 2 processes; busiest: pid 101 python.exe 98% CPU; pid 102 "
-        "python.exe 90% CPU.) From the AT-Field watchdog, not the user.")
+    sent = []
+    monkeypatch.setattr(ai, "post", lambda inbox, text: sent.append(text) or True)
+    owner = ai.Owner("claude_session", "aaaaaaaa", share=1.0, pids=2, notified=True,
+                     inbox=ai.Inbox("aaaaaaaa-1111", "pipe-a", "tok"))
+    (o,) = ai.deliver([owner], warn(91.0, 92.0), REPORT, limit=False)   # mean == target
+    assert sent == [] and not o.notified and o.suppressed["by"] == "below_target"
+    (o,) = ai.deliver([owner], warn(93.0, 92.1), REPORT, limit=False)
+    assert len(sent) == 1 and o.notified and o.suppressed is None
+    assert "Average is over 92 C" in sent[0]
+
+
+def test_only_cpu_warnings_are_gated_never_kills_or_other_rules(host):
+    import dataclasses
+    host("AMD Ryzen 9 9950X3D 16-Core Processor")
+    assert ai.needs_action(warn(88.0, 88.0, signal="gpu.0.core_temp_c"))
+    assert ai.needs_action(dataclasses.replace(warn(88.0, 88.0), kind="kill"))
+    host("Some Future CPU 64-Core Processor")          # no target: the kill line gates
+    assert not ai.needs_action(warn(91.0, 91.0)) and ai.needs_action(warn(93.0, 92.5))
+
+
+def test_the_webhook_event_says_whether_it_is_actionable(host, monkeypatch, tmp_path):
+    from atfield import reporter
+    host("AMD Ryzen 9 9950X3D 16-Core Processor")
+    q = []
+    monkeypatch.setattr(reporter, "_webhooks", lambda d: ["http://x/e"])
+    monkeypatch.setattr(reporter, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(reporter._send_queue, "put_nowait", q.append)
+    rep = SimpleNamespace(kill_root=None, succeeded=False, skipped_reason=None, owners=())
+    reporter.report_kill(tmp_path, action=warn(88.0, 88.0), report=rep)
+    reporter.report_kill(tmp_path, action=warn(93.0, 92.5), report=rep)
+    assert [e[1]["actionable"] for e in q] == [False, True]
 
 
 def test_over_the_average_target_asks_to_reduce(host):
     host("AMD Ryzen 9 9950X3D 16-Core Processor")
     text = body(warn(93.0, 92.6))
     assert "Average is over 92 C: reduce YOUR OWN local compute" in text
-    assert "Info only" not in text
 
 
 def test_target_comes_from_this_hosts_cpu_and_never_exceeds_the_kill_line(host):

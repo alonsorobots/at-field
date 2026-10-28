@@ -34,6 +34,8 @@ from typing import Any
 
 import requests
 
+from atfield import agent_inbox
+
 _log = logging.getLogger("atfield.reporter")
 
 _HOSTNAME = socket.gethostname()
@@ -247,6 +249,13 @@ def _finite_or_none(x: Any) -> float | None:
     return f if math.isfinite(f) else None
 
 
+def _needs_action(action: Any) -> bool:
+    try:
+        return agent_inbox.needs_action(action)
+    except Exception:  # noqa: BLE001 -- a malformed action is reported as actionable
+        return True
+
+
 def report_kill(state_dir: Path, *, action: Any, report: Any) -> None:
     """POST a kill/pressure event to every currently-registered subscriber.
 
@@ -273,6 +282,9 @@ def report_kill(state_dir: Path, *, action: Any, report: Any) -> None:
         "action": action.kind,
         # A near-limit warning (a log/throttle rule with notify = true), not a kill.
         "notify": bool(getattr(action, "notify", False)),
+        # False: a CPU warning under this host's average target -- logged, nobody asked to act
+        # (0.4.31; Kiroshi does not post it to the steward).
+        "actionable": _needs_action(action),
         # The reading that fired the rule; None when not finite -- a NaN would make
         # the body invalid JSON and the subscriber would refuse the whole event.
         "value": _finite_or_none(getattr(action, "latest_value", None)),

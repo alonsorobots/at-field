@@ -7,6 +7,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.31] — 2026-10-28 — no "info only" CPU notices to agents; snooze heat pop-ups from the tray
+
+### Changed
+
+- **A CPU-package warning under the host's average target tells no agent** (user 2026-10-28, on the
+  0.4.30 "Info only: no action needed" notice: "that is terrible, please fix!" -- it still cost the
+  agent a turn). `agent_inbox.needs_action()`: a `cpu_package_temp_c` warning needs action only when its
+  window mean is over this host's target (Tjmax - 3, never above the kill line; the kill line for a CPU
+  with no Tjmax). Under it every owner comes back `notified: false`, `suppressed.by = "below_target"`,
+  and the event is still written to events.jsonl. Kills and every other rule's warning are unchanged.
+- The webhook event carries `actionable` (false for such a warning); Kiroshi b6a7893 does not post
+  `actionable: false` warnings to the steward's inbox.
+
+### Added
+
+- **Tray 0.4.9: "Snooze heat pop-ups" (30 minutes / 2 hours / 8 hours) and "Resume heat pop-ups"** in the
+  tray menu. Silences the "Getting hot" pop-ups only; kill pop-ups still show and AT-Field keeps watching
+  and acting. A warning that arrives during a snooze is consumed, not replayed after it. In memory: a tray
+  restart ends the snooze.
+
 ## [0.4.30] — 2026-10-27 — the CPU temperature warning states the target
 
 ### Changed

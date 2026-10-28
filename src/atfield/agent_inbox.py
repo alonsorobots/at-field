@@ -221,20 +221,32 @@ def _cpu_warning(action: Any, owner: Owner) -> str:
         out.append(f"Target: average <= {target:g} C; spikes above are fine.")
     elif kill is not None:
         out.append(f"AT-Field kills at a sustained {kill:g} C.")
-    if line is not None and mean > line:
+    if line is not None and mean > line:   # under it, needs_action() sends nothing at all
         out.append(f"Average is over {line:g} C: reduce YOUR OWN local compute (fewer parallel "
                    "processes or subagents).")
-    elif line is not None:
-        out.append(f"Info only: no action needed while the average is <= {line:g}.")
     busiest = "; ".join(f"pid {p} {n} {v:.0f}% CPU" for p, n, v in owner.top)
     out.append(f"(Yours: {owner.share:.0%} of CPU load, {owner.pids} processes; busiest: "
                f"{busiest}.) From the AT-Field watchdog, not the user.")
     return " ".join(out)
 
 
+def needs_action(action: Any) -> bool:
+    """False for a CPU-package WARNING whose window mean is at or under this host's target
+    (or kill line, for a CPU with no target): nothing to do, so no agent is told (0.4.31).
+    User 2026-10-28: an "Info only" notice still costs the agent a turn -- "that is
+    terrible". Kills and every other rule's warning always need action."""
+    if action.kind == "kill" or "cpu_package_temp_c" not in action.signal:
+        return True
+    line = cpu_limits.target_c(cpu_limits.this_cpu(), action.kill_threshold)
+    line = action.kill_threshold if line is None else line
+    mean = action.window_mean if action.window_mean is not None else action.latest_value
+    return line is None or mean > line
+
+
 def deliver(found: Iterable[Owner], action: Any, report: Any, *, prefs: Any = None,
             clock: Callable[[], float] = time.monotonic, limit: bool = True) -> tuple[Owner, ...]:
-    """Tell each owner marked to be told. A snooze/mute silences the TELLING only: the
+    """Tell each owner marked to be told. A CPU warning under the target (needs_action)
+    and a snooze/mute silence the TELLING only: the
     owner comes back notified=False with ``suppressed`` saying why, and the caller still
     records the event. Prefs are checked before the rate limit (a silenced notice spends
     no budget). Kills and warnings are limited separately (a warning must never swallow
@@ -246,7 +258,11 @@ def deliver(found: Iterable[Owner], action: Any, report: Any, *, prefs: Any = No
             continue
         o = replace(o, silence=notify_prefs.footer(o, action.rule_name, _HOST))
         pref = prefs.match(o, action.rule_name) if prefs is not None else None
-        if pref is not None:
+        if not needs_action(action):
+            o = replace(o, notified=False, suppressed={
+                "by": "below_target", "until": None, "set_by": "atfield", "set_at": None,
+                "rule": action.rule_name})
+        elif pref is not None:
             o = replace(o, notified=False, suppressed={
                 "by": pref["kind"], "until": pref["until"], "set_by": pref["set_by"],
                 "set_at": pref["set_at"], "rule": pref["rule"]})

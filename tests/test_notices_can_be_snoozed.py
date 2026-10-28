@@ -27,10 +27,12 @@ from atfield.actuator import RSS_CAP_RULE
 from atfield.http_api import ServiceState
 from tests.test_owner_is_told import (KILL, SA, SB, WORKER, procs_both, procs_incident, rule,
                                       run)
+from tests.test_owner_is_told import every_warning_needs_action  # noqa: F401 -- autouse
 from tests.test_rss_cap_owner_is_told import procs_session_hog
 
 T0 = 1_800_000_000.0
 WARN0 = rule("cpu-pkg-warm", 86.0, "log", notify=True, cooldown_s=0)
+
 
 
 @pytest.fixture

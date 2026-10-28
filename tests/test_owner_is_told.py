@@ -20,6 +20,13 @@ from atfield.collectors import HealthState, ProbeResult
 from atfield.signals import Sample, monotonic_ns
 from tests.test_actuator import FakeProvider, _FakeProc
 
+@pytest.fixture(autouse=True)
+def every_warning_needs_action(monkeypatch):
+    """These pin who is told (and snooze/mute, which imports this); the 87 C warnings here are under the 0.4.31 average-target gate
+    (tests/test_cpu_warning_names_target.py), which would silence them first."""
+    monkeypatch.setattr(ai, "needs_action", lambda action: True)
+
+
 CPU = "system.cpu_package_temp_c"
 TOKEN = "tok-SECRET-4419"
 

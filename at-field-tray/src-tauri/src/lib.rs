@@ -180,6 +180,7 @@ fn spawn_poller(app: AppHandle, last_status: Arc<Mutex<TrayStatus>>) {
                 }
             }
             let w = h.last_warning.as_ref();
+            warn_gate.snoozed_until = warn_gate::menu_snooze();
             if warn_gate.should_fire(w.map(|w| (w.at, w.rule.as_str())), chrono_now()) {
                 if let Some(w) = w {
                     fire_warning_notification(&app, w);
@@ -347,6 +348,20 @@ pub fn run() {
                 &[&pause_30, &pause_1h, &pause_4h, &pause_until_reboot],
             )?;
             let unpause = MenuItem::with_id(app, "unpause", "Unpause", true, None::<&str>)?;
+            // 0.4.31: silence the "Getting hot" pop-ups only; kills still pop up and
+            // AT-Field itself keeps watching and acting.
+            let snooze_30 = MenuItem::with_id(app, "snooze_30m", "30 minutes", true, None::<&str>)?;
+            let snooze_2h = MenuItem::with_id(app, "snooze_2h", "2 hours", true, None::<&str>)?;
+            let snooze_8h = MenuItem::with_id(app, "snooze_8h", "8 hours", true, None::<&str>)?;
+            let snooze_menu = Submenu::with_id_and_items(
+                app,
+                "snooze_submenu",
+                "Snooze heat pop-ups",
+                true,
+                &[&snooze_30, &snooze_2h, &snooze_8h],
+            )?;
+            let unsnooze =
+                MenuItem::with_id(app, "unsnooze", "Resume heat pop-ups", true, None::<&str>)?;
             let open_events =
                 MenuItem::with_id(app, "open_events", "Open events.jsonl", true, None::<&str>)?;
             let open_log =
@@ -362,6 +377,8 @@ pub fn run() {
                     &sep,
                     &pause_menu,
                     &unpause,
+                    &snooze_menu,
+                    &unsnooze,
                     &sep,
                     &open_events,
                     &open_log,
@@ -475,6 +492,13 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         "unpause" => {
             let _ = ureq_post(&format!("{}/unpause", API_BASE), b"{}");
         }
+        "snooze_30m" => snooze_pop_ups(app, 30 * 60, "30 minutes"),
+        "snooze_2h" => snooze_pop_ups(app, 2 * 60 * 60, "2 hours"),
+        "snooze_8h" => snooze_pop_ups(app, 8 * 60 * 60, "8 hours"),
+        "unsnooze" => {
+            warn_gate::set_menu_snooze(0.0);
+            let _ = app.notification().builder().title("Heat pop-ups resumed").show();
+        }
         "open_events" => {
             let _ = open_state_file(app, "events.jsonl");
         }
@@ -489,6 +513,16 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         }
         _ => {}
     }
+}
+
+fn snooze_pop_ups(app: &AppHandle, duration_s: u64, label: &str) {
+    warn_gate::set_menu_snooze(chrono_now() + duration_s as f64);
+    let _ = app
+        .notification()
+        .builder()
+        .title(&format!("Heat pop-ups snoozed for {}", label))
+        .body("Kill pop-ups still show; AT-Field keeps watching and acting.")
+        .show();
 }
 
 fn post_pause(duration_s: u64) {
