@@ -135,6 +135,12 @@ _TIER2_CAPACITY = 1440   # 24 hours of 1-minute averages
 # ---------------------------------------------------------------------------
 
 
+def _cpu_view() -> dict[str, object]:
+    from atfield import cpu_limits
+    lim = cpu_limits.this_cpu()
+    return {"model": lim.model, "tjmax_c": lim.tjmax_c}
+
+
 @dataclass
 class _CollectorView:
     name: str
@@ -582,6 +588,8 @@ class ServiceState:
 
             return {
                 "version": self._version,
+                # The CPU and Tjmax the cpu warning quotes (0.4.30), read on THIS host.
+                "cpu": _cpu_view(),
                 "mode": "observe-only" if self._observe_only else "armed",
                 "paused": paused,
                 "paused_until": self._paused_until_unix if paused else None,

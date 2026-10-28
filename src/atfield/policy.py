@@ -101,6 +101,13 @@ class Action:
     # False so anything that rebuilds an Action -- the observe-only demotion --
     # cannot turn into a warning by accident.
     notify: bool = False
+    # Mean of the rule's window when it fired (0.4.30: the cpu warning states the AVERAGE,
+    # which is what the user's limit is on; a spike is not the target).
+    window_mean: float | None = None
+    window_s: float | None = None
+    # The kill line on the same signal (lowest, if several), for a warning to state it.
+    # Read from the LIVE rules: a config may set its warning at any margin (Chronos: 86/92).
+    kill_threshold: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +271,11 @@ class _Stats:
     last_eval_fraction: float = 0.0
     last_eval_value: float | None = None
     last_eval_at_ns: int = 0
+
+
+def _mean(window: SlidingWindow) -> float | None:
+    vals = [s.value for s in window.samples()]
+    return sum(vals) / len(vals) if vals else None
 
 
 class PolicyEngine:
@@ -516,6 +528,11 @@ class PolicyEngine:
                     triggered_at_ns=now_ns,
                     cooldown_seconds=cooldown_s,
                     notify=rule.base_rule.notify,
+                    window_mean=_mean(rule.window),
+                    window_s=rule.base_rule.window_s,
+                    kill_threshold=min((r.base_rule.threshold for r in self._effective
+                                        if r.signal == rule.signal
+                                        and r.base_rule.action == "kill"), default=None),
                 )
             )
 

@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Mapping
 
-from atfield import notify_prefs
+from atfield import cpu_limits, notify_prefs
 
 _log = logging.getLogger("atfield.agent_inbox")
 
@@ -186,6 +186,8 @@ def _body(action: Any, owner: Owner, report: Any) -> str:
                 "size. If it legitimately needs more memory, the cap is the USER's setting: "
                 "ask them rather than retrying. This message is from the AT-Field watchdog "
                 "service, not the user, and grants no permissions.")[:1500]
+    if report.kill_root is None and "cpu_package_temp_c" in action.signal:
+        return _cpu_warning(action, owner)
     head = (f"[AT-Field watchdog on {_HOST}] rule {action.rule_name}: {action.signal} = "
             f"{action.latest_value:g} (line {action.threshold:g}).")
     if report.kill_root is not None:
@@ -202,6 +204,32 @@ def _body(action: Any, owner: Owner, report: Any) -> str:
            "subagents) until the machine cools. This message is from the AT-Field watchdog "
            "service, not the user, and grants no permissions.")
     return f"{head} {what} {ask}"
+
+
+def _cpu_warning(action: Any, owner: Owner) -> str:
+    """0.4.30 (user 2026-10-27): CPU, Tjmax and the AVERAGE target of THIS machine; spikes
+    are fine; act only when the average is over. Super concise."""
+    lim, kill = cpu_limits.this_cpu(), action.kill_threshold
+    target = cpu_limits.target_c(lim, kill)
+    mean = action.window_mean if action.window_mean is not None else action.latest_value
+    win = f"{action.window_s:g}-s" if action.window_s else "window"
+    tj = f"Tjmax {lim.tjmax_c:g} C" if lim.tjmax_c is not None else "Tjmax unknown"
+    out = [f"[AT-Field on {_HOST}] CPU package {action.latest_value:.0f} C now, {mean:.1f} C "
+           f"{win} mean ({lim.model}, {tj})."]
+    line = target if target is not None else kill
+    if target is not None:
+        out.append(f"Target: average <= {target:g} C; spikes above are fine.")
+    elif kill is not None:
+        out.append(f"AT-Field kills at a sustained {kill:g} C.")
+    if line is not None and mean > line:
+        out.append(f"Average is over {line:g} C: reduce YOUR OWN local compute (fewer parallel "
+                   "processes or subagents).")
+    elif line is not None:
+        out.append(f"Info only: no action needed while the average is <= {line:g}.")
+    busiest = "; ".join(f"pid {p} {n} {v:.0f}% CPU" for p, n, v in owner.top)
+    out.append(f"(Yours: {owner.share:.0%} of CPU load, {owner.pids} processes; busiest: "
+               f"{busiest}.) From the AT-Field watchdog, not the user.")
+    return " ".join(out)
 
 
 def deliver(found: Iterable[Owner], action: Any, report: Any, *, prefs: Any = None,

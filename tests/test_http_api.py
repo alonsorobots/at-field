@@ -182,6 +182,7 @@ class TestHealth:
         assert data["rules_active"] == 1   # ram-pressure
         assert data["rules_disabled"] == 1  # missing-signal
         assert data["last_action"] is None
+        assert set(data["cpu"]) == {"model", "tjmax_c"}   # this host's, for the cpu warning
 
     def test_health_omits_lhm_supervisor_when_unbound(self, server):
         """No supervisor wired => /health.lhm_supervisor is null. Important

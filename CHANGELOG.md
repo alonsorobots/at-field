@@ -7,6 +7,23 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.30] — 2026-10-27 — the CPU temperature warning states the target
+
+### Changed
+
+- **`cpu-pkg-warm` notice to a Claude session is short and names the target** (user 2026-10-27: "clarify
+  target. give CPU type and safe ranges including spikes. keep it super concise"; "make sure this is per
+  machine"). The old text ("... Please reduce or pause YOUR OWN local compute ... until the machine cools")
+  made an agent over-throttle at 88 C, though the limit is the AVERAGE package temperature. Now:
+  `[AT-Field on <host>] CPU package 87 C now, 88.4 C 30-s mean (AMD Ryzen 9 9950X3D, Tjmax 95 C). Target:
+  average <= 92 C; spikes above are fine. Info only: ...` -- and "reduce YOUR OWN local compute" only when
+  the window mean is over the target. CPU model is read on the host itself (registry
+  ProcessorNameString); Tjmax from `cpu_limits.TJMAX_C` (9950X3D 95, i7-9700K 100); target = Tjmax - 3,
+  never above that host's live kill line. Unknown CPU -> "Tjmax unknown" plus the kill line, never another
+  host's numbers. Thresholds and config are unchanged.
+- `Action` carries `window_mean`, `window_s` and `kill_threshold` (the live kill rule on the same signal).
+- `/health` carries `cpu: {model, tjmax_c}` -- what the warning will quote on this host.
+
 ## [0.4.29] — 2026-10-25 — review fixes for 0.4.27/0.4.28
 
 ### Fixed
