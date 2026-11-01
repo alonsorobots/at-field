@@ -7,6 +7,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The tray no longer dies 72 hours after a deploy.** Deploys started it from a scheduled task whose
+  action WAS the tray, and Task Scheduler's default 72 h ExecutionTimeLimit terminated it (Chronos +
+  DEMETER, 10-28 11:41 -> 10-31 11:41, result 0x41306). Nothing watched the tray, so the icon and every
+  heat/kill pop-up vanished silently while the service stayed armed. `scripts/register_tray_keepalive.ps1`
+  (run elevated) re-registers `ATFieldTrayRelaunch` as a hidden checker (wscript //B) every 15 min and
+  2 min after logon that starts the tray only if none is running; the tray is never the task's process,
+  so no limit reaches it. Applied on all three hosts 2026-11-01; on DEMETER a killed tray came back at
+  the next tick (31 s) with one copy.
+
 ## [0.4.32] — 2026-11-01 — web pages can no longer pause the watchdog; the state dir is admin-write-only
 
 ### Security
