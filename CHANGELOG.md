@@ -7,6 +7,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.32] — 2026-11-01 — web pages can no longer pause the watchdog; the state dir is admin-write-only
+
+### Security
+
+- **The localhost API refuses browser requests that are not from the tray.** It answered every origin
+  with `Access-Control-Allow-Origin: *` on the theory that loopback-only means same-machine-only -- but a
+  web page open in any browser on the machine IS on the machine. Reproduced on Chronos (0.4.31): a
+  foreign-origin preflight for `POST /pause` was approved, `GET /events` was readable, and a text/plain
+  `POST /pause` needs no preflight at all, so CORS never stopped it. Now `_admit()` runs before every
+  handler: an `Origin` outside `TRAY_ORIGINS` (tauri.localhost, tauri://localhost, the vite dev server)
+  gets 403 and nothing happens; a `Host` naming a DNS domain other than localhost (DNS rebinding) gets
+  403. The allowed origin is echoed instead of `*`. Clients that send no Origin -- atf CLI, Kiroshi,
+  curl -- are unaffected. Refusals are logged once per origin/host. Tests prove the watchdog is NOT
+  paused and the rule NOT changed; each guard was mutated off and its tests went red.
+- **`%ProgramData%\ATField` is admin-write-only** (`install_service.ps1` `Protect-StateDir`, so every
+  deploy applies it). It inherited ProgramData's ACL, which lets ordinary Users CREATE files: enough for
+  an unelevated process to switch the watchdog off indefinitely (an empty `pause.sentinel`), to plant
+  files beside `nssm.exe` (runs as SYSTEM), or to pre-create a `deploy-X.Y.Z` staging folder. Now
+  SYSTEM + Administrators full, Users read; owners moved to Administrators. Verified on a scratch dir:
+  unelevated create, `pause.sentinel` and modify denied; read still works.
+- `atf pause` / `atf unpause` from an unelevated shell now say they need elevation instead of a traceback.
+
 ## [0.4.31] — 2026-10-28 — no "info only" CPU notices to agents; snooze heat pop-ups from the tray
 
 ### Changed

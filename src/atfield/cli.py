@@ -216,9 +216,15 @@ def pause(
     state_dir: Path = _state_dir_option(),
 ) -> None:
     """Pause kill actions. The watchdog continues to monitor and log."""
-    state_dir.mkdir(parents=True, exist_ok=True)
     until = datetime.now(timezone.utc) + _parse_duration(duration)
-    (state_dir / "pause.sentinel").write_text(until.isoformat() + "\n", encoding="utf-8")
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "pause.sentinel").write_text(until.isoformat() + "\n", encoding="utf-8")
+    except PermissionError:
+        # The state dir is admin-write-only (install_service.ps1 Protect-StateDir):
+        # pausing the watchdog switches off hardware protection.
+        console.print(f"[red]Pausing needs an elevated shell[/] ({state_dir} is admin-only).")
+        raise typer.Exit(code=1)
     console.print(f"[yellow]Paused[/] until {until.isoformat()} ({duration})")
 
 
@@ -229,7 +235,11 @@ def unpause(
     """Remove the pause sentinel. The watchdog will resume actions on its next pause-check tick (≤5 s)."""
     sentinel = state_dir / "pause.sentinel"
     if sentinel.exists():
-        sentinel.unlink()
+        try:
+            sentinel.unlink()
+        except PermissionError:
+            console.print(f"[red]Unpausing needs an elevated shell[/] ({state_dir} is admin-only).")
+            raise typer.Exit(code=1)
         console.print("[green]Unpaused[/]")
     else:
         console.print("(was not paused)")

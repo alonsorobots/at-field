@@ -934,7 +934,7 @@ class TestPatchRule:
                 "OPTIONS",
                 "/rules/ram-pressure",
                 headers={
-                    "Origin": "http://localhost:1420",
+                    "Origin": "http://tauri.localhost",
                     "Access-Control-Request-Method": "PATCH",
                     "Access-Control-Request-Headers": "Content-Type",
                 },
@@ -949,9 +949,128 @@ class TestPatchRule:
                 assert verb in allow, (
                     f"{verb} missing from Access-Control-Allow-Methods: {allow!r}"
                 )
-            assert resp.getheader("Access-Control-Allow-Origin") == "*"
+            # The tray's own origin is echoed back, never "*".
+            assert resp.getheader("Access-Control-Allow-Origin") == "http://tauri.localhost"
+            assert "Origin" in resp.getheader("Vary", "")
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Browser-borne requests. Loopback binding keeps REMOTE hosts out, but a web
+# page open in any browser on this machine can still send requests to
+# 127.0.0.1 -- and a text/plain POST is a "simple" request that the browser
+# sends WITHOUT a preflight, so CORS headers alone never stopped /pause.
+# Non-browser clients (atf CLI, Kiroshi, curl) send no Origin and must keep
+# working; the tray's WebView sends its own origin.
+# ---------------------------------------------------------------------------
+
+
+def _raw(host: str, port: int, verb: str, path: str, headers: dict,
+         body: bytes = b"") -> tuple[int, dict, dict]:
+    conn = http.client.HTTPConnection(host, port, timeout=2.0)
+    try:
+        hdrs = dict(headers)
+        if body:
+            hdrs["Content-Length"] = str(len(body))
+        conn.request(verb, path, body=body or None, headers=hdrs)
+        resp = conn.getresponse()
+        raw = resp.read()
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = {}
+        return resp.status, data, {k.lower(): v for k, v in resp.getheaders()}
+    finally:
+        conn.close()
+
+
+EVIL = "https://evil.example"
+
+
+class TestBrowserOrigins:
+    def test_foreign_page_cannot_pause_with_a_simple_request(self, server):
+        state, host, port = server
+        status, _, headers = _raw(
+            host, port, "POST", "/pause",
+            {"Origin": EVIL, "Content-Type": "text/plain"},
+            json.dumps({"duration_s": 3600}).encode(),
+        )
+        assert status == 403
+        assert "access-control-allow-origin" not in headers
+        # The thing being guarded: the watchdog is NOT paused.
+        assert not (state.state_dir() / "pause.sentinel").exists()
+        assert _get(host, port, "/health")[1]["paused"] is False
+
+    def test_foreign_page_cannot_patch_a_rule(self, server):
+        _, host, port = server
+        before = _get(host, port, "/rules")[1]
+        status, _, _ = _raw(
+            host, port, "PATCH", "/rules/ram-pressure",
+            {"Origin": EVIL, "Content-Type": "application/json"},
+            json.dumps({"threshold": 99.0}).encode(),
+        )
+        assert status == 403
+        assert _get(host, port, "/rules")[1] == before
+
+    def test_foreign_page_cannot_read_events(self, server):
+        _, host, port = server
+        status, _, headers = _raw(host, port, "GET", "/events", {"Origin": EVIL})
+        assert status == 403
+        assert "access-control-allow-origin" not in headers
+
+    def test_foreign_preflight_is_refused(self, server):
+        _, host, port = server
+        status, _, headers = _raw(host, port, "OPTIONS", "/pause", {
+            "Origin": EVIL,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "Content-Type",
+        })
+        assert status == 403
+        assert "access-control-allow-origin" not in headers
+
+    def test_null_origin_is_refused(self, server):
+        # Sandboxed iframes and file:// pages send "Origin: null".
+        _, host, port = server
+        status, _, _ = _raw(host, port, "GET", "/health", {"Origin": "null"})
+        assert status == 403
+
+    @pytest.mark.parametrize("origin", [
+        "http://tauri.localhost",      # Tauri 2 on Windows (WebView2)
+        "https://tauri.localhost",
+        "tauri://localhost",           # Tauri on macOS/Linux
+        "http://127.0.0.1:5174",       # vite dev server (at-field-tray/vite.config.ts)
+        "http://localhost:5174",
+    ])
+    def test_tray_origins_still_work(self, server, origin):
+        _, host, port = server
+        status, data, headers = _raw(host, port, "GET", "/health", {"Origin": origin})
+        assert status == 200 and "version" in data
+        assert headers["access-control-allow-origin"] == origin
+
+    def test_no_origin_clients_still_pause(self, server):
+        # atf CLI, Kiroshi and curl send no Origin header.
+        state, host, port = server
+        status, data = _post(host, port, "/pause", {"duration_s": 60})
+        assert status == 200 and data["paused"] is True
+        _post(host, port, "/unpause")
+
+
+class TestHostHeader:
+    """DNS rebinding: an attacker's domain re-resolves to 127.0.0.1, so the
+    page becomes same-origin and sends no foreign Origin on a GET. Its Host
+    header still names the attacker's domain."""
+
+    def test_rebound_dns_name_is_refused(self, server):
+        _, host, port = server
+        status, _, _ = _raw(host, port, "GET", "/events", {"Host": f"evil.example:{port}"})
+        assert status == 403
+
+    @pytest.mark.parametrize("h", ["127.0.0.1", "localhost", "LOCALHOST", "[::1]", "192.168.50.166"])
+    def test_ip_literals_and_localhost_are_accepted(self, server, h):
+        _, host, port = server
+        status, _, _ = _raw(host, port, "GET", "/health", {"Host": f"{h}:{port}"})
+        assert status == 200
 
 
 class TestApplyProfilePreset:

@@ -178,6 +178,29 @@ function Ensure-Nssm {
     return $nssm
 }
 
+function Protect-StateDir {
+    # The state dir inherits %ProgramData%'s ACL, which lets ordinary Users
+    # CREATE files and folders in it. That is enough to switch the watchdog
+    # off from an unelevated process (an empty pause.sentinel = indefinite
+    # pause) and to plant files next to nssm.exe, which runs as SYSTEM, or
+    # inside a deploy-X.Y.Z staging folder before an admin installs it.
+    # Only SYSTEM and Administrators may write; Users keep read (Kiroshi
+    # reads the sentinels, the tray opens the logs). Owners move to
+    # Administrators because an owner can rewrite its own file's ACL.
+    param([Parameter(Mandatory = $true)][string]$Dir)
+    $sys = '*S-1-5-18'; $adm = '*S-1-5-32-544'; $usr = '*S-1-5-32-545'
+    & icacls $Dir /setowner $adm /T /C /Q | Out-Null
+    & icacls $Dir /inheritance:r /grant:r "${sys}:(OI)(CI)F" "${adm}:(OI)(CI)F" "${usr}:(OI)(CI)RX" /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls could not set the ACL on $Dir (rc $LASTEXITCODE)" }
+    $open = (Get-Acl $Dir).Access | Where-Object {
+        $_.AccessControlType -eq 'Allow' -and
+        $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin 'S-1-5-18', 'S-1-5-32-544' -and
+        ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]'CreateFiles, AppendData, WriteData, Delete, ChangePermissions, TakeOwnership')
+    }
+    if ($open) { throw "state dir $Dir still grants write to: $($open.IdentityReference -join ', ')" }
+    Write-Host "State dir locked: only SYSTEM and Administrators can write."
+}
+
 function Drop-StarterConfig {
     param([string]$Dir)
     $dest = Join-Path $Dir 'config.toml'
@@ -232,6 +255,7 @@ if (-not (Test-Path $StateDir)) {
     New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
 }
 Write-Host "State dir: $StateDir"
+Protect-StateDir -Dir $StateDir
 
 Drop-StarterConfig -Dir $StateDir
 

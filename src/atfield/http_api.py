@@ -15,6 +15,12 @@ Choices
 * **127.0.0.1 by default.** No auth, but we bind loopback only. Operators
   who want remote access have to opt in via ``[api] bind`` and accept
   responsibility for fronting it with a reverse proxy.
+* **Browsers are not trusted clients.** Loopback keeps other machines out,
+  but a web page open on THIS machine can reach 127.0.0.1 too (a text/plain
+  POST needs no CORS preflight). So a request carrying an ``Origin`` other
+  than the tray's is refused before it does anything, and a ``Host`` that
+  names a DNS domain (DNS rebinding) is refused too. Non-browser clients
+  (atf CLI, Kiroshi, curl) send no Origin and are unaffected.
 * **A single :class:`ServiceState` object is the contract.** The tick loop
   in :mod:`atfield.service` calls ``state.update_*`` methods after each
   tick; the HTTP handlers read snapshots under a lock. The state object
@@ -30,6 +36,7 @@ but the tick loop converts to wall clock when pushing samples into state.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import math
@@ -1206,6 +1213,50 @@ def _tail_events(path: Path, *, since: float | None, limit: int) -> list[dict[st
 # ---------------------------------------------------------------------------
 
 
+# The tray's WebView origins (Tauri 2 on Windows serves the bundled frontend
+# from http://tauri.localhost; macOS/Linux use tauri://localhost) and its vite
+# dev server (at-field-tray/vite.config.ts pins 127.0.0.1:5174).
+TRAY_ORIGINS = frozenset({
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "tauri://localhost",
+    "http://127.0.0.1:5174",
+    "http://localhost:5174",
+})
+
+
+def origin_allowed(origin: str | None) -> bool:
+    """No Origin = not a browser (CLI, Kiroshi, curl): allowed. Otherwise only
+    the tray's own origins. ``"null"`` (sandboxed iframe, file://) is refused."""
+    return origin is None or origin in TRAY_ORIGINS
+
+
+def host_allowed(host: str | None) -> bool:
+    """Refuse a Host that names a DNS domain other than localhost.
+
+    A DNS-rebinding page re-resolves its own domain to 127.0.0.1 and is then
+    same-origin, so it sends no foreign Origin on a GET; its Host still names
+    that domain. IP literals stay allowed so an opted-in ``[api] bind`` on a
+    LAN address keeps working."""
+    if not host:
+        return True
+    name = host.strip()
+    if name.startswith("["):                       # [::1]:8765
+        name = name[1:name.find("]")] if "]" in name else name[1:]
+    elif name.count(":") == 1:                     # 127.0.0.1:8765 / localhost:8765
+        name = name.rsplit(":", 1)[0]
+    if name.lower() == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return True
+
+
+_refused_logged: set[str] = set()
+
+
 def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
     """Build a per-server handler class bound to one :class:`ServiceState`.
 
@@ -1221,22 +1272,40 @@ def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
             _log.debug("api: " + format, *args)
 
         # ------------------------------------------------------------------
-        # CORS
+        # Origin / Host gate, then CORS
         # ------------------------------------------------------------------
         #
-        # The Tauri tray app serves its frontend from `tauri://localhost`
-        # (production) or `http://localhost:5174` (vite dev). Both are
-        # cross-origin relative to `http://127.0.0.1:8765`, so the WebView
-        # blocks our fetch() unless the API explicitly allows it. Since
-        # the API only binds 127.0.0.1 (i.e. it's reachable from the same
-        # machine only), `Access-Control-Allow-Origin: *` is safe -- a
-        # remote attacker can't reach this socket regardless of CORS.
-        #
-        # We answer OPTIONS preflights for all methods so POSTs with a
-        # Content-Type: application/json body work too.
+        # The tray's frontend (TRAY_ORIGINS) is cross-origin relative to
+        # http://127.0.0.1:8765, so the WebView needs CORS headers naming
+        # it. Those headers used to be "*" on the theory that loopback-only
+        # meant same-machine-only -- but any web page in a browser on this
+        # machine IS on this machine. _admit() refuses foreign origins and
+        # rebound DNS names BEFORE any handler acts: CORS only governs
+        # whether a page may READ the response, and a text/plain POST
+        # /pause is sent without a preflight, so CORS never stopped it.
+
+        def _admit(self) -> bool:
+            origin = self.headers.get("Origin")
+            host = self.headers.get("Host")
+            if origin_allowed(origin) and host_allowed(host):
+                return True
+            what = f"origin={origin!r} host={host!r}"
+            if what not in _refused_logged:
+                _refused_logged.add(what)
+                _log.warning("api: refused browser request (%s %s): %s -- "
+                             "only the tray's origins may call this API",
+                             self.command, self.path, what)
+            self._send_error(HTTPStatus.FORBIDDEN,
+                             "refused: this API only answers the AT-Field tray "
+                             "and non-browser clients")
+            return False
 
         def _send_cors_headers(self) -> None:
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Vary", "Origin")
+            origin = self.headers.get("Origin")
+            if origin is None or not origin_allowed(origin):
+                return
+            self.send_header("Access-Control-Allow-Origin", origin)
             # PATCH is required for the slider/advanced-controls edits;
             # browsers send an OPTIONS preflight for it and refuse to
             # follow through if PATCH isn't in this allow list.
@@ -1248,6 +1317,8 @@ def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
             self.send_header("Access-Control-Max-Age", "86400")
 
         def do_OPTIONS(self) -> None:
+            if not self._admit():
+                return
             self.send_response(HTTPStatus.NO_CONTENT)
             self._send_cors_headers()
             self.end_headers()
@@ -1257,6 +1328,8 @@ def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
         # ------------------------------------------------------------------
 
         def do_PATCH(self) -> None:
+            if not self._admit():
+                return
             try:
                 parsed = urlsplit(self.path)
                 path = parsed.path.rstrip("/") or "/"
@@ -1312,6 +1385,8 @@ def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
         # ------------------------------------------------------------------
 
         def do_GET(self) -> None:
+            if not self._admit():
+                return
             try:
                 parsed = urlsplit(self.path)
                 path = parsed.path.rstrip("/") or "/"
@@ -1365,6 +1440,8 @@ def make_handler(state: ServiceState) -> type[BaseHTTPRequestHandler]:
         # ------------------------------------------------------------------
 
         def do_POST(self) -> None:
+            if not self._admit():
+                return
             try:
                 parsed = urlsplit(self.path)
                 path = parsed.path.rstrip("/") or "/"
