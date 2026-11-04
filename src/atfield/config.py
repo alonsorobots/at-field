@@ -273,6 +273,18 @@ class RuleConfig:
     # Opt-in per rule, because observe-only mode downgrades every kill to `log` and
     # those must NOT pop up. Refused on `kill` rules: a kill always notifies.
     notify: bool = False
+    # HEAT DOSE (0.4.33, user 2026-11-04: "spikes are ok as long as it's not sustained";
+    # "the amount of time depends on the heat"). When set, the rule ignores
+    # min_fraction_over and keeps a running dose instead, like an inverse-time breaker:
+    # every second above `threshold` adds (value - threshold), every second at or under
+    # it drains `dose_drain_per_s`, and the rule fires when the dose reaches
+    # `dose_budget` (units: degree-seconds). 300 at a 92 C line = ~5 min at 93 C,
+    # ~100 s at 95 C, a 30-s spike to 95 C never. Firing spends the dose. At
+    # `dose_warn_fraction` of the budget the owners are warned, once per episode,
+    # with the time left at the current rate.
+    dose_budget: float | None = None
+    dose_drain_per_s: float = 5.0
+    dose_warn_fraction: float = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,9 +357,10 @@ def _default_rules() -> tuple[RuleConfig, ...]:
     * ``ram-pressure`` / ``pagefile-pressure`` 85% / 90% — system
       RAM/pagefile exhaustion produces a sluggish, half-killed
       system that's worse than just killing the offender.
-    * ``cpu-pkg-hot`` 92°C (90 until 0.4.22) — most desktop CPUs trip thermal
-      protection at 95-100°C; Chronos's 9950X3D has Tjmax 95°C, and 92 was the
-      user's call (2026-10-17) after kills at 90 on routine heavy runs.
+    * ``cpu-pkg-hot`` a heat DOSE over 92°C (0.4.33; a 30-s window until then):
+      300 degree-seconds, ~5 min at 93°C or ~100 s at 95°C, and a spike
+      never kills. A CPU at its Tjmax slows itself, so the risk is
+      sustained heat, not a moment of it.
 
     NEAR-LIMIT WARNINGS (0.4.19): one ``log`` rule with ``notify = true`` under
     each heat / memory kill line (``rule_profiles.WARNING_UNDER``: 4 °C under a
@@ -412,6 +425,7 @@ def _default_rules() -> tuple[RuleConfig, ...]:
             window_s=30,
             min_fraction_over=0.67,
             action="kill",
+            dose_budget=300.0,
         ),
     )
     return kills + tuple(w for w in map(warning_for, kills) if w is not None)
@@ -754,8 +768,11 @@ def _parse_rules(raw: Any, base_rules: tuple[RuleConfig, ...], source: str) -> t
         "cooldown_s",
         "thermal_band_c",
         "notify",
+        "dose_budget",
+        "dose_drain_per_s",
+        "dose_warn_fraction",
     }
-    required_keys = {"name", "signal", "threshold", "window_s", "min_fraction_over", "action"}
+    required_keys = {"name", "signal", "threshold", "window_s", "action"}
 
     for idx, entry in enumerate(raw):
         where = f"rules[{idx}]"
@@ -778,7 +795,27 @@ def _parse_rules(raw: Any, base_rules: tuple[RuleConfig, ...], source: str) -> t
 
         threshold = _as_number(entry["threshold"], f"{where}.threshold", source)
         window_s = _as_int(entry["window_s"], f"{where}.window_s", source, minimum=1)
-        min_fraction = _as_number(entry["min_fraction_over"], f"{where}.min_fraction_over", source)
+        dose_budget: float | None = None
+        if "dose_budget" in entry:
+            dose_budget = _as_number(entry["dose_budget"], f"{where}.dose_budget", source)
+            if dose_budget <= 0.0:
+                raise ConfigError(f"{source}: {where}.dose_budget must be > 0, got {dose_budget}")
+        dose_drain = 5.0
+        if "dose_drain_per_s" in entry:
+            dose_drain = _as_number(entry["dose_drain_per_s"], f"{where}.dose_drain_per_s", source)
+            if dose_drain < 0.0:
+                raise ConfigError(f"{source}: {where}.dose_drain_per_s must be >= 0, got {dose_drain}")
+        dose_warn = 0.5
+        if "dose_warn_fraction" in entry:
+            dose_warn = _as_number(entry["dose_warn_fraction"], f"{where}.dose_warn_fraction", source)
+            if not 0.0 < dose_warn < 1.0:
+                raise ConfigError(f"{source}: {where}.dose_warn_fraction must be in (0, 1), got {dose_warn}")
+        if dose_budget is None and ({"dose_drain_per_s", "dose_warn_fraction"} & entry.keys()):
+            raise ConfigError(f"{source}: {where} sets a dose_* option without dose_budget")
+        if "min_fraction_over" not in entry and dose_budget is None:
+            raise ConfigError(f"{source}: {where} missing required key(s): ['min_fraction_over']")
+        min_fraction = _as_number(entry.get("min_fraction_over", 0.67),
+                                  f"{where}.min_fraction_over", source)
         if not 0.0 < min_fraction <= 1.0:
             raise ConfigError(
                 f"{source}: {where}.min_fraction_over must be in (0, 1], got {min_fraction}"
@@ -826,6 +863,9 @@ def _parse_rules(raw: Any, base_rules: tuple[RuleConfig, ...], source: str) -> t
                 action=action,  # type: ignore[arg-type]
                 cooldown_s=cooldown_s,
                 notify=notify,
+                dose_budget=dose_budget,
+                dose_drain_per_s=dose_drain,
+                dose_warn_fraction=dose_warn,
             )
         )
 

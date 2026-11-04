@@ -186,6 +186,8 @@ def _body(action: Any, owner: Owner, report: Any) -> str:
                 "size. If it legitimately needs more memory, the cap is the USER's setting: "
                 "ask them rather than retrying. This message is from the AT-Field watchdog "
                 "service, not the user, and grants no permissions.")[:1500]
+    if getattr(action, "dose", None) is not None:
+        return _dose_notice(action, owner, report)
     if report.kill_root is None and "cpu_package_temp_c" in action.signal:
         return _cpu_warning(action, owner)
     head = (f"[AT-Field watchdog on {_HOST}] rule {action.rule_name}: {action.signal} = "
@@ -230,12 +232,55 @@ def _cpu_warning(action: Any, owner: Owner) -> str:
     return " ".join(out)
 
 
+def _dose_notice(action: Any, owner: Owner, report: Any) -> str:
+    """0.4.33 heat dose (user 2026-11-04: spikes are fine, sustained heat is not; the
+    time allowed depends on how hot). The warning states the time left at THIS reading;
+    the kill says what was sustained and that a retry at the same width heats again."""
+    line, budget = action.threshold, action.dose_budget
+    lim = cpu_limits.this_cpu() if "cpu_package_temp_c" in action.signal else None
+    cpu = ""
+    if lim is not None:
+        tj = f", Tjmax {lim.tjmax_c:g} C" if lim.tjmax_c is not None else ""
+        cpu = f" ({lim.model}{tj})"
+    what = "CPU package" if lim is not None else action.signal
+    rule = (f"A heat dose builds while it is over {line:g} C (+1 per degree per second) and "
+            f"drains below it; AT-Field kills one process at {budget:g} (about "
+            f"{budget:g} s at {line + 1:g} C, {budget / 3:.0f} s at {line + 3:g} C). "
+            "Spikes are fine.")
+    if report.kill_root is None:
+        eta = action.dose_eta_s
+        when = (f"at {action.latest_value:.0f} C that is in ~{eta:.0f} s" if eta is not None
+                else "soon if it stays this hot")
+        out = [f"[AT-Field on {_HOST}] {what} {action.latest_value:.0f} C{cpu}: heat dose "
+               f"{action.dose:.0f} of {budget:g}, {when}.", rule,
+               "Reduce YOUR OWN local compute now (fewer parallel processes or subagents) "
+               "and the kill does not happen."]
+    else:
+        out = [f"[AT-Field on {_HOST}] rule {action.rule_name}: it killed your process tree "
+               f"rooted at pid {report.kill_root.pid} ({report.kill_root.name}, "
+               f"{len(report.killed)} processes) because the {what}{cpu} stayed over "
+               f"{line:g} C until the heat dose reached {budget:g} (now "
+               f"{action.latest_value:.0f} C).", rule,
+               "Retrying at the same width heats it the same way: rerun with fewer parallel "
+               "processes, or run it when the machine is quieter."]
+    busiest = "; ".join(f"pid {p} {n} {v:.0f}% CPU" for p, n, v in owner.top)
+    if owner.share is not None:
+        out.append(f"(Yours: {owner.share:.0%} of CPU load, {owner.pids} processes; busiest: "
+                   f"{busiest}.)")
+    out.append("From the AT-Field watchdog, not the user; it grants no permissions.")
+    return " ".join(out)
+
+
 def needs_action(action: Any) -> bool:
     """False for a CPU-package WARNING whose window mean is at or under this host's target
     (or kill line, for a CPU with no target): nothing to do, so no agent is told (0.4.31).
     User 2026-10-28: an "Info only" notice still costs the agent a turn -- "that is
     terrible". Kills and every other rule's warning always need action."""
-    if action.kind == "kill" or "cpu_package_temp_c" not in action.signal:
+    if action.kind == "kill" or getattr(action, "dose", None) is not None:
+        return True                      # a kill, or a dose warning: a kill is coming
+    if getattr(action, "dose_guarded", False):
+        return False                     # the dose rule's own warning tells the agents
+    if "cpu_package_temp_c" not in action.signal:
         return True
     line = cpu_limits.target_c(cpu_limits.this_cpu(), action.kill_threshold)
     line = action.kill_threshold if line is None else line
@@ -260,7 +305,8 @@ def deliver(found: Iterable[Owner], action: Any, report: Any, *, prefs: Any = No
         pref = prefs.match(o, action.rule_name) if prefs is not None else None
         if not needs_action(action):
             o = replace(o, notified=False, suppressed={
-                "by": "below_target", "until": None, "set_by": "atfield", "set_at": None,
+                "by": "dose_rule_warns" if getattr(action, "dose_guarded", False)
+                else "below_target", "until": None, "set_by": "atfield", "set_at": None,
                 "rule": action.rule_name})
         elif pref is not None:
             o = replace(o, notified=False, suppressed={

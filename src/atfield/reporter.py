@@ -288,6 +288,11 @@ def report_kill(state_dir: Path, *, action: Any, report: Any) -> None:
         # The reading that fired the rule; None when not finite -- a NaN would make
         # the body invalid JSON and the subscriber would refuse the whole event.
         "value": _finite_or_none(getattr(action, "latest_value", None)),
+        # Heat-dose rule (0.4.33): degree-seconds over the line, the budget at which it
+        # kills, and (warning only) the seconds left at the current reading. None otherwise.
+        "dose": _finite_or_none(getattr(action, "dose", None)),
+        "dose_budget": _finite_or_none(getattr(action, "dose_budget", None)),
+        "dose_eta_s": _finite_or_none(getattr(action, "dose_eta_s", None)),
         "kill_root": (
             {"pid": report.kill_root.pid, "name": report.kill_root.name}
             if report.kill_root

@@ -18,6 +18,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   so no limit reaches it. Applied on all three hosts 2026-11-01; on DEMETER a killed tray came back at
   the next tick (31 s) with one copy.
 
+## [0.4.33] — 2026-11-04 — the CPU heat rule is a dose: spikes never kill, sustained heat does
+
+### Changed
+
+- **`cpu-pkg-hot` keeps a heat DOSE instead of a 30-s window** (user 2026-11-04: "spikes are ok as long
+  as it's not sustained ... the amount of time depends on the heat"). The window rule killed a CPU at
+  92.5 C as fast as one at 96 C and forgot everything after 30 s. A rule with `dose_budget` now works like
+  an inverse-time breaker: each second over `threshold` adds (reading - threshold), each second at or
+  under it drains `dose_drain_per_s` (default 5), and the rule fires at the budget, spending the dose.
+  92 C line, 300 degree-seconds: ~5 min at 93 C, ~100 s at 95 C, ~75 s at 96 C; a 30-s spike to 95 C
+  never. A reading gap over 10 s (sleep, stalled loop) only drains. Replayed on 91 h of Chronos
+  forensics (10-31..11-04): the window rule fired once (11-04 01:37:36, the real kill: ~2 min at 91-93 C,
+  then 20 s at 94-96 C); the dose peaked at 68 of 300 on that event. DEMETER (90.9 h) never passed 80 C.
+  Window rules are unchanged; `min_fraction_over` is optional on a dose rule.
+
+### Added
+
+- **A dose warning with the time left.** At `dose_warn_fraction` (default 0.5) of the budget, once per
+  episode (re-armed when the dose drains to 0), the rule's owners are told the dose, the budget and the
+  seconds left at the current reading, and asked to cut their own local compute -- the owning Claude
+  session by pipe, a Kiroshi worker through the webhook (`dose`, `dose_budget`, `dose_eta_s`). The kill
+  notice says the heat was sustained and that a retry at the same width heats the same way. A window
+  warning on a signal whose kill rule is a dose rule (cpu-pkg-warm) stays a tray/log event and no longer
+  messages agents (`suppressed.by = "dose_rule_warns"`): one warning per episode, not two. `/rules` shows
+  `dose`, `dose_budget`, `dose_drain_per_s`; the audit log's actions carry the dose.
+
 ## [0.4.32] — 2026-11-01 — web pages can no longer pause the watchdog; the state dir is admin-write-only
 
 ### Security

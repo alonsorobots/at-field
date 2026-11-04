@@ -374,6 +374,10 @@ def _render_default_config(cfg: AtFieldConfig) -> str:
             lines.append(f"cooldown_s = {r.cooldown_s}")
         if r.notify:
             lines.append("notify = true")
+        if r.dose_budget is not None:
+            lines.extend([f"dose_budget = {_render_float(r.dose_budget)}",
+                          f"dose_drain_per_s = {_render_float(r.dose_drain_per_s)}",
+                          f"dose_warn_fraction = {r.dose_warn_fraction}"])
         lines.append("")
     return "\n".join(lines)
 

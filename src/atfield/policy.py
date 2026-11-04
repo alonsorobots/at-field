@@ -73,6 +73,10 @@ _CADENCE_EWMA_ALPHA: Final = 0.2
 # A gap longer than this is a pause/resume or a clock jump, not a tick rate.
 _MAX_PLAUSIBLE_TICK_GAP_NS: Final = 60 * _NS_PER_S
 
+# A dose rule's reading covers at most this long: past it the gap is a sleep or a stalled
+# loop, and the interval only drains (nothing measured it hot).
+_DOSE_MAX_GAP_S: Final = 10.0
+
 
 # ---------------------------------------------------------------------------
 # Action emitted by the engine
@@ -108,6 +112,14 @@ class Action:
     # The kill line on the same signal (lowest, if several), for a warning to state it.
     # Read from the LIVE rules: a config may set its warning at any margin (Chronos: 86/92).
     kill_threshold: float | None = None
+    # HEAT DOSE (0.4.33). Set on a dose rule's warning and kill: the dose (degree-seconds
+    # over `threshold`) when it fired, the budget, and the seconds left until the kill at
+    # the current reading (warning only). `dose_guarded` marks a WINDOW warning on a signal
+    # whose kill rule is a dose rule: the dose rule's own warning tells the agents.
+    dose: float | None = None
+    dose_budget: float | None = None
+    dose_eta_s: float | None = None
+    dose_guarded: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +144,11 @@ class EffectiveRule:
     # 0 -- a 0 sentinel is ambiguous with a genuine now_ns of 0.
     last_sample_at_ns: int | None = None
     starved: bool = False
+    # Heat dose state (dose rules only): degree-seconds over the line, when it was last
+    # advanced, and whether this episode's warning has gone out (re-armed at zero).
+    dose: float = 0.0
+    dose_at_ns: int | None = None
+    dose_warned: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,6 +288,7 @@ class _Stats:
     last_eval_fraction: float = 0.0
     last_eval_value: float | None = None
     last_eval_at_ns: int = 0
+    last_dose: float | None = None     # dose rules only
 
 
 def _mean(window: SlidingWindow) -> float | None:
@@ -351,6 +369,7 @@ class PolicyEngine:
                 "last_fraction": s.last_eval_fraction,
                 "last_value": s.last_eval_value,
                 "last_eval_at_ns": s.last_eval_at_ns,
+                "dose": s.last_dose,
             }
         return out
 
@@ -486,6 +505,12 @@ class PolicyEngine:
             # advanced after that arithmetic, not before it.
             self._track_starvation(rule, got_sample=sample is not None, now_ns=now_ns)
 
+            if rule.base_rule.dose_budget is not None:
+                fired = self._tick_dose(rule, sample, now_ns=now_ns, paused=paused)
+                if fired is not None:
+                    actions.append(fired)
+                continue
+
             need = self.min_samples_for(rule)
             self._check_rule_can_ever_fire(rule, need)
             result: EvalResult = evaluate_window(
@@ -530,13 +555,83 @@ class PolicyEngine:
                     notify=rule.base_rule.notify,
                     window_mean=_mean(rule.window),
                     window_s=rule.base_rule.window_s,
-                    kill_threshold=min((r.base_rule.threshold for r in self._effective
-                                        if r.signal == rule.signal
-                                        and r.base_rule.action == "kill"), default=None),
+                    kill_threshold=self._kill_line(rule.signal),
+                    dose_guarded=any(r.signal == rule.signal and r.base_rule.action == "kill"
+                                     and r.base_rule.dose_budget is not None
+                                     for r in self._effective),
                 )
             )
 
         return actions
+
+    def _kill_line(self, signal: str) -> float | None:
+        return min((r.base_rule.threshold for r in self._effective
+                    if r.signal == signal and r.base_rule.action == "kill"), default=None)
+
+    def _tick_dose(self, rule: EffectiveRule, sample: Sample | None, *, now_ns: int,
+                   paused: bool) -> Action | None:
+        """Advance a dose rule by one tick; return its warning or its action, or None.
+
+        Each reading over the line adds (value - line) x the seconds since the last
+        reading; one at or under it drains ``dose_drain_per_s`` x those seconds. A gap
+        longer than ``_DOSE_MAX_GAP_S`` (a sleep, a stalled loop) only drains: nothing
+        measured it hot. Firing spends the dose, so sustained heat kills one process per
+        budget, not one per tick.
+        """
+        r = rule.base_rule
+        budget = float(r.dose_budget or 0.0)
+        stats = self._stats[rule.name]
+        stats.last_eval_at_ns = now_ns
+        if sample is None:
+            stats.last_eval_verdict = "INSUFFICIENT" if rule.starved else stats.last_eval_verdict
+            return None
+        value = float(sample.value)
+        if not math.isfinite(value):
+            return None
+        dt = 0.0 if rule.dose_at_ns is None else max(0.0, (now_ns - rule.dose_at_ns) / _NS_PER_S)
+        rule.dose_at_ns = now_ns
+        if dt > _DOSE_MAX_GAP_S or value <= r.threshold:
+            rule.dose = max(0.0, rule.dose - r.dose_drain_per_s * dt)
+        else:
+            rule.dose += (value - r.threshold) * dt
+        if rule.dose == 0.0:
+            rule.dose_warned = False
+        stats.last_eval_value = value
+        stats.last_eval_fraction = min(1.0, rule.dose / budget) if budget else 0.0
+        stats.last_eval_verdict = ("TRIGGER" if rule.dose >= budget
+                                   else "DOSING" if rule.dose > 0.0 else "BELOW")
+        stats.last_dose = rule.dose
+
+        def action(kind: str, notify: bool, eta: float | None, cooldown_s: int) -> Action:
+            return Action(
+                kind=kind, rule_name=rule.name, base_rule_name=r.name, signal=rule.signal,
+                threshold=r.threshold, fraction_over=stats.last_eval_fraction,
+                samples_considered=len(rule.window), latest_value=value,
+                triggered_at_ns=now_ns, cooldown_seconds=cooldown_s, notify=notify,
+                window_mean=_mean(rule.window), window_s=r.window_s,
+                kill_threshold=self._kill_line(rule.signal), dose=rule.dose,
+                dose_budget=budget, dose_eta_s=eta)
+
+        if rule.dose >= budget:
+            if now_ns < rule.cooldown_until_ns:
+                return None
+            if paused:
+                _log.info("rule %s would fire but engine is paused", rule.name)
+                return None
+            cooldown_s = self._cfg.cooldown_for(r)
+            rule.cooldown_until_ns = now_ns + cooldown_s * _NS_PER_S
+            stats.triggers += 1
+            out = action(r.action, False, None, cooldown_s)
+            rule.dose, rule.dose_warned = 0.0, False
+            return out
+        if (not rule.dose_warned and r.action == "kill"
+                and rule.dose >= r.dose_warn_fraction * budget and value > r.threshold):
+            rule.dose_warned = True
+            if paused:
+                return None
+            eta = (budget - rule.dose) / (value - r.threshold)
+            return action("log", True, eta, 0)
+        return None
 
     # -- Signal starvation -------------------------------------------------
 

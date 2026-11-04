@@ -1123,6 +1123,11 @@ def _serialize_rule(rule: EffectiveRule, stats: dict[str, Any], now_ns: int,
         "min_samples": rule.min_samples,
         "verdict": stats.get("last_verdict", "INSUFFICIENT"),
         "fraction_over": stats.get("last_fraction", 0.0),
+        # Heat-dose rule (0.4.33): fraction_over is then dose / dose_budget.
+        "dose": stats.get("dose"),
+        "dose_budget": rule.base_rule.dose_budget,
+        "dose_drain_per_s": (rule.base_rule.dose_drain_per_s
+                             if rule.base_rule.dose_budget is not None else None),
         "latest_value": stats.get("last_value"),
         "triggers": stats.get("triggers", 0),
         "cooldown_remaining_s": cooldown_remaining_s,

@@ -143,6 +143,9 @@ class AuditWriter:
                 "samples_considered": action.samples_considered,
                 "latest_value": action.latest_value,
                 "cooldown_seconds": action.cooldown_seconds,
+                "dose": action.dose,
+                "dose_budget": action.dose_budget,
+                "dose_eta_s": action.dose_eta_s,
             }
         )
 
