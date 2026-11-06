@@ -121,12 +121,12 @@ RULE_PROFILES: Final[dict[str, RuleProfile]] = {
 #: NEAR-LIMIT WARNINGS (0.4.19): kill rule -> (its warning rule, margin under it).
 #: ONE table: the default config, scripts/add_warning_rules.py and the slider
 #: profiles below all read it, so a preset that moves a kill line moves its
-#: warning with it and the warning can never end up above the kill.
+#: warning with it and the warning can never end up above the kill. cpu-pkg-hot has none
+#: (0.4.34, user 2026-11-05): its dose warning and kill are the only CPU heat notices.
 WARNING_UNDER: Final[dict[str, tuple[str, float]]] = {
     "vram-junction-hot": ("vram-junction-warm", 4.0),
     "gpu-hotspot-hot": ("gpu-hotspot-warm", 4.0),
     "gpu-core-hot": ("gpu-core-warm", 4.0),
-    "cpu-pkg-hot": ("cpu-pkg-warm", 4.0),
     "ram-pressure": ("ram-high", 5.0),
     "pagefile-pressure": ("pagefile-high", 5.0),
 }

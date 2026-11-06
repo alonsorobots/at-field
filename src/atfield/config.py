@@ -363,7 +363,8 @@ def _default_rules() -> tuple[RuleConfig, ...]:
       sustained heat, not a moment of it.
 
     NEAR-LIMIT WARNINGS (0.4.19): one ``log`` rule with ``notify = true`` under
-    each heat / memory kill line (``rule_profiles.WARNING_UNDER``: 4 °C under a
+    each heat / memory kill line but the CPU's, whose dose rule warns for itself
+    (``rule_profiles.WARNING_UNDER``: 4 °C under a
     temperature, 5 points under a percentage, same window) so the tray and
     subscribers hear "getting hot" while there is still time to act. Cooldown 600 s: one warning per rule per
     10 minutes at most. 2026-10-03: AT-Field killed four processes on Chronos at

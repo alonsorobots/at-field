@@ -405,7 +405,7 @@ class TestDefaultConfigIntegration:
         # vram-junction-hot: both come from LHM, which is not running here.
         # ...and so do the 0.4.19 warnings that sit under them.
         assert dis_names == {"vram-junction-hot", "gpu-hotspot-hot", "cpu-pkg-hot",
-                             "vram-junction-warm", "gpu-hotspot-warm", "cpu-pkg-warm"}
+                             "vram-junction-warm", "gpu-hotspot-warm"}
         assert "gpu-core-hot[gpu.0.core_temp_c]" in eff_names
         assert "gpu-core-hot[gpu.1.core_temp_c]" in eff_names
         assert "ram-pressure" in eff_names

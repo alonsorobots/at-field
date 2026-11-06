@@ -64,7 +64,6 @@ class TestDefaults:
             "gpu-core-warm",
             "ram-high",
             "pagefile-high",
-            "cpu-pkg-warm",
         }
         assert {r.name for r in cfg.rules if r.action == "kill"} == names - {
             r.name for r in cfg.rules if r.notify}
@@ -355,9 +354,10 @@ class TestApiValidation:
             default_config().api.port = 9999  # type: ignore[misc]
 
 
-def test_the_cpu_warning_follows_the_92_c_kill_line():
+def test_the_92_c_cpu_line_has_no_warning_under_it():
+    # User 2026-11-05: only 92 C and up. The dose rule's own warning and kill still notify.
     rules = {r.name: r for r in default_config().rules}
-    assert (rules["cpu-pkg-hot"].threshold, rules["cpu-pkg-warm"].threshold) == (92.0, 88.0)
+    assert rules["cpu-pkg-hot"].threshold == 92.0 and "cpu-pkg-warm" not in rules
     from atfield.rule_profiles import RULE_PROFILES as PROFILES
     p = PROFILES["cpu-pkg-hot"]
     assert p.aggressive_max < p.normal_value == 92.0 < p.relaxed_min

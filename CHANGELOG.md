@@ -7,6 +7,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.34] — 2026-11-05 — no CPU heat pop-up below the kill line
+
+### Removed
+
+- **`cpu-pkg-warm` is off by default** (user 2026-11-05: "I only want the 92 C and higher notifications").
+  It popped "Getting hot" at 86-88 C, a range the CPU's average target allows, and already messaged no agent. CPU heat
+  notices are now the `cpu-pkg-hot` dose warning (half the budget) and its kill, on signals over the line.
+  It is removed, not `notify = false`: a silent log rule lands on `last_action` and can erase the kill pop-up
+  (`record_on_health`). To opt back in, add the `[[rules]]` block with `notify = true` to a host's config.
+  Removed from all three hosts' configs. GPU, RAM and pagefile warnings are unchanged.
+
 ### Fixed
 
 - **The tray no longer dies 72 hours after a deploy.** Deploys started it from a scheduled task whose
