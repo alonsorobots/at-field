@@ -7,6 +7,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Changed (config on Chronos and DEMETER, no new build)
+
+- **GPU heat rules use the CPU's method, per card** (user 2026-11-06). `vram-junction-hot`: heat dose over
+  90 C, budget 300. `gpu-core-hot`: heat dose over 87 C, 3 C under NVIDIA's published 90 C maximum for the
+  RTX 5090, as the CPU's 92 is under its 95 (was 88 C on Chronos, 83 C on DEMETER, both windows). Each card
+  keeps its own dose. `vram-junction-warm` and `gpu-core-warm` are removed on these two hosts: the dose rule
+  warns at half its budget with the time left. Replay of 60-74 h of forensics: the old window rule fired once
+  (Chronos GPU 1, 92 C, ac_flow at about 470 W); the dose peaked at 31 of 300. Aurora's GPU rules are unchanged
+  (docs/AURORA_THERMALS.md); the 2070 SUPER's 88 C maximum could not be confirmed on NVIDIA's own page.
+- Defaults are unchanged. Corrected the unsourced GDDR7 "95 C continuous, 105 C shutdown" claim and the stale
+  100 C note.
+
 ## [0.4.34] — 2026-11-05 — no CPU heat pop-up below the kill line
 
 ### Removed

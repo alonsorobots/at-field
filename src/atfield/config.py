@@ -327,13 +327,12 @@ def _default_rules() -> tuple[RuleConfig, ...]:
 
     Threshold rationale (per docs/tuning.md):
 
-    * ``vram-junction-hot`` 90°C — RTX 4090/5090 GDDR7 spec is 95°C
-      continuous, 105°C thermal-shutdown. 90°C with a 20s sustained
-      window kills a job ~5°C before the card starts throttling itself
-      and well before the 105°C trip. Sourced from NVIDIA Studio
-      driver telemetry + community datapoints; conservative for
-      bench rigs, can be raised via the slider for users who run
-      undervolted cards.
+    * ``vram-junction-hot`` 90°C — no maker publishes a limit for the GDDR7
+      on these cards (searched 2026-11-06); Micron rates older GDDR6/6X at
+      95°C measured on the case, which is not this junction sensor, and
+      user reports put the ceiling in the 90s. Treat 90°C as a margin chosen
+      without a spec. Chronos and DEMETER run it as a heat dose in their
+      configs; the default stays a 20-s window.
     * ``vram-pressure`` 92% — CUDA OOM is the single most common
       training crash. allocator fragmentation typically triggers
       OOM around 93-95% of the visible VRAM. 92% with a 30s window

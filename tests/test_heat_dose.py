@@ -218,3 +218,34 @@ def test_the_webhook_carries_the_dose(monkeypatch, tmp_path):
     assert payload["dose_eta_s"] == pytest.approx(50.0)
     assert payload["actionable"] is True and payload["notify"] is True
     assert all(math.isfinite(v) for v in (payload["dose"], payload["dose_eta_s"]))
+
+
+# -- GPU rules on the 5090 hosts (user 2026-11-06: the same method per card) ------------------
+
+def test_each_card_keeps_its_own_dose_and_is_named_in_the_kill():
+    rule = {"name": "vram-junction-hot", "signal": "gpu.*.mem_junction_temp_c", "threshold": 90.0,
+            "window_s": 20, "action": "kill", "dose_budget": 300.0}
+    sig = ["gpu.0.mem_junction_temp_c", "gpu.1.mem_junction_temp_c"]
+    eng = PolicyEngine(_cfg(rule), available_signals=set(sig))
+    fired = []
+    for t in range(200):                   # card 1 at 93 C = 3 per s, card 0 at 89 C never over
+        fired += [(t, a) for a in eng.tick({sig[0]: Sample(89.0, t * NS, "test", "celsius"),
+                                            sig[1]: Sample(93.0, t * NS, "test", "celsius")},
+                                           now_ns=t * NS)]
+    kills_ = [(t, a) for t, a in fired if a.kind == "kill"]
+    assert [a.signal for _, a in kills_] == [sig[1]]
+    assert kills_[0][0] == pytest.approx(100, abs=2)
+
+
+def test_the_oct_and_nov_memory_kills_are_under_the_gpu_budget():
+    # What fired the old window rule on Chronos GPU 1 (Founders Edition): about 3 min at 470 W,
+    # 79 to 92 C. Replay of the forensics peaked at 31 of 300 at a 90 C line.
+    rule = {"name": "vram-junction-hot", "signal": "gpu.1.mem_junction_temp_c", "threshold": 90.0,
+            "window_s": 20, "action": "kill", "dose_budget": 300.0}
+    temps = [79 + 13 * i / 150 for i in range(150)] + [92.0] * 20 + [85.0] * 60
+    sig = rule["signal"]
+    eng = PolicyEngine(_cfg(rule), available_signals={sig})
+    out = []
+    for t, v in enumerate(temps):
+        out += eng.tick({sig: Sample(v, t * NS, "test", "celsius")}, now_ns=t * NS)
+    assert not [a for a in out if a.kind == "kill"]

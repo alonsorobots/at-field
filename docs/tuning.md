@@ -206,3 +206,19 @@ its restarts come up and immediately re-trip the rule.
 If you have a system that legitimately respawns workloads on kill
 (e.g. Ray with auto-restart), bump cooldown up to 300 s or more so
 the respawn cycle has time to either succeed or fail cleanly.
+
+## RTX 5090 cards in this fleet (measured 2026-11-06)
+
+Same chip, different coolers. From `forensics.jsonl` at 1 Hz (60-74 h per host): settled memory temperature is
+about `a + b x power`.
+
+| Host, nvidia-smi index | Card (subsystem ID) | a + b x W | Settles at 85 C |
+|---|---|---|---|
+| Chronos 0 | MSI 1462:5300, most likely SUPRIM LIQUID | 31.9 + 0.101 W | about 525 W |
+| Chronos 1 | NVIDIA Founders Edition 10de:2057 | 40.3 + 0.124 W (76 loaded minutes, longest run 7: weak) | about 360 W |
+| DEMETER 0 | Gigabyte 1458:4170, exact model unconfirmed | 49.6 + 0.093 W | about 380 W |
+| DEMETER 1 | MSI 1462:5300 | 33.7 + 0.088 W | about 585 W |
+
+A power limit cannot ease these cards under compute loads of about 350 W (minimum 400 W). `nvidia-smi -i N -lgc 0,2500`
+can, and `-rgc` undoes it. 85 C settled is a judgment, not a spec. These curves say how hot a card gets, not how
+long it lasts.

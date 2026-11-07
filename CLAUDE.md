@@ -44,8 +44,11 @@ the guard armed and raise the question.**
 - Temperature tracks **power**, not utilization %. A 9950X3D pulls 80–126 W at
   11–27% "usage". Diagnosing cooling from utilization produced a wrong
   "your pump is failing, service the cooler" recommendation.
-- Hosts do **not** share thresholds. Chronos `gpu-core-hot` is 88 °C, DEMETER
-  and Aurora 83 °C; Chronos `vram-junction-hot` is 100 °C, DEMETER 90 °C.
+- Hosts do **not** all share thresholds. Chronos and DEMETER (RTX 5090): `gpu-core-hot` a
+  heat dose over 87 °C (NVIDIA's published maximum is 90 °C), `vram-junction-hot` a heat dose
+  over 90 °C (no maker publishes a limit for this memory), no GPU warm rules (user 2026-11-06).
+  Aurora: window rules, `gpu-core-hot` 83 °C. Each 5090 model heats differently; see
+  `docs/tuning.md`.
 - `vram-junction-hot` showing **DISABLED on Aurora is correct** (Turing has no
   such sensor). Do not "fix" it.
 
