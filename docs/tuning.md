@@ -215,7 +215,7 @@ about `a + b x power`.
 | Host, nvidia-smi index | Card (subsystem ID) | a + b x W | Settles at 85 C |
 |---|---|---|---|
 | Chronos 0 | MSI 1462:5300, most likely SUPRIM LIQUID | 31.9 + 0.101 W | about 525 W |
-| Chronos 1 | NVIDIA Founders Edition 10de:2057 | 40.3 + 0.124 W (76 loaded minutes, longest run 7: weak) | about 360 W |
+| Chronos 1 | NVIDIA Founders Edition 10de:2057 | the fit (40.3 + 0.124 W, 76 loaded minutes) was wrong; measured 2026-11-07: 86 C at about 310 W, holds 90 C at about 410 W, fan 78-84 %, no thermal slowdown | about 280 W |
 | DEMETER 0 | Gigabyte 1458:4170, exact model unconfirmed | 49.6 + 0.093 W | about 380 W |
 | DEMETER 1 | MSI 1462:5300 | 33.7 + 0.088 W | about 585 W |
 
